@@ -4,8 +4,8 @@ sys.path.append(str(Path().resolve().parent / 'src'))
 
 import argparse
 
-from src.config import read_model_config
-from src.trainer import Trainer
+from config import read_model_config
+from trainer import Trainer
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()

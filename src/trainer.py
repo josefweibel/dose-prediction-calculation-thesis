@@ -7,9 +7,9 @@ from tqdm import tqdm
 import copy
 import wandb
 
-from src.data import GDPHMMSlicesDataset
-from src.models import MambaUnet
-from src.evaluator import Evaluator
+from data import GDPHMMSlicesDataset
+from models import MambaUnet
+from evaluator import Evaluator
 
 CHECKPOINTS_PATH = Path(__file__).parents[2] / 'checkpoints'
 

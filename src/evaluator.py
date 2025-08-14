@@ -2,8 +2,8 @@ from time import time
 import torch
 from torchmetrics import MeanSquaredError, PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
-from src.metrics import DVHScore, DoseScore, HomogeneityIndex
-from src.sampler import GaussianDiffusionSampler
+from metrics import DVHScore, DoseScore, HomogeneityIndex
+from sampler import GaussianDiffusionSampler
 
 class Evaluator:
   def __init__(self, dataloader, config, device):

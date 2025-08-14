@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from src.models_mamba import VisionMamba
+from models_mamba import VisionMamba
 
 
 class TimeEmbedding(nn.Module):
