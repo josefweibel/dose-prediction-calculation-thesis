@@ -1,0 +1,192 @@
+from pathlib import Path
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import copy
+import wandb
+
+from src.data import GDPHMMSlicesDataset
+from src.models import MambaUnet
+from src.evaluator import Evaluator
+
+CHECKPOINTS_PATH = Path(__file__).parents[2] / 'checkpoints'
+
+
+def extract(v, t, x_shape):
+  """
+  Extract some coefficients at specified timesteps, then reshape to
+  [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
+  """
+  out = torch.gather(v, index=t, dim=0).float()
+  return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
+
+
+class DiffusionModelTrainerModule(nn.Module):
+  def __init__(self, denoising_model, beta_1, beta_T, T):
+    super().__init__()
+
+    self.model = denoising_model
+    self.T = T
+
+    self.register_buffer('betas', torch.linspace(beta_1, beta_T, T).double())
+    alphas = 1. - self.betas
+    alphas_bar = torch.cumprod(alphas, dim=0)
+
+    self.register_buffer('sqrt_alphas_bar', torch.sqrt(alphas_bar))
+    self.register_buffer('sqrt_one_minus_alphas_bar', torch.sqrt(1. - alphas_bar))
+
+  def forward(self, x_0, condition):
+    t = torch.randint(self.T, size=(x_0.shape[0], ), device=x_0.device)
+    noise = torch.randn_like(x_0)
+    x_t = (
+      extract(self.sqrt_alphas_bar, t, x_0.shape) * x_0 +
+      extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape) * noise
+    )
+
+    x_reconstructed = self.model(x_t, condition, t)
+    return F.mse_loss(x_reconstructed, noise, reduction='none').mean()
+
+class Trainer:
+  def __init__(self, model_config, n_epochs=None):
+    self.name = model_config["name"]
+    self.config = model_config
+    self.device = self.__detect_device()
+
+    train_dataset = GDPHMMSlicesDataset(
+      split='train',
+      img_size=self.config['img_size'],
+      limit=self.config['limit'],
+    )
+
+    if self.config['val_on_train']:
+      val_dataset = train_dataset
+    else:
+      val_dataset = GDPHMMSlicesDataset(
+        split='val',
+        img_size=self.config['img_size'],
+        structures=train_dataset.structures,
+        limit=self.config['limit'],
+      )
+
+    self.train_dataloader = DataLoader(
+      train_dataset,
+      batch_size=self.config['batch_size'],
+      shuffle=True,
+      num_workers=self.config['num_workers'],
+      pin_memory=True
+    )
+    self.val_dataloader = DataLoader(
+      val_dataset,
+      batch_size=self.config['batch_size'],
+      shuffle=False,
+      num_workers=self.config['num_workers'],
+      pin_memory=True
+    )
+
+    self.net_model = MambaUnet(in_struc_channels=len(train_dataset.structures))
+    self.ema_model = copy.deepcopy(self.net_model)
+
+    self.model = DiffusionModelTrainerModule(
+      denoising_model=self.net_model,
+      beta_1=self.config['beta_1'],
+      beta_T=self.config['beta_T'],
+      T=self.config['T']
+    ).to(self.device)
+
+    self.optim = torch.optim.Adam(self.net_model.parameters(), lr=self.config['lr'])
+
+    self.epoch = -1
+
+    checkpoint = self.__load_last_checkpoint()
+    if checkpoint:
+      self.epoch = checkpoint['epoch']
+      self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
+      self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+      self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    if n_epochs is None:
+      self.to_epoch = self.config['epochs']
+    else:
+      self.to_epoch = self.epoch + n_epochs + 1
+
+    self.wandb_run = self.__setup_wandb_run(checkpoint)
+
+    self.evaluator = Evaluator(self.val_dataloader, self.device)
+
+  def train(self):
+    for epoch in (pbar := tqdm(range(self.epoch + 1, self.to_epoch), desc='Training')):
+      self.net_model.train()
+
+      for structure, target, _ in self.train_dataloader:
+        self.optim.zero_grad()
+        structure = structure.to(self.device)
+        target = target.to(self.device)
+
+        loss = self.model(target, structure)
+        loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(self.net_model.parameters(), self.config['grad_clip'])
+        self.optim.step()
+        self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
+
+        pbar.set_postfix(loss=loss.item())
+        self.wandb_run.log({'train/loss': loss.item(), 'epoch': epoch})
+
+      self.__save_checkpoint()
+
+      if epoch % self.config['eval_interval'] == 0:
+        metrics = self.evaluator.evaluate(self.ema_model)
+        metrics = {f'eval/{key}': value for key, value in metrics.items()}
+        self.wandb_run.log({**metrics, 'epoch': epoch})
+
+  def __load_last_checkpoint(self):
+    checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
+    if not checkpoint_files:
+      return None
+
+    return torch.load(max(checkpoint_files, key=lambda f: f.stat().st_mtime))
+
+  def __save_checkpoint(self):
+    checkpoint_path = CHECKPOINTS_PATH / self.name / f'{self.epoch}.pt'
+    torch.save({
+      'epoch': self.epoch,
+      'net_model_state_dict': self.net_model.state_dict(),
+      'ema_model_state_dict': self.ema_model.state_dict(),
+      'optimizer_state_dict': self.optim.state_dict(),
+    }, checkpoint_path)
+
+  def __update_ema_weigths(source, target, decay):
+    source_dict = source.state_dict()
+    target_dict = target.state_dict()
+    for key in source_dict.keys():
+      target_dict[key].data.copy_(
+        target_dict[key].data * decay + source_dict[key].data * (1 - decay)
+      )
+
+  def __detect_device(self):
+    if torch.cuda.is_available():
+      return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+      return torch.device("mps")
+    else:
+      return torch.device("cpu")
+
+  def __setup_wandb_run(self, checkpoint):
+    if checkpoint:
+      return wandb.init(
+        project='dose-prediction-thesis',
+        name=self.name,
+        id=self.name,
+        config=self.config,
+        resume='must',
+      )
+    else:
+      return wandb.init(
+        project='dose-prediction-thesis',
+        name=self.name,
+        id=self.name,
+        config=self.config,
+      )
+

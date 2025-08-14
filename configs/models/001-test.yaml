@@ -1,0 +1,19 @@
+data:
+  img_size: [176, 160]
+  limit: 2
+  val_on_train: true
+
+batch_size: 16
+lr: 1e-2
+epochs: 1500
+
+num_workers: 4
+
+beta_1: 1e-4
+beta_T: 0.02
+T: 1000
+
+grad_clip: 1.0
+ema_decay: 0.9999
+
+eval_interval: 100
