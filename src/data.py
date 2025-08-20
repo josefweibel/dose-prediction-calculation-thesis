@@ -8,38 +8,55 @@ from tqdm import tqdm
 
 GDPHMM_DATA_PATH = Path(__file__).parents[1] / 'data' / 'gdphmm-hn'
 
+GDPHMM_IMG_MIN = -1024
+GDPHMM_IMG_MAX = 3071
+
+GDPHMM_DOSE_MIN = 0
+GDPHMM_DOSE_MAX = 122
+
+GDPHMM_OAR = [
+  'Cochlea_L', 'Cochlea_R', 'Eyes', 'Lens_L', 'Lens_R', 'OpticNerve_L', 'OpticNerve_R',
+  'Chiasm', 'LacrimalGlands', 'BrachialPlexus', 'Brain', 'BrainStem_03', 'Esophagus',
+  'Lips', 'Lungs', 'Trachea', 'Posterior_Neck', 'Shoulders', 'Larynx-PTV', 'Mandible-PTV',
+  'OCavity-PTV', 'ParotidCon-PTV', 'ParotidIps-PTV', 'Parotids-PTV', 'PharConst-PTV',
+  'Submand-PTV', 'SubmandL-PTV', 'SubmandR-PTV', 'Thyroid-PTV', 'SpinalCord_05',
+  'Pituitary', 'OralCavity', 'Submandibular', # additional
+]
+
+GDPHMM_PTV = {
+  70: 'PTV70',
+  63: 'PTV63',
+  56: 'PTV56'
+}
+
+
 class GDPHMMSlicesDataset(Dataset):
-  def __init__(self, split, img_size, structures=None, limit=None):
+  def __init__(self, split, img_size, limit=None):
     self.split = split
     self.img_size = img_size
 
-    self.img_transforms = T.Compose([
+    self.ct_transforms = T.Compose([
       T.ToTensor(),
-      T.Lambda(lambda x: (x - torch.min(x)) / (torch.max(x) - torch.min(x))),
+      T.Lambda(lambda x: torch.clip(x, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX)),
+      T.Lambda(lambda x: (x - GDPHMM_IMG_MIN) / (GDPHMM_IMG_MAX - GDPHMM_IMG_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
-    self.mask_transforms = T.Compose([
+    self.oar_transforms = T.Compose([
       T.ToTensor(),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
+    self.ptv_transforms = self.oar_transforms
 
-    self.target_transforms = T.Compose([
+    self.dose_transforms = T.Compose([
       T.ToTensor(),
-      T.Lambda(lambda x: (x - torch.min(x)) / (torch.max(x) - torch.min(x))),
+      T.Lambda(lambda x: (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
     data = self.__load_data(split, limit)
     data = self.__transform(data)
-
-    self.keys = sorted(data.keys())
-
-    self.structures = structures
-    if structures is None:
-      self.structures = ['img'] + sorted(np.unique([s['masks'] for s in data.values()]))
-
-    self.data = self.__prepare_structure(data, self.structures)
+    self.data = self.__prepare_structure(data)
 
   def __len__(self):
     return len(self.keys)
@@ -58,17 +75,18 @@ class GDPHMMSlicesDataset(Dataset):
       files = sorted(files)[:limit]
 
     for file in tqdm(files, desc=f'Loading Dataset {split}'):
-      volume = np.load(file, allow_pickle=True)['arr_0'].item()
+      vol = np.load(file, allow_pickle=True)['arr_0'].item()
+      dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
 
-      for idx in range(volume['dose'].shape[2]):
-        print('target', volume['dose'][:, :, idx])
+      oar_vol = np.stack([vol[name] if name in vol else np.zeros_like(vol['dose']) for name in GDPHMM_OAR], axis=0)
+      ptv_vol = np.max([vol[name] * dose / 100 for name, dose in GDPHMM_PTV.items()])
+
+      for idx in range(vol['dose'].shape[2]):
         data[f'{file.stem}_{idx}'] = {
-          'target': volume['dose'][:, :, idx],
-          'masks': volume['all_mask'],
-          'img': volume['img'][:, :, idx],
-          'structures': {
-            k: volume[k][:, :, idx] for k in volume['all_mask'] if k in volume
-          },
+          'dose': dose_vol[:, :, idx],
+          'ptv': ptv_vol[:, :, idx],
+          'oar': oar_vol[:, :, :, idx],
+          'ct': vol['img'][:, :, idx],
           'info': {
             'file_path': str(file),
             'file_name': file.name,
@@ -77,16 +95,16 @@ class GDPHMMSlicesDataset(Dataset):
           }
         }
 
+        print('Shapes', data[f'{file.stem}_{idx}']['dose'].shape, data[f'{file.stem}_{idx}']['ptv'].shape, data[f'{file.stem}_{idx}']['oar'].shape, data[f'{file.stem}_{idx}']['ct'].shape)
+
     return data
 
-  def __prepare_structure(self, data, structures):
-    assert structures[0] == 'img', "First structure must be 'img'"
-
+  def __prepare_structure(self, data):
     return {
       k: {
         'target': v['target'],
         'info': v['info'],
-        'structure': np.stack([v['img'], *[v['structures'].get(s, np.zeros_like(v['target'])) for s in structures[1:]]], axis=0)
+        'structure': np.stack([v['ct'].unsqueeze(0), v['ptv'].unsqueeze(0), v['oar']], axis=0)
       }
       for k, v in data.items()
     }
@@ -94,10 +112,10 @@ class GDPHMMSlicesDataset(Dataset):
   def __transform(self, data):
     return {
       k: {
-        'target': self.target_transforms(v['target']),
-        'masks': v['masks'],
-        'img': self.img_transforms(v['img']),
-        'structure': {s: self.mask_transforms(v['structure'][s]) for s in v['structure'].keys()},
+        'dose': self.dose_transforms(v['dose']),
+        'ptv': self.ptv_transforms(v['ptv']),
+        'oar': self.oar_transforms(v['oar']),
+        'ct': self.ct_transforms(v['ct']),
         'info': v['info'],
       }
       for k, v in data.items()
@@ -115,9 +133,9 @@ class PadToFixedSize:
         padding_mode (str): 'constant', 'edge', 'reflect', or 'symmetric'. Default 'constant'.
     """
     if isinstance(target_size, int):
-        self.target_size = (target_size, target_size)
+      self.target_size = (target_size, target_size)
     else:
-        self.target_size = target_size
+      self.target_size = target_size
     self.fill = fill
     self.padding_mode = padding_mode
 

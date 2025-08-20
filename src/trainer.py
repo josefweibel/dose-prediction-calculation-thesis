@@ -67,7 +67,6 @@ class Trainer:
       val_dataset = GDPHMMSlicesDataset(
         split='val',
         img_size=self.config['data']['img_size'],
-        structures=train_dataset.structures,
         limit=self.config['data']['limit'],
       )
     print('Validation dataset size', len(val_dataset))
