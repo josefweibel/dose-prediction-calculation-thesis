@@ -4,8 +4,9 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms as T
 from PIL import Image
+from tqdm import tqdm
 
-GDPHMM_DATA_PATH = Path(__file__).parents[2] / 'data' / 'gdphmm-hn'
+GDPHMM_DATA_PATH = Path(__file__).parents[1] / 'data' / 'gdphmm-hn'
 
 class GDPHMMSlicesDataset(Dataset):
   def __init__(self, split, img_size, structures=None, limit=None):
@@ -13,23 +14,23 @@ class GDPHMMSlicesDataset(Dataset):
     self.img_size = img_size
 
     self.img_transforms = T.Compose([
-      T.Lambda(lambda x: (x - x.amin()) / (x.amax() - x.amin())),
+      T.ToTensor(),
+      T.Lambda(lambda x: (x - torch.min(x)) / (torch.max(x) - torch.min(x))),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
     self.mask_transforms = T.Compose([
+      T.ToTensor(),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
     self.target_transforms = T.Compose([
-      T.Lambda(lambda x: (x - x.amin()) / (x.amax() - x.amin())),
+      T.ToTensor(),
+      T.Lambda(lambda x: (x - torch.min(x)) / (torch.max(x) - torch.min(x))),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
-    data = self.__load_data(split)
-    if limit is not None:
-      data = {k: data[k] for k in data[sorted(data.keys())[:limit]]}
-
+    data = self.__load_data(split, limit)
     data = self.__transform(data)
 
     self.keys = sorted(data.keys())
@@ -49,19 +50,24 @@ class GDPHMMSlicesDataset(Dataset):
 
     return sample['structure'], sample['target'], sample['info']
 
-  def __load_data(self, split):
+  def __load_data(self, split, limit):
     data = {}
 
-    for file in (GDPHMM_DATA_PATH / split).glob('*.npz'):
-      volume = np.load(file)['arr_0']
+    files = list((GDPHMM_DATA_PATH / split).glob('*.npz'))
+    if limit is not None:
+      files = sorted(files)[:limit]
+
+    for file in tqdm(files, desc=f'Loading Dataset {split}'):
+      volume = np.load(file, allow_pickle=True)['arr_0'].item()
 
       for idx in range(volume['dose'].shape[2]):
+        print('target', volume['dose'][:, :, idx])
         data[f'{file.stem}_{idx}'] = {
           'target': volume['dose'][:, :, idx],
           'masks': volume['all_mask'],
           'img': volume['img'][:, :, idx],
           'structures': {
-            k: volume[k][:, :, idx] for k in volume['all_mask']
+            k: volume[k][:, :, idx] for k in volume['all_mask'] if k in volume
           },
           'info': {
             'file_path': str(file),
@@ -80,7 +86,7 @@ class GDPHMMSlicesDataset(Dataset):
       k: {
         'target': v['target'],
         'info': v['info'],
-        'structure': np.stack([v['img'], v['structures'].get(s, np.zeros_like(v['target'])) for s in structures[1:]], axis=0)
+        'structure': np.stack([v['img'], *[v['structures'].get(s, np.zeros_like(v['target'])) for s in structures[1:]]], axis=0)
       }
       for k, v in data.items()
     }

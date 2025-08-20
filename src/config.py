@@ -2,7 +2,7 @@ import yaml
 from pathlib import Path
 
 
-CONFIG_PATH = Path(__file__).parents[2] / 'configs'
+CONFIG_PATH = Path(__file__).parents[1] / 'configs'
 
 def read_model_config(name):
   with open(CONFIG_PATH / 'models' / f'{name}.yaml', 'r') as file:

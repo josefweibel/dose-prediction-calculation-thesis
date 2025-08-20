@@ -11,7 +11,7 @@ from data import GDPHMMSlicesDataset
 from models import MambaUnet
 from evaluator import Evaluator
 
-CHECKPOINTS_PATH = Path(__file__).parents[2] / 'checkpoints'
+CHECKPOINTS_PATH = Path(__file__).parents[1] / 'checkpoints'
 
 
 def extract(v, t, x_shape):
@@ -56,19 +56,21 @@ class Trainer:
 
     train_dataset = GDPHMMSlicesDataset(
       split='train',
-      img_size=self.config['img_size'],
-      limit=self.config['limit'],
+      img_size=self.config['data']['img_size'],
+      limit=self.config['data']['limit'],
     )
+    print('Training dataset size', len(train_dataset))
 
-    if self.config['val_on_train']:
+    if self.config['data']['val_on_train']:
       val_dataset = train_dataset
     else:
       val_dataset = GDPHMMSlicesDataset(
         split='val',
-        img_size=self.config['img_size'],
+        img_size=self.config['data']['img_size'],
         structures=train_dataset.structures,
-        limit=self.config['limit'],
+        limit=self.config['data']['limit'],
       )
+    print('Validation dataset size', len(val_dataset))
 
     self.train_dataloader = DataLoader(
       train_dataset,
