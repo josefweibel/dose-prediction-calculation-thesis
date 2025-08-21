@@ -76,8 +76,8 @@ class GaussianDiffusionSampler(nn.Module):
     x = x_T
 
     for t in reversed(range(self.T)):
-      t = x.new_ones((x.shape[0], ), dtype=torch.long) * t
-      mean, log_var = self.p_mean_variance(x, condition, t)
+      t_vec = x.new_ones((x.shape[0], ), dtype=torch.long) * t
+      mean, log_var = self.p_mean_variance(x, condition, t_vec)
 
       # no noise when t == 0
       if t > 0:

@@ -2,8 +2,8 @@ import torch
 from torchmetrics import Metric
 
 class DoseScore(Metric):
-  def __init__(self, compute_on_step=True, dist_sync_on_step=False):
-    super().__init__(compute_on_step=compute_on_step, dist_sync_on_step=dist_sync_on_step)
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
     # total score sum and count for averaging
     self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
     self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
@@ -20,7 +20,7 @@ class DoseScore(Metric):
     target = target.flatten()
 
     # compute relative differences
-    score = (preds - target) / target
+    score = (preds - target) / (target + 1e-5)
     self.total += score.sum()
     self.count += target.numel()
 
@@ -29,8 +29,8 @@ class DoseScore(Metric):
     return self.total / self.count
 
 class DVHScore(Metric):
-  def __init__(self, compute_on_step=True, dist_sync_on_step=False):
-    super().__init__(compute_on_step=compute_on_step, dist_sync_on_step=dist_sync_on_step)
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
     self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
     self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
@@ -69,8 +69,8 @@ class DVHScore(Metric):
     return self.total / self.count
 
 class HomogeneityIndex(Metric):
-  def __init__(self, compute_on_step=True, dist_sync_on_step=False):
-    super().__init__(compute_on_step=compute_on_step, dist_sync_on_step=dist_sync_on_step)
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
     self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
     self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
@@ -79,14 +79,11 @@ class HomogeneityIndex(Metric):
     k = 1 + round(0.01 * q * (tensor.numel() - 1))
     return tensor.kthvalue(k).values
 
-  def update(self, dose: torch.Tensor):
-    """
-    dose: dose distribution, shape (batch_size, ...)
-    """
-    batch_size = dose.shape[0]
+  def update(self, preds: torch.Tensor, target: torch.Tensor):
+    batch_size = preds.shape[0]
 
     for i in range(batch_size):
-      d = dose[i].flatten()
+      d = preds[i].flatten()
 
       D2 = self._percentile(d, 2)
       D98 = self._percentile(d, 98)

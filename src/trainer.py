@@ -14,6 +14,9 @@ from evaluator import Evaluator
 CHECKPOINTS_PATH = Path(__file__).parents[1] / 'checkpoints'
 
 
+wandb.login()
+
+
 def extract(v, t, x_shape):
   """
   Extract some coefficients at specified timesteps, then reshape to
@@ -45,8 +48,8 @@ class DiffusionModelTrainerModule(nn.Module):
       extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape) * noise
     )
 
-    x_reconstructed = self.model(x_t, condition, t)
-    return F.mse_loss(x_reconstructed, noise, reduction='none').mean()
+    noise_pred = self.model(x_t, condition, t)
+    return F.mse_loss(noise_pred, noise, reduction='none').mean()
 
 class Trainer:
   def __init__(self, model_config, n_epochs=None):
@@ -86,8 +89,11 @@ class Trainer:
       pin_memory=True
     )
 
-    self.net_model = MambaUnet(in_struc_channels=len(train_dataset.structures))
-    self.ema_model = copy.deepcopy(self.net_model)
+    self.net_model = MambaUnet(
+        img_size=self.config['data']['img_size'],
+        in_struc_channels=train_dataset.n_structures
+    )
+    self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
     self.model = DiffusionModelTrainerModule(
       denoising_model=self.net_model,
@@ -106,6 +112,8 @@ class Trainer:
       self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
+    else:
+      (CHECKPOINTS_PATH / self.name).mkdir(parents=True, exist_ok=True)
 
     if n_epochs is None:
       self.to_epoch = self.config['epochs']
@@ -114,13 +122,15 @@ class Trainer:
 
     self.wandb_run = self.__setup_wandb_run(checkpoint)
 
-    self.evaluator = Evaluator(self.val_dataloader, self.device)
+    self.evaluator = Evaluator(self.val_dataloader, self.config, self.device)
 
   def train(self):
-    for epoch in (pbar := tqdm(range(self.epoch + 1, self.to_epoch), desc='Training')):
+    pbar_epochs = tqdm(range(self.epoch + 1, self.to_epoch), desc='Training')
+    for self.epoch in pbar_epochs:
       self.net_model.train()
 
-      for structure, target, _ in self.train_dataloader:
+      pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False)
+      for structure, target, _ in pbar_batches:
         self.optim.zero_grad()
         structure = structure.to(self.device)
         target = target.to(self.device)
@@ -132,22 +142,25 @@ class Trainer:
         self.optim.step()
         self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
 
-        pbar.set_postfix(loss=loss.item())
-        self.wandb_run.log({'train/loss': loss.item(), 'epoch': epoch})
+        pbar_epochs.set_postfix(loss=loss.item())
+        self.wandb_run.log({'train/loss': loss.item(), 'epoch': self.epoch})
 
       self.__save_checkpoint()
+      self.__cleanup_checkpoints()
 
-      if epoch % self.config['eval_interval'] == 0:
+      if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
         metrics = self.evaluator.evaluate(self.ema_model)
         metrics = {f'eval/{key}': value for key, value in metrics.items()}
-        self.wandb_run.log({**metrics, 'epoch': epoch})
+        self.wandb_run.log({**metrics, 'epoch': self.epoch})
+
+    self.wandb_run.finish()
 
   def __load_last_checkpoint(self):
     checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
     if not checkpoint_files:
       return None
 
-    return torch.load(max(checkpoint_files, key=lambda f: f.stat().st_mtime))
+    return torch.load(max(checkpoint_files, key=lambda f: int(f.stem)))
 
   def __save_checkpoint(self):
     checkpoint_path = CHECKPOINTS_PATH / self.name / f'{self.epoch}.pt'
@@ -158,7 +171,15 @@ class Trainer:
       'optimizer_state_dict': self.optim.state_dict(),
     }, checkpoint_path)
 
-  def __update_ema_weigths(source, target, decay):
+  def __cleanup_checkpoints(self):
+    checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
+    checkpoint_files = sorted(checkpoint_files, key=lambda f: int(f.stem))
+    checkpoint_files = checkpoint_files[:-1] # keep latest
+    for file in checkpoint_files:
+      if (int(file.stem) + 1) % self.config['checkpoint_interval'] > 0:
+        file.unlink()
+    
+  def __update_ema_weigths(self, source, target, decay):
     source_dict = source.state_dict()
     target_dict = target.state_dict()
     for key in source_dict.keys():

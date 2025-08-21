@@ -1,6 +1,8 @@
 from time import time
 import torch
-from torchmetrics import MeanSquaredError, PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics import MeanSquaredError
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from tqdm import tqdm
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex
 from sampler import GaussianDiffusionSampler
@@ -13,8 +15,8 @@ class Evaluator:
 
     self.metrics = {
       'mse': MeanSquaredError(),
-      'psnr': PeakSignalNoiseRatio(),
-      'ssim': StructuralSimilarityIndexMeasure(),
+      'psnr': PeakSignalNoiseRatio(data_range=(0, 1)),
+      'ssim': StructuralSimilarityIndexMeasure(data_range=(0, 1)),
       'dvh': DVHScore(),
       'dose_score': DoseScore(),
       'homogeneity_index': HomogeneityIndex()
@@ -38,14 +40,17 @@ class Evaluator:
       sum_duration = 0.0
       n_duration = 0
 
-      for structure, target, info in self.dataloader:
+      pbar = tqdm(self.dataloader, desc='Evaluating', leave=False)
+      for structure, target, info in pbar:
         structure, target = structure.to(self.device), target.to(self.device)
+        target = self.dataloader.dataset.denormalize_target(target)
 
         start = time()
         x_T = torch.randn_like(target, device=self.device)
         pred = sampler(x_T, structure)
         sum_duration += time() - start
         n_duration += target.shape[0]
+        pred = self.dataloader.dataset.denormalize_target(pred)
 
         for metric in self.metrics.values():
           metric.update(pred, target)

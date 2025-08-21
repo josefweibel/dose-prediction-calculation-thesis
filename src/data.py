@@ -37,19 +37,22 @@ class GDPHMMSlicesDataset(Dataset):
 
     self.ct_transforms = T.Compose([
       T.ToTensor(),
+      T.Lambda(lambda x: x.float()),  # Convert to float32
       T.Lambda(lambda x: torch.clip(x, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX)),
       T.Lambda(lambda x: (x - GDPHMM_IMG_MIN) / (GDPHMM_IMG_MAX - GDPHMM_IMG_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
     self.oar_transforms = T.Compose([
-      T.ToTensor(),
+      T.Lambda(lambda x: torch.as_tensor(x)),
+      T.Lambda(lambda x: x.byte()),  # Convert to unit8
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
     self.ptv_transforms = self.oar_transforms
 
     self.dose_transforms = T.Compose([
       T.ToTensor(),
+      T.Lambda(lambda x: x.float()),  # Convert to float32
       T.Lambda(lambda x: (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
@@ -57,6 +60,8 @@ class GDPHMMSlicesDataset(Dataset):
     data = self.__load_data(split, limit)
     data = self.__transform(data)
     self.data = self.__prepare_structure(data)
+    self.keys = sorted(data.keys())
+    self.n_structures = len(GDPHMM_OAR) + 1 + 1
 
   def __len__(self):
     return len(self.keys)
@@ -71,15 +76,12 @@ class GDPHMMSlicesDataset(Dataset):
     data = {}
 
     files = list((GDPHMM_DATA_PATH / split).glob('*.npz'))
-    if limit is not None:
-      files = sorted(files)[:limit]
-
     for file in tqdm(files, desc=f'Loading Dataset {split}'):
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
       dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
 
       oar_vol = np.stack([vol[name] if name in vol else np.zeros_like(vol['dose']) for name in GDPHMM_OAR], axis=0)
-      ptv_vol = np.max([vol[name] * dose / 100 for name, dose in GDPHMM_PTV.items()])
+      ptv_vol = np.maximum.reduce([vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol])
 
       for idx in range(vol['dose'].shape[2]):
         data[f'{file.stem}_{idx}'] = {
@@ -95,16 +97,17 @@ class GDPHMMSlicesDataset(Dataset):
           }
         }
 
-        print('Shapes', data[f'{file.stem}_{idx}']['dose'].shape, data[f'{file.stem}_{idx}']['ptv'].shape, data[f'{file.stem}_{idx}']['oar'].shape, data[f'{file.stem}_{idx}']['ct'].shape)
+        if limit is not None and len(data) >= limit:
+          return data 
 
     return data
 
   def __prepare_structure(self, data):
     return {
       k: {
-        'target': v['target'],
+        'target': v['dose'],
         'info': v['info'],
-        'structure': np.stack([v['ct'].unsqueeze(0), v['ptv'].unsqueeze(0), v['oar']], axis=0)
+        'structure': np.concatenate([v['ct'], v['ptv'], v['oar']], axis=0)
       }
       for k, v in data.items()
     }
@@ -121,6 +124,8 @@ class GDPHMMSlicesDataset(Dataset):
       for k, v in data.items()
     }
 
+  def denormalize_target(self, x):
+    return x * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
 
 class PadToFixedSize:
   def __init__(self, target_size, fill=0, padding_mode='constant'):
@@ -161,7 +166,8 @@ class PadToFixedSize:
     # Pad equally on both sides: (left, top, right, bottom)
     padding = (pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2)
 
-    return T.functional.pad(img, padding, fill=self.fill, padding_mode=self.padding_mode)
+    y = T.functional.pad(img, padding, fill=self.fill, padding_mode=self.padding_mode)
+    return y
 
   def __repr__(self):
     return f"{self.__class__.__name__}(target_size={self.target_size}, fill={self.fill}, padding_mode={self.padding_mode})"
