@@ -8,7 +8,7 @@ def extract(v, t, x_shape):
   Extract some coefficients at specified timesteps, then reshape to
   [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
   """
-  out = torch.gather(v, index=t, dim=0).float()
+  out = v.to(t.device).gather(0, t).float()
   return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 class GaussianDiffusionSampler(nn.Module):
@@ -18,7 +18,7 @@ class GaussianDiffusionSampler(nn.Module):
     self.model = model
     self.T = T
 
-    self.register_buffer('betas', torch.linspace(beta_1, beta_T, T).double())
+    self.register_buffer('betas', torch.linspace(beta_1, beta_T, T).float())
     alphas = 1. - self.betas
     alphas_bar = torch.cumprod(alphas, dim=0)
     alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:T]
@@ -76,7 +76,7 @@ class GaussianDiffusionSampler(nn.Module):
     x = x_T
 
     for t in reversed(range(self.T)):
-      t_vec = x.new_ones((x.shape[0], ), dtype=torch.long) * t
+      t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x_T.device)
       mean, log_var = self.p_mean_variance(x, condition, t_vec)
 
       # no noise when t == 0

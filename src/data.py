@@ -98,7 +98,7 @@ class GDPHMMSlicesDataset(Dataset):
         }
 
         if limit is not None and len(data) >= limit:
-          return data 
+          return data
 
     return data
 

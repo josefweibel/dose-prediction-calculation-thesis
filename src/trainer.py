@@ -22,7 +22,7 @@ def extract(v, t, x_shape):
   Extract some coefficients at specified timesteps, then reshape to
   [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
   """
-  out = torch.gather(v, index=t, dim=0).float()
+  out = v.to(t.device).gather(0, t).float()
   return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
@@ -33,7 +33,7 @@ class DiffusionModelTrainerModule(nn.Module):
     self.model = denoising_model
     self.T = T
 
-    self.register_buffer('betas', torch.linspace(beta_1, beta_T, T).double())
+    self.register_buffer('betas', torch.linspace(beta_1, beta_T, T).float())
     alphas = 1. - self.betas
     alphas_bar = torch.cumprod(alphas, dim=0)
 
@@ -149,6 +149,7 @@ class Trainer:
       self.__cleanup_checkpoints()
 
       if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
+        self.ema_model.eval()  # Ensure model is in eval mode
         metrics = self.evaluator.evaluate(self.ema_model)
         metrics = {f'eval/{key}': value for key, value in metrics.items()}
         self.wandb_run.log({**metrics, 'epoch': self.epoch})
@@ -178,7 +179,7 @@ class Trainer:
     for file in checkpoint_files:
       if (int(file.stem) + 1) % self.config['checkpoint_interval'] > 0:
         file.unlink()
-    
+
   def __update_ema_weigths(self, source, target, decay):
     source_dict = source.state_dict()
     target_dict = target.state_dict()
