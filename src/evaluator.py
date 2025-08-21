@@ -15,8 +15,9 @@ class Evaluator:
 
     self.metrics = {
       'mse': MeanSquaredError(),
-      'psnr': PeakSignalNoiseRatio(data_range=(0, 1)),
-      'ssim': StructuralSimilarityIndexMeasure(data_range=(0, 1)),
+      'rmse': MeanSquaredError(squared=False),
+      'psnr': PeakSignalNoiseRatio(data_range=dataloader.dataset.dose_range),
+      'ssim': StructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range),
       'dvh': DVHScore(),
       'dose_score': DoseScore(),
       'homogeneity_index': HomogeneityIndex()
@@ -50,6 +51,7 @@ class Evaluator:
         pred = sampler(x_T, structure)
         sum_duration += time() - start
         n_duration += target.shape[0]
+        pred = torch.clamp(pred, 0., 1.)
         pred = self.dataloader.dataset.denormalize_target(pred)
 
         for metric in self.metrics.values():

@@ -35,7 +35,8 @@ class GaussianDiffusionSampler(nn.Module):
     # the beginning of the diffusion chain
     self.register_buffer(
       'posterior_log_var_clipped',
-      torch.log(torch.cat([self.posterior_var[1:2], self.posterior_var[1:]])))
+      # torch.log(torch.cat([self.posterior_var[1:2], self.posterior_var[1:]])))
+      torch.log(self.posterior_var.clamp(min=1e-20)))
     self.register_buffer(
       'posterior_mean_coef1',
       torch.sqrt(alphas_bar_prev) * self.betas / (1. - alphas_bar))
@@ -67,7 +68,7 @@ class GaussianDiffusionSampler(nn.Module):
     eps = self.model(x_t, condition, t)
     x_0 = self.predict_xstart_from_eps(x_t, t, eps)
 
-    x_0 = torch.clamp(x_0, 0., 1.)
+    # x_0 = torch.clamp(x_0, 0., 1.)
     model_mean, model_log_var = self.q_mean_variance(x_0, x_t, t)
 
     return model_mean, model_log_var

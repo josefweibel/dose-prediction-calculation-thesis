@@ -89,6 +89,9 @@ class HomogeneityIndex(Metric):
       D98 = self._percentile(d, 98)
       D50 = self._percentile(d, 50)
 
+      if D50 < 1e-10:
+        D50 = 1e-10
+
       hi_value = (D2 - D98) / D50
       self.total += hi_value
       self.count += 1

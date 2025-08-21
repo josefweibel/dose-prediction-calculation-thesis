@@ -37,7 +37,7 @@ class GDPHMMSlicesDataset(Dataset):
 
     self.ct_transforms = T.Compose([
       T.ToTensor(),
-      T.Lambda(lambda x: x.float()),  # Convert to float32
+      T.Lambda(lambda x: x.half()),
       T.Lambda(lambda x: torch.clip(x, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX)),
       T.Lambda(lambda x: (x - GDPHMM_IMG_MIN) / (GDPHMM_IMG_MAX - GDPHMM_IMG_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
@@ -52,7 +52,7 @@ class GDPHMMSlicesDataset(Dataset):
 
     self.dose_transforms = T.Compose([
       T.ToTensor(),
-      T.Lambda(lambda x: x.float()),  # Convert to float32
+      T.Lambda(lambda x: x.half()),
       T.Lambda(lambda x: (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
@@ -62,6 +62,7 @@ class GDPHMMSlicesDataset(Dataset):
     self.data = self.__prepare_structure(data)
     self.keys = sorted(data.keys())
     self.n_structures = len(GDPHMM_OAR) + 1 + 1
+    self.dose_range = (GDPHMM_DOSE_MIN, GDPHMM_DOSE_MAX)
 
   def __len__(self):
     return len(self.keys)

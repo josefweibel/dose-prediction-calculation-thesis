@@ -60,17 +60,17 @@ class Trainer:
     train_dataset = GDPHMMSlicesDataset(
       split='train',
       img_size=self.config['data']['img_size'],
-      limit=self.config['data']['limit'],
+      limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
     )
     print('Training dataset size', len(train_dataset))
 
-    if self.config['data']['val_on_train']:
+    if 'val_on_train' in self.config['data'] and self.config['data']['val_on_train']:
       val_dataset = train_dataset
     else:
       val_dataset = GDPHMMSlicesDataset(
         split='val',
         img_size=self.config['data']['img_size'],
-        limit=self.config['data']['limit'],
+        limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
       )
     print('Validation dataset size', len(val_dataset))
 
