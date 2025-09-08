@@ -227,6 +227,11 @@ class PrefetchLoader:
     self.device = device
     self.stream = torch.cuda.Stream()
 
+  def __getattribute__(self, name):
+    if name in ['loader', 'device', 'stream', 'iter', 'next_batch', 'preload', '__iter__', '__next__']:
+      return object.__getattribute__(self, name)
+    return getattr(self.loader, name)
+
   def __iter__(self):
     self.iter = iter(self.loader)
     self.preload()

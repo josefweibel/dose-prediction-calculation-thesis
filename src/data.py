@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms as T
 from PIL import Image
 from tqdm import tqdm
+import pandas as pd
 
 GDPHMM_DATA_PATH = Path(__file__).parents[1] / 'data' / 'gdphmm-hn'
 
@@ -34,18 +35,12 @@ class GDPHMMSlicesDataset(Dataset):
   def __init__(self, split, img_size, limit=None):
     self.split = split
     self.img_size = img_size
-    self.files = list((GDPHMM_DATA_PATH / split).glob('*.npz'))
-    self.index_map = []  # stores (file, slice_idx)
 
-    for file in tqdm(self.files, desc=f'Indexing Dataset {split}'):
-      vol = np.load(file, allow_pickle=True)['arr_0'].item()
-      n_slices = vol['dose'].shape[2]
-      for idx in range(n_slices):
-        self.index_map.append((file, idx))
-        if limit is not None and len(self.index_map) >= limit:
-          break
-      if limit is not None and len(self.index_map) >= limit:
-        break
+    self.index_map = pd.read_csv(GDPHMM_DATA_PATH / split / '_index.csv')
+    self.index_map['file'] = self.index_map['file'].apply(lambda f: GDPHMM_DATA_PATH / split / f)
+    if limit is not None:
+      self.index_map = self.index_map.iloc[:limit]
+    self.index_map = self.index_map.to_numpy().tolist()
 
     self.ct_transforms = T.Compose([
       T.ToTensor(),
