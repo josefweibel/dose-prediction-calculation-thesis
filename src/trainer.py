@@ -79,15 +79,23 @@ class Trainer:
       batch_size=self.config['batch_size'],
       shuffle=True,
       num_workers=self.config['num_workers'],
-      pin_memory=True
+      pin_memory=True,
+      prefetch_factor=self.config['prefetch_factor'],
+      persistent_workers=self.config['num_workers'] > 0,
     )
     self.val_dataloader = DataLoader(
       val_dataset,
       batch_size=self.config['batch_size'],
       shuffle=False,
       num_workers=self.config['num_workers'],
-      pin_memory=True
+      pin_memory=True,
+      prefetch_factor=self.config['prefetch_factor'],
+      persistent_workers=self.config['num_workers'] > 0,
     )
+
+    if self.config['prefetch_factor'] > 0 and self.device.type == 'cuda':
+      self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
+      self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
     self.net_model = MambaUnet(
         img_size=self.config['data']['img_size'],
@@ -132,8 +140,8 @@ class Trainer:
       pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False)
       for structure, target, _ in pbar_batches:
         self.optim.zero_grad()
-        structure = structure.to(self.device)
-        target = target.to(self.device)
+        structure = structure.to(self.device, non_blocking=True)
+        target = target.to(self.device, non_blocking=True)
 
         loss = self.model(target, structure)
         loss.backward()
@@ -213,3 +221,33 @@ class Trainer:
         config=self.config,
       )
 
+class PrefetchLoader:
+  def __init__(self, loader, device):
+    self.loader = loader
+    self.device = device
+    self.stream = torch.cuda.Stream()
+
+  def __iter__(self):
+    self.iter = iter(self.loader)
+    self.preload()
+    return self
+
+  def __next__(self):
+    torch.cuda.current_stream().wait_stream(self.stream)
+    batch = self.next_batch
+    if batch is None:
+      raise StopIteration
+    self.preload()
+    return batch
+
+  def preload(self):
+    try:
+      batch = next(self.iter)
+    except StopIteration:
+      self.next_batch = None
+      return
+    with torch.cuda.stream(self.stream):
+      self.next_batch = tuple(
+        x.to(self.device, non_blocking=True) if torch.is_tensor(x) else x
+        for x in batch
+      )

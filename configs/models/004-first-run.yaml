@@ -1,12 +1,13 @@
 data:
   img_size: [176, 160]
-  valid_limit: 64 
+  valid_limit: 64
 
 batch_size: 32
 lr: 0.01
-epochs: 1500 
+epochs: 1500
 
 num_workers: 4
+prefetch_factor: 2
 
 beta_1: 0.0001
 beta_T: 0.02
@@ -15,6 +16,6 @@ T: 1000
 grad_clip: 1.0
 ema_decay: 0.9999
 
-eval_interval: 50 
+eval_interval: 50
 checkpoint_interval: 50
 

@@ -43,7 +43,8 @@ class Evaluator:
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False)
       for structure, target, info in pbar:
-        structure, target = structure.to(self.device), target.to(self.device)
+        structure = structure.to(self.device, non_blocking=True)
+        target = target.to(self.device, non_blocking=True)
         target = self.dataloader.dataset.denormalize_target(target)
 
         start = time()
