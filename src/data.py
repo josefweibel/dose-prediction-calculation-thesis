@@ -34,6 +34,18 @@ class GDPHMMSlicesDataset(Dataset):
   def __init__(self, split, img_size, limit=None):
     self.split = split
     self.img_size = img_size
+    self.files = list((GDPHMM_DATA_PATH / split).glob('*.npz'))
+    self.index_map = []  # stores (file, slice_idx)
+
+    for file in tqdm(self.files, desc=f'Indexing Dataset {split}'):
+      vol = np.load(file, allow_pickle=True)['arr_0'].item()
+      n_slices = vol['dose'].shape[2]
+      for idx in range(n_slices):
+        self.index_map.append((file, idx))
+        if limit is not None and len(self.index_map) >= limit:
+          break
+      if limit is not None and len(self.index_map) >= limit:
+        break
 
     self.ct_transforms = T.Compose([
       T.ToTensor(),
@@ -45,7 +57,7 @@ class GDPHMMSlicesDataset(Dataset):
 
     self.oar_transforms = T.Compose([
       T.Lambda(lambda x: torch.as_tensor(x)),
-      T.Lambda(lambda x: x.byte()),  # Convert to unit8
+      T.Lambda(lambda x: x.byte()),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
     self.ptv_transforms = self.oar_transforms
@@ -57,73 +69,41 @@ class GDPHMMSlicesDataset(Dataset):
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
-    data = self.__load_data(split, limit)
-    data = self.__transform(data)
-    self.data = self.__prepare_structure(data)
-    self.keys = sorted(data.keys())
     self.n_structures = len(GDPHMM_OAR) + 1 + 1
     self.dose_range = (GDPHMM_DOSE_MIN, GDPHMM_DOSE_MAX)
 
   def __len__(self):
-    return len(self.keys)
+    return len(self.index_map)
 
   def __getitem__(self, idx):
-    key = self.keys[idx]
-    sample = self.data[key]
+    file, slice_idx = self.index_map[idx]
+    vol = np.load(file, allow_pickle=True)['arr_0'].item()
 
-    return sample['structure'], sample['target'], sample['info']
+    # reconstruct relevant slices
+    dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
+    oar_vol = np.stack(
+      [vol[name] if name in vol else np.zeros_like(vol['dose']) for name in GDPHMM_OAR],
+      axis=0
+    )
+    ptv_vol = np.maximum.reduce(
+      [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
+    )
 
-  def __load_data(self, split, limit):
-    data = {}
-
-    files = list((GDPHMM_DATA_PATH / split).glob('*.npz'))
-    for file in tqdm(files, desc=f'Loading Dataset {split}'):
-      vol = np.load(file, allow_pickle=True)['arr_0'].item()
-      dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
-
-      oar_vol = np.stack([vol[name] if name in vol else np.zeros_like(vol['dose']) for name in GDPHMM_OAR], axis=0)
-      ptv_vol = np.maximum.reduce([vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol])
-
-      for idx in range(vol['dose'].shape[2]):
-        data[f'{file.stem}_{idx}'] = {
-          'dose': dose_vol[:, :, idx],
-          'ptv': ptv_vol[:, :, idx],
-          'oar': oar_vol[:, :, :, idx],
-          'ct': vol['img'][:, :, idx],
-          'info': {
-            'file_path': str(file),
-            'file_name': file.name,
-            'volume': file.stem,
-            'index': idx
-          }
-        }
-
-        if limit is not None and len(data) >= limit:
-          return data
-
-    return data
-
-  def __prepare_structure(self, data):
-    return {
-      k: {
-        'target': v['dose'],
-        'info': v['info'],
-        'structure': np.concatenate([v['ct'], v['ptv'], v['oar']], axis=0)
+    sample = {
+      'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
+      'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
+      'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
+      'ct': self.ct_transforms(vol['img'][:, :, slice_idx]),
+      'info': {
+        'file_path': str(file),
+        'file_name': file.name,
+        'volume': file.stem,
+        'index': slice_idx
       }
-      for k, v in data.items()
     }
 
-  def __transform(self, data):
-    return {
-      k: {
-        'dose': self.dose_transforms(v['dose']),
-        'ptv': self.ptv_transforms(v['ptv']),
-        'oar': self.oar_transforms(v['oar']),
-        'ct': self.ct_transforms(v['ct']),
-        'info': v['info'],
-      }
-      for k, v in data.items()
-    }
+    structure = torch.cat([sample['ct'], sample['ptv'], sample['oar']], dim=0)
+    return structure, sample['dose'], sample['info']
 
   def denormalize_target(self, x):
     return x * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
