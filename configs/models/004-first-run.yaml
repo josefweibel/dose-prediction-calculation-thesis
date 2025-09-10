@@ -11,11 +11,11 @@ prefetch_factor: 2
 
 beta_1: 0.0001
 beta_T: 0.02
-T: 1000
+T: 100
 
 grad_clip: 1.0
 ema_decay: 0.9999
 
-eval_interval: 50
-checkpoint_interval: 50
+eval_interval: 2 
+checkpoint_interval: 10
 

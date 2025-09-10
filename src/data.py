@@ -44,7 +44,8 @@ class GDPHMMSlicesDataset(Dataset):
 
     self.ct_transforms = T.Compose([
       T.ToTensor(),
-      T.Lambda(lambda x: x.half()),
+      T.Lambda(lambda x: x.float()),  # Convert to float32
+      # T.Lambda(lambda x: x.half()),
       T.Lambda(lambda x: torch.clip(x, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX)),
       T.Lambda(lambda x: (x - GDPHMM_IMG_MIN) / (GDPHMM_IMG_MAX - GDPHMM_IMG_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
@@ -52,14 +53,16 @@ class GDPHMMSlicesDataset(Dataset):
 
     self.oar_transforms = T.Compose([
       T.Lambda(lambda x: torch.as_tensor(x)),
-      T.Lambda(lambda x: x.byte()),
+      # T.Lambda(lambda x: x.half()),
+      T.Lambda(lambda x: x.byte()),  # Convert to unit8
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
     self.ptv_transforms = self.oar_transforms
 
     self.dose_transforms = T.Compose([
       T.ToTensor(),
-      T.Lambda(lambda x: x.half()),
+      T.Lambda(lambda x: x.float()),  # Convert to float32
+      # T.Lambda(lambda x: x.half()),
       T.Lambda(lambda x: (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])

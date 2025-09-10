@@ -68,7 +68,7 @@ class Trainer:
       val_dataset = train_dataset
     else:
       val_dataset = GDPHMMSlicesDataset(
-        split='val',
+        split='valid',
         img_size=self.config['data']['img_size'],
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
       )
@@ -117,10 +117,12 @@ class Trainer:
     checkpoint = self.__load_last_checkpoint()
     if checkpoint:
       self.epoch = checkpoint['epoch']
+      print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
       self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
     else:
+      print('Start fresh run')
       (CHECKPOINTS_PATH / self.name).mkdir(parents=True, exist_ok=True)
 
     if n_epochs is None:
@@ -217,7 +219,7 @@ class Trainer:
       return wandb.init(
         project='dose-prediction-thesis',
         name=self.name,
-        id=self.name,
+        id=None,
         config=self.config,
       )
 
@@ -244,6 +246,9 @@ class PrefetchLoader:
       raise StopIteration
     self.preload()
     return batch
+
+  def __len__(self):
+    return len(self.loader)
 
   def preload(self):
     try:
