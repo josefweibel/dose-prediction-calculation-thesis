@@ -210,5 +210,12 @@ __marimo__/
 .DS_Store
 data/gdphmm-hn/train
 data/gdphmm-hn/valid
-data/gdphmm-hn/train_metadata.csv
-data/gdphmm-hn/valid_metadata.csv
+data/gdphmm-hn/test
+data/gdphmm-hn/incoming/train
+data/gdphmm-hn/incoming/valid
+data/gdphmm-hn/incoming/metadata.csv
+data/gdphmm-hn/incoming/train_metadata.csv
+data/gdphmm-hn/incoming/valid_metadata.csv
+checkpoints/
+!checkpoints/.gitkeep
+wandb/
