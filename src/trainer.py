@@ -2,7 +2,9 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from tqdm import tqdm
 import copy
 import wandb
@@ -52,9 +54,14 @@ class DiffusionModelTrainerModule(nn.Module):
     return F.mse_loss(noise_pred, noise, reduction='none').mean()
 
 class Trainer:
-  def __init__(self, model_config, n_epochs=None):
+  def __init__(self, model_config, n_epochs=None, rank=None, world_size=None):
     self.name = model_config["name"]
     self.config = model_config
+    self.rank = rank
+    self.world_size = world_size
+    self.is_distributed = rank is not None and world_size is not None
+    self.is_main_process = not self.is_distributed or rank == 0
+
     self.device = self.__detect_device()
 
     train_dataset = GDPHMMSlicesDataset(
@@ -62,7 +69,8 @@ class Trainer:
       img_size=self.config['data']['img_size'],
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
     )
-    print('Training dataset size', len(train_dataset))
+    if self.is_main_process:
+      print('Training dataset size', len(train_dataset))
 
     if 'val_on_train' in self.config['data'] and self.config['data']['val_on_train']:
       val_dataset = train_dataset
@@ -72,12 +80,31 @@ class Trainer:
         img_size=self.config['data']['img_size'],
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
       )
-    print('Validation dataset size', len(val_dataset))
+    if self.is_main_process:
+      print('Validation dataset size', len(val_dataset))
+
+    # Setup distributed samplers
+    self.train_sampler = None
+    self.val_sampler = None
+    if self.is_distributed:
+      self.train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True
+      )
+      self.val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False
+      )
 
     self.train_dataloader = DataLoader(
       train_dataset,
       batch_size=self.config['batch_size'],
-      shuffle=True,
+      shuffle=self.train_sampler is None,  # Only shuffle if not using distributed sampler
+      sampler=self.train_sampler,
       num_workers=self.config['num_workers'],
       pin_memory=True,
       prefetch_factor=self.config['prefetch_factor'],
@@ -87,6 +114,7 @@ class Trainer:
       val_dataset,
       batch_size=self.config['batch_size'],
       shuffle=False,
+      sampler=self.val_sampler,
       num_workers=self.config['num_workers'],
       pin_memory=True,
       prefetch_factor=self.config['prefetch_factor'],
@@ -98,48 +126,75 @@ class Trainer:
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
     self.net_model = MambaUnet(
-        img_size=self.config['data']['img_size'],
-        in_struc_channels=train_dataset.n_structures
-    )
-    self.ema_model = copy.deepcopy(self.net_model).to(self.device)
+      img_size=self.config['data']['img_size'],
+      in_struc_channels=train_dataset.n_structures
+    ).to(self.device)
+
+    # Wrap model with DDP if distributed training
+    if self.is_distributed:
+      self.net_model = DDP(
+        self.net_model,
+        device_ids=[self.rank] if self.device.type == 'cuda' else None,
+        find_unused_parameters=False
+      )
+
+    # For EMA, we need the underlying model (without DDP wrapper)
+    self.ema_model = copy.deepcopy(self.underlying_model).to(self.device)
 
     self.model = DiffusionModelTrainerModule(
-      denoising_model=self.net_model,
+      denoising_model=self.underlying_model,
       beta_1=self.config['beta_1'],
       beta_T=self.config['beta_T'],
       T=self.config['T']
     ).to(self.device)
 
-    self.optim = torch.optim.Adam(self.net_model.parameters(), lr=self.config['lr'])
+    self.optim = torch.optim.Adam(self.underlying_model.parameters(), lr=self.config['lr'])
 
     self.epoch = -1
 
     checkpoint = self.__load_last_checkpoint()
     if checkpoint:
       self.epoch = checkpoint['epoch']
-      print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
-      self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
+      if self.is_main_process:
+        print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
+
+      # Load state dict for the underlying model
+      self.underlying_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
     else:
-      print('Start fresh run')
-      (CHECKPOINTS_PATH / self.name).mkdir(parents=True, exist_ok=True)
+      if self.is_main_process:
+        print('Start fresh run')
+        (CHECKPOINTS_PATH / self.name).mkdir(parents=True, exist_ok=True)
 
     if n_epochs is None:
       self.to_epoch = self.config['epochs']
     else:
       self.to_epoch = self.epoch + n_epochs + 1
 
-    self.wandb_run = self.__setup_wandb_run(checkpoint)
+    # Only setup wandb on main process
+    if self.is_main_process:
+      self.wandb_run = self.__setup_wandb_run(checkpoint)
+    else:
+      self.wandb_run = None
 
     self.evaluator = Evaluator(self.val_dataloader, self.config, self.device)
 
+  @property
+  def underlying_model(self):
+    """Get the underlying model without DDP wrapper."""
+    return self.net_model.module if self.is_distributed else self.net_model
+
   def train(self):
-    pbar_epochs = tqdm(range(self.epoch + 1, self.to_epoch), desc='Training')
+    pbar_epochs = tqdm(range(self.epoch + 1, self.to_epoch), desc='Training', disable=not self.is_main_process)
     for self.epoch in pbar_epochs:
+      # Set epoch for distributed sampler
+      if self.is_distributed and self.train_sampler is not None:
+        self.train_sampler.set_epoch(self.epoch)
+
       self.net_model.train()
 
-      pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False)
+      pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False, disable=not self.is_main_process)
       for structure, target, _ in pbar_batches:
         self.optim.zero_grad()
         structure = structure.to(self.device, non_blocking=True)
@@ -148,23 +203,36 @@ class Trainer:
         loss = self.model(target, structure)
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(self.net_model.parameters(), self.config['grad_clip'])
+        torch.nn.utils.clip_grad_norm_(self.underlying_model.parameters(), self.config['grad_clip'])
         self.optim.step()
-        self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
 
-        pbar_epochs.set_postfix(loss=loss.item())
-        self.wandb_run.log({'train/loss': loss.item(), 'epoch': self.epoch})
+        self.__update_ema_weigths(self.underlying_model, self.ema_model, self.config['ema_decay'])
 
-      self.__save_checkpoint()
-      self.__cleanup_checkpoints()
+        if self.is_main_process:
+          pbar_epochs.set_postfix(loss=loss.item())
+          if self.wandb_run:
+            self.wandb_run.log({'train/loss': loss.item(), 'epoch': self.epoch})
+
+      if self.is_distributed:
+        dist.barrier()
+
+      if self.is_main_process:
+        self.__save_checkpoint()
+        self.__cleanup_checkpoints()
+
+      if self.is_distributed:
+        dist.barrier()
 
       if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
         self.ema_model.eval()  # Ensure model is in eval mode
-        metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch_{self.epoch}')
-        metrics = {f'eval/{key}': value for key, value in metrics.items()}
-        self.wandb_run.log({**metrics, 'epoch': self.epoch})
+        if self.is_main_process:
+          metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch_{self.epoch}')
+          metrics = {f'eval/{key}': value for key, value in metrics.items()}
+          if self.wandb_run:
+            self.wandb_run.log({**metrics, 'epoch': self.epoch})
 
-    self.wandb_run.finish()
+    if self.is_main_process and self.wandb_run:
+      self.wandb_run.finish()
 
   def __load_last_checkpoint(self):
     checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
@@ -175,9 +243,10 @@ class Trainer:
 
   def __save_checkpoint(self):
     checkpoint_path = CHECKPOINTS_PATH / self.name / f'{self.epoch}.pt'
+
     torch.save({
       'epoch': self.epoch,
-      'net_model_state_dict': self.net_model.state_dict(),
+      'net_model_state_dict': self.underlying_model.state_dict(),
       'ema_model_state_dict': self.ema_model.state_dict(),
       'optimizer_state_dict': self.optim.state_dict(),
     }, checkpoint_path)
@@ -199,7 +268,10 @@ class Trainer:
       )
 
   def __detect_device(self):
-    if torch.cuda.is_available():
+    if self.is_distributed:
+      # In distributed mode, use the specified rank as device
+      return torch.device(f"cuda:{self.rank}")
+    elif torch.cuda.is_available():
       return torch.device("cuda")
     elif torch.backends.mps.is_available():
       return torch.device("mps")
