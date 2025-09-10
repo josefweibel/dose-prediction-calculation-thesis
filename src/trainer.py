@@ -1,4 +1,5 @@
 from pathlib import Path
+import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -149,6 +150,7 @@ class Trainer:
     ).to(self.device)
 
     self.optim = torch.optim.Adam(self.underlying_model.parameters(), lr=self.config['lr'])
+    self.scaler = torch.amp.GradScaler('cuda') if self.device.type == 'cuda' else None
 
     self.epoch = -1
 
@@ -158,10 +160,12 @@ class Trainer:
       if self.is_main_process:
         print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
 
-      # Load state dict for the underlying model
       self.underlying_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
+
+      if self.scaler is not None and 'scaler_state_dict' in checkpoint:
+        self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
     else:
       if self.is_main_process:
         print('Start fresh run')
@@ -200,11 +204,21 @@ class Trainer:
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
 
-        loss = self.model(target, structure)
-        loss.backward()
+        # Use autocast for mixed precision training
+        with torch.autocast('cuda', dtype=torch.float16) if self.device.type == 'cuda' else contextlib.nullcontext():
+          loss = self.model(target, structure)
 
-        torch.nn.utils.clip_grad_norm_(self.underlying_model.parameters(), self.config['grad_clip'])
-        self.optim.step()
+        # Scale loss and backward pass
+        if self.scaler is not None:
+          self.scaler.scale(loss).backward()
+          self.scaler.unscale_(self.optim)
+          torch.nn.utils.clip_grad_norm_(self.underlying_model.parameters(), self.config['grad_clip'])
+          self.scaler.step(self.optim)
+          self.scaler.update()
+        else:
+          loss.backward()
+          torch.nn.utils.clip_grad_norm_(self.underlying_model.parameters(), self.config['grad_clip'])
+          self.optim.step()
 
         self.__update_ema_weigths(self.underlying_model, self.ema_model, self.config['ema_decay'])
 
@@ -244,12 +258,18 @@ class Trainer:
   def __save_checkpoint(self):
     checkpoint_path = CHECKPOINTS_PATH / self.name / f'{self.epoch}.pt'
 
-    torch.save({
+    checkpoint_data = {
       'epoch': self.epoch,
       'net_model_state_dict': self.underlying_model.state_dict(),
       'ema_model_state_dict': self.ema_model.state_dict(),
       'optimizer_state_dict': self.optim.state_dict(),
-    }, checkpoint_path)
+    }
+
+    # Save scaler state if using CUDA
+    if self.scaler is not None:
+      checkpoint_data['scaler_state_dict'] = self.scaler.state_dict()
+
+    torch.save(checkpoint_data, checkpoint_path)
 
   def __cleanup_checkpoints(self):
     checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
