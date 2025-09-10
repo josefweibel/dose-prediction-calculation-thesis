@@ -3,6 +3,7 @@ import torch
 from torchmetrics import MeanSquaredError
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import tqdm
+import numpy as np
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex
 from sampler import GaussianDiffusionSampler
@@ -25,7 +26,7 @@ class Evaluator:
 
     self.metrics = {k: v.to(device) for k, v in self.metrics.items()}
 
-  def evaluate(self, model):
+  def evaluate(self, model, dir=None):
     model.eval()
     sampler = GaussianDiffusionSampler(
       model,
@@ -57,6 +58,12 @@ class Evaluator:
 
         for metric in self.metrics.values():
           metric.update(pred, target)
+
+        if dir is not None:
+          dir.mkdir(parents=True, exist_ok=True)
+          for i, file_info in enumerate(info):
+            out_path = dir / file_info['file_name']
+            np.save(out_path.with_suffix('.npy'), pred[i].cpu().numpy())
 
     return {
       'duration': sum_duration / n_duration,
