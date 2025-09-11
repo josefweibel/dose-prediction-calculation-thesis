@@ -8,6 +8,7 @@ batch_size: 16
 lr: 0.01
 epochs: 201
 
+mixed_precision: false
 num_workers: 4
 prefetch_factor: 1
 

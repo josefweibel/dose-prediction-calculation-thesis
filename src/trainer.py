@@ -152,7 +152,8 @@ class Trainer:
     ).to(self.device)
 
     self.optim = torch.optim.Adam(self.underlying_model.parameters(), lr=self.config['lr'])
-    self.scaler = torch.amp.GradScaler('cuda') if self.device.type == 'cuda' else None
+    self.use_mixed_precision = self.device.type == 'cuda' and self.config['mixed_precision']
+    self.scaler = torch.amp.GradScaler('cuda') if self.use_mixed_precision else None
 
     self.epoch = -1
 
@@ -207,7 +208,7 @@ class Trainer:
         target = target.to(self.device, non_blocking=True)
 
         # Use autocast for mixed precision training
-        with torch.autocast('cuda', dtype=torch.float16) if self.device.type == 'cuda' else contextlib.nullcontext():
+        with torch.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, structure)
 
         # Scale loss and backward pass
