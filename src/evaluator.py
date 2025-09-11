@@ -19,6 +19,7 @@ class Evaluator:
       'rmse': MeanSquaredError(squared=False),
       'psnr': PeakSignalNoiseRatio(data_range=dataloader.dataset.dose_range),
       'ssim': StructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range),
+      'ms_ssim': StructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range, multichannel=True),
       'dvh': DVHScore(),
       'dose_score': DoseScore(),
       'homogeneity_index': HomogeneityIndex()
