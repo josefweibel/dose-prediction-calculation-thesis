@@ -1,4 +1,5 @@
 data:
+  dataset_name: gdphmm-hn
   img_size: [176, 160]
   valid_limit: 64
 
@@ -16,6 +17,6 @@ T: 100
 grad_clip: 1.0
 ema_decay: 0.9999
 
-eval_interval: 2 
+eval_interval: 2
 checkpoint_interval: 10
 

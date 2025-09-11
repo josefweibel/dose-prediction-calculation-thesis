@@ -7,7 +7,7 @@ from PIL import Image
 from tqdm import tqdm
 import pandas as pd
 
-GDPHMM_DATA_PATH = Path(__file__).parents[1] / 'data' / 'gdphmm-hn'
+GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
 
 GDPHMM_IMG_MIN = -1024
 GDPHMM_IMG_MAX = 3071
@@ -32,12 +32,14 @@ GDPHMM_PTV = {
 
 
 class GDPHMMSlicesDataset(Dataset):
-  def __init__(self, split, img_size, limit=None):
+  def __init__(self, dataset_name, split, img_size, limit=None):
+    self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
 
-    self.index_map = pd.read_csv(GDPHMM_DATA_PATH / split / '_index.csv')
-    self.index_map['file'] = self.index_map['file'].apply(lambda f: GDPHMM_DATA_PATH / split / f)
+    dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
+    self.index_map = pd.read_csv(dir / '_index.csv')
+    self.index_map['file'] = self.index_map['file'].apply(lambda f: dir / f)
     if limit is not None:
       self.index_map = self.index_map.iloc[:limit]
     self.index_map = self.index_map.to_numpy().tolist()

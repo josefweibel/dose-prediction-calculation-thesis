@@ -1,4 +1,5 @@
 data:
+  dataset_name: gdphmm-hn
   img_size: [176, 160]
   train_limit: 1
   val_on_train: true

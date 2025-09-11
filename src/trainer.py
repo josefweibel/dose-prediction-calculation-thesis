@@ -66,6 +66,7 @@ class Trainer:
     self.device = self.__detect_device()
 
     train_dataset = GDPHMMSlicesDataset(
+      dataset_name=self.config['data']['dataset_name'],
       split='train',
       img_size=self.config['data']['img_size'],
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
@@ -77,6 +78,7 @@ class Trainer:
       val_dataset = train_dataset
     else:
       val_dataset = GDPHMMSlicesDataset(
+        dataset_name=self.config['data']['dataset_name'],
         split='valid',
         img_size=self.config['data']['img_size'],
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
