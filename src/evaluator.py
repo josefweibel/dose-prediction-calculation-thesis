@@ -1,7 +1,7 @@
 from time import time
 import torch
 from torchmetrics import MeanSquaredError
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, MultiScaleStructuralSimilarityIndexMeasure
 from tqdm import tqdm
 import numpy as np
 
@@ -19,7 +19,7 @@ class Evaluator:
       'rmse': MeanSquaredError(squared=False),
       'psnr': PeakSignalNoiseRatio(data_range=dataloader.dataset.dose_range),
       'ssim': StructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range),
-      'ms_ssim': StructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range, multichannel=True),
+      'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range),
       'dvh': DVHScore(),
       'dose_score': DoseScore(),
       'homogeneity_index': HomogeneityIndex()

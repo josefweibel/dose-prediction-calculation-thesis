@@ -17,9 +17,6 @@ from evaluator import Evaluator
 CHECKPOINTS_PATH = Path(__file__).parents[1] / 'checkpoints'
 
 
-wandb.login()
-
-
 def extract(v, t, x_shape):
   """
   Extract some coefficients at specified timesteps, then reshape to
@@ -179,8 +176,8 @@ class Trainer:
     else:
       self.to_epoch = self.epoch + n_epochs + 1
 
-    # Only setup wandb on main process
     if self.is_main_process:
+      wandb.login()
       self.wandb_run = self.__setup_wandb_run(checkpoint)
     else:
       self.wandb_run = None
