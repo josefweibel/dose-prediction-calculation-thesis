@@ -263,9 +263,9 @@ class Trainer:
       'net_model_state_dict': self.underlying_model.state_dict(),
       'ema_model_state_dict': self.ema_model.state_dict(),
       'optimizer_state_dict': self.optim.state_dict(),
+      'wandb_run_id': self.wandb_run.id
     }
 
-    # Save scaler state if using CUDA
     if self.scaler is not None:
       checkpoint_data['scaler_state_dict'] = self.scaler.state_dict()
 
@@ -303,7 +303,7 @@ class Trainer:
       return wandb.init(
         project='dose-prediction-thesis',
         name=self.name,
-        id=self.name,
+        id=checkpoint['wandb_run_id'],
         config=self.config,
         resume='must',
       )
