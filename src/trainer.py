@@ -56,7 +56,7 @@ class Trainer:
     self.name = model_config["name"]
     self.config = model_config
     self.rank = rank
-    self.world_size = world_size
+    self.world_size = world_size if world_size is not None else 1
     self.is_distributed = rank is not None and world_size is not None
     self.is_main_process = not self.is_distributed or rank == 0
 
@@ -102,7 +102,7 @@ class Trainer:
 
     self.train_dataloader = DataLoader(
       train_dataset,
-      batch_size=self.config['batch_size'],
+      batch_size=self.config['batch_size'] // self.world_size,
       shuffle=self.train_sampler is None,  # Only shuffle if not using distributed sampler
       sampler=self.train_sampler,
       num_workers=self.config['num_workers'],
