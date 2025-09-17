@@ -55,23 +55,28 @@ if __name__ == '__main__':
   print(json.dumps(config, indent=2))
   print()
 
-  world_size = 1
   if args.distributed:
     world_size = torch.cuda.device_count()
     if world_size == 0:
-        print("No CUDA devices available. Falling back to single-process training.")
-        world_size = 1
+      print("No CUDA devices available. Falling back to single-process training.")
+      world_size = 1
 
-  print(f'Training with {world_size} process(es)')
-  print()
+    print(f'Training with {world_size} process(es)')
+    print()
 
-  mp.set_start_method('spawn', force=True)
-  mp.spawn(
+    mp.set_start_method('spawn', force=True)
+    mp.spawn(
       train_worker,
       args=(world_size, config, args.epochs),
       nprocs=world_size,
       join=True
-  )
+    )
+  else:
+    print(f'Training with a single process')
+    print()
+
+    trainer = Trainer(config, n_epochs=args.epochs)
+    trainer.train()
 
   print('Training completed successfully.')
 
