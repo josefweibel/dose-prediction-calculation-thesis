@@ -32,7 +32,7 @@ sbatch <<EOF
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
-echo "Copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to ${TMPDIR}/data/${DATASET}"
+echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to ${TMPDIR}/data/${DATASET}"
 
 if [ -d "${TMPDIR}" ]; then
   rm -rf "${TMPDIR}"/*
@@ -50,4 +50,11 @@ singularity exec \
   --pwd /work \
   ${HOME_PATH}/images/dose-prediction-thesis.sif \
   bash -c 'ls -la /work/data/${DATASET} && PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME}'
+
+echo "job ${CONFIG_NAME} completed"
+
+rm -rf "${TMPDIR}"/*
+
+echo "cleaned up ${TMPDIR}"
+
 EOF
