@@ -130,7 +130,6 @@ class Trainer:
       in_struc_channels=train_dataset.n_structures
     ).to(self.device)
 
-    # Wrap model with DDP if distributed training
     if self.is_distributed:
       self.net_model = DDP(
         self.net_model,
@@ -138,7 +137,6 @@ class Trainer:
         find_unused_parameters=False
       )
 
-    # For EMA, we need the underlying model (without DDP wrapper)
     self.ema_model = copy.deepcopy(self.underlying_model).to(self.device)
 
     self.model = DiffusionModelTrainerModule(
@@ -148,7 +146,7 @@ class Trainer:
       T=self.config['T']
     ).to(self.device)
 
-    self.optim = torch.optim.Adam(self.underlying_model.parameters(), lr=self.config['lr'])
+    self.optim = torch.optim.AdamW(self.underlying_model.parameters(), lr=self.config['lr'])
     self.use_mixed_precision = self.device.type == 'cuda' and self.config['mixed_precision']
     self.scaler = torch.amp.GradScaler('cuda') if self.use_mixed_precision else None
 
@@ -192,7 +190,6 @@ class Trainer:
   def train(self):
     pbar_epochs = tqdm(range(self.epoch + 1, self.to_epoch), desc='Training', disable=not self.is_main_process)
     for self.epoch in pbar_epochs:
-      # Set epoch for distributed sampler
       if self.is_distributed and self.train_sampler is not None:
         self.train_sampler.set_epoch(self.epoch)
 
@@ -204,7 +201,6 @@ class Trainer:
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
 
-        # Use autocast for mixed precision training
         with torch.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, structure)
 
