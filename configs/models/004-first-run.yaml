@@ -22,3 +22,4 @@ ema_decay: 0.9999
 eval_interval: 2
 checkpoint_interval: 10
 
+validation_sampler: ddpm-1000

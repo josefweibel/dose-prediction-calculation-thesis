@@ -3,6 +3,28 @@ from torch import nn
 from torch.nn import functional as F
 
 
+def build_sampler(model_config, sampling_config, model):
+  if sampling_config['sampler'] == 'ddpm':
+    return GaussianDiffusionSampler(
+      model,
+      model_config['beta_1'],
+      model_config['beta_T'],
+      model_config['T'],
+      sampling_config['T'],
+    )
+  elif sampling_config['sampler'] == 'ddim':
+    return DDIMSampler(
+      model,
+      model_config['beta_1'],
+      model_config['beta_T'],
+      model_config['T'],
+      sampling_config['T'],
+      eta=sampling_config['eta']
+    )
+  else:
+    raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
+
+
 def extract(v, t, x_shape):
   """
   Extract some coefficients at specified timesteps, then reshape to
@@ -12,34 +34,37 @@ def extract(v, t, x_shape):
   return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 class GaussianDiffusionSampler(nn.Module):
-  def __init__(self, model, beta_1, beta_T, T):
+  def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None):
     super().__init__()
 
     self.model = model
-    self.T = T
+    self.train_T = train_T
+    self.sampling_T = sampling_T or train_T  # default: full schedule
 
-    self.register_buffer('betas', torch.linspace(beta_1, beta_T, T).float())
-    alphas = 1. - self.betas
+    betas = torch.linspace(beta_1, beta_T, train_T).float()
+    alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, dim=0)
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:T]
+    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:train_T]
 
-    # calculations for diffusion q(x_t | x_{t-1}) and others
+    step = train_T // self.sampling_T
+    self.sampling_indices = reversed(torch.arange(0, train_T, step)[:self.sampling_T].tolist())
+
+    self.register_buffer("betas", betas)
+    self.register_buffer("alphas", alphas)
+    self.register_buffer("alphas_bar", alphas_bar)
+    self.register_buffer("alphas_bar_prev", alphas_bar_prev)
     self.register_buffer('sqrt_recip_alphas_bar', torch.sqrt(1. / alphas_bar))
     self.register_buffer('sqrt_recipm1_alphas_bar', torch.sqrt(1. / alphas_bar - 1))
 
-    # calculations for posterior q(x_{t-1} | x_t, x_0)
     self.register_buffer(
       'posterior_var',
-      self.betas * (1. - alphas_bar_prev) / (1. - alphas_bar))
-    # below: log calculation clipped because the posterior variance is 0 at
-    # the beginning of the diffusion chain
+      betas * (1. - alphas_bar_prev) / (1. - alphas_bar))
     self.register_buffer(
       'posterior_log_var_clipped',
-      # torch.log(torch.cat([self.posterior_var[1:2], self.posterior_var[1:]])))
       torch.log(self.posterior_var.clamp(min=1e-20)))
     self.register_buffer(
       'posterior_mean_coef1',
-      torch.sqrt(alphas_bar_prev) * self.betas / (1. - alphas_bar))
+      torch.sqrt(alphas_bar_prev) * betas / (1. - alphas_bar))
     self.register_buffer(
       'posterior_mean_coef2',
       torch.sqrt(alphas) * (1. - alphas_bar_prev) / (1. - alphas_bar))
@@ -68,15 +93,13 @@ class GaussianDiffusionSampler(nn.Module):
     eps = self.model(x_t, condition, t)
     x_0 = self.predict_xstart_from_eps(x_t, t, eps)
 
-    # x_0 = torch.clamp(x_0, 0., 1.)
     model_mean, model_log_var = self.q_mean_variance(x_0, x_t, t)
-
     return model_mean, model_log_var
 
   def forward(self, x_T, condition):
     x = x_T
 
-    for t in reversed(range(self.T)):
+    for t in self.sampling_indices:
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x_T.device)
       mean, log_var = self.p_mean_variance(x, condition, t_vec)
 
@@ -86,5 +109,64 @@ class GaussianDiffusionSampler(nn.Module):
       else:
         noise = 0
       x = mean + torch.exp(0.5 * log_var) * noise
+
+    return x
+
+class DDIMSampler(nn.Module):
+  def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None, eta=0.0):
+    super().__init__()
+    self.model = model
+    self.train_T = train_T
+    self.sampling_T = sampling_T or train_T  # default: full schedule
+    self.eta = eta
+
+    betas = torch.linspace(beta_1, beta_T, train_T).float()
+    alphas = 1. - betas
+    alphas_bar = torch.cumprod(alphas, 0)
+    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:train_T]
+
+    sqrt_alphas_bar = torch.sqrt(alphas_bar)
+    sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
+    sqrt_alphas_bar_prev = torch.sqrt(alphas_bar_prev)
+
+    sigma = torch.zeros_like(alphas_bar)
+    dir_coeff = torch.zeros_like(alphas_bar)
+
+    if eta > 0:
+      frac = (1 - alphas_bar_prev) / (1 - alphas_bar)
+      inner = 1 - (alphas_bar / alphas_bar_prev)
+      sigma = eta * torch.sqrt(torch.clamp(frac * inner, min=0.0))
+
+    dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev - sigma**2, min=0.0))
+
+    step = train_T // self.sampling_T
+    self.sampling_indices = reversed(torch.arange(0, train_T, step)[:self.sampling_T].tolist())
+
+    self.register_buffer("alphas", alphas)
+    self.register_buffer("alphas_bar", alphas_bar)
+    self.register_buffer("alphas_bar_prev", alphas_bar_prev)
+    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
+    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
+    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
+    self.register_buffer("sigma", sigma)
+    self.register_buffer("dir_coeff", dir_coeff)
+
+  def forward(self, x_T, condition):
+    x = x_T
+
+    for t in self.sampling_indices:
+      t_tensor = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
+      eps = self.model(x, condition, t_tensor)
+
+      sqrt_alpha_bar_t = extract(self.sqrt_alphas_bar, t_tensor, x.shape)
+      sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alphas_bar, t_tensor, x.shape)
+      sqrt_a_bar_prev = extract(self.sqrt_alphas_bar_prev, t_tensor, x.shape)
+      sigma = extract(self.sigma, t_tensor, x.shape)
+      dir_coeff = extract(self.dir_coeff, t_tensor, x.shape)
+
+      x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
+
+      noise = sigma * torch.randn_like(x) if t > 0 else 0
+      x = sqrt_a_bar_prev * x0 + dir_coeff * eps + noise
 
     return x

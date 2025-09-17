@@ -6,12 +6,13 @@ from tqdm import tqdm
 import numpy as np
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex
-from sampler import GaussianDiffusionSampler
+from sampler import build_sampler
 
 class Evaluator:
-  def __init__(self, dataloader, config, device):
+  def __init__(self, dataloader, model_config, sampling_config, device):
     self.dataloader = dataloader
-    self.config = config
+    self.model_config = model_config
+    self.sampling_config = sampling_config
     self.device = device
 
     self.metrics = {
@@ -32,12 +33,7 @@ class Evaluator:
 
   def evaluate(self, model, dir=None):
     model.eval()
-    sampler = GaussianDiffusionSampler(
-      model,
-      self.config['beta_1'],
-      self.config['beta_T'],
-      self.config['T']
-    ).to(self.device)
+    sampler = build_sampler(self.model_config, self.sampling_config, model).to(self.device)
 
     with torch.no_grad():
       for metric in self.metrics.values():

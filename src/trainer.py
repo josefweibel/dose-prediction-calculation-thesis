@@ -13,6 +13,7 @@ import wandb
 from data import GDPHMMSlicesDataset
 from models import MambaUnet
 from evaluator import Evaluator
+from config import read_sampling_config
 
 CHECKPOINTS_PATH = Path(__file__).parents[1] / 'checkpoints'
 
@@ -180,7 +181,8 @@ class Trainer:
     else:
       self.wandb_run = None
 
-    self.evaluator = Evaluator(self.val_dataloader, self.config, self.device)
+    sampling_config = read_sampling_config(self.config['validation_sampler'])
+    self.evaluator = Evaluator(self.val_dataloader, model_config, sampling_config, self.device)
 
   @property
   def underlying_model(self):
