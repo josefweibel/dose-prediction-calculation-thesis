@@ -19,7 +19,10 @@ class Evaluator:
       'rmse': MeanSquaredError(squared=False),
       'psnr': PeakSignalNoiseRatio(data_range=dataloader.dataset.dose_range),
       'ssim': StructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range),
-      'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range),
+      'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(
+        data_range=dataloader.dataset.dose_range,
+        betas=(0.0448, 0.2856, 0.3001, 0.2363), # only 4 values since image size is 160x176
+      ),
       'dvh': DVHScore(),
       'dose_score': DoseScore(),
       'homogeneity_index': HomogeneityIndex()
