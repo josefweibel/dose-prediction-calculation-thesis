@@ -11,6 +11,7 @@ epochs: 5000
 mixed_precision: false
 num_workers: 4
 prefetch_factor: 1
+prefetch_on_gpu: false
 
 beta_1: 0.0001
 beta_T: 0.02

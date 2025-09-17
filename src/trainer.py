@@ -121,7 +121,7 @@ class Trainer:
       persistent_workers=self.config['num_workers'] > 0,
     )
 
-    if self.config['prefetch_factor'] > 0 and self.device.type == 'cuda':
+    if self.config['prefetch_on_gpu'] and self.device.type == 'cuda':
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
