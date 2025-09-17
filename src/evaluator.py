@@ -65,8 +65,9 @@ class Evaluator:
 
         if dir is not None:
           dir.mkdir(parents=True, exist_ok=True)
-          for i, file_info in enumerate(info):
-            out_path = dir / file_info['file_name']
+          print('info', info)
+          for i, file_name in enumerate(info['file_name']):
+            out_path = dir / file_name
             np.save(out_path.with_suffix('.npy'), pred[i].cpu().numpy())
 
     return {
