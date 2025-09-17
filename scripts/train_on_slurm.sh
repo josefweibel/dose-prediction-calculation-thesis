@@ -3,6 +3,7 @@
 set -e
 
 HOME_PATH=/storage/homefs/jw19s096
+DATASET=gdphmm-hn-vmat
 
 CONFIG_NAME=$1
 
@@ -31,11 +32,22 @@ sbatch <<EOF
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
+echo "Copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to ${TMPDIR}/data/${DATASET}"
+
+if [ -d "${TMPDIR}" ]; then
+  rm -rf "${TMPDIR}"/*
+fi
+
+mkdir -p "${TMPDIR}/data/${DATASET}"
+cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "${TMPDIR}/data/${DATASET}"
+
+ls -la "${TMPDIR}/data/${DATASET}"
+
 singularity exec \
   --nv \
   --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
-  --bind "/storage/research/artorg_mia/Head_and_Neck/GDPHMM:/storage/research/artorg_mia/Head_and_Neck/GDPHMM" \
+  --bind "${TMPDIR}/data/${DATASET}:/work/data/${DATASET}" \
   --pwd /work \
   ${HOME_PATH}/images/dose-prediction-thesis.sif \
-  bash -c 'PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME}'
+  bash -c 'ls -la /work/data/${DATASET} && PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME}'
 EOF
