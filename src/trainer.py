@@ -9,8 +9,9 @@ import torch.distributed as dist
 from tqdm import tqdm
 import copy
 import wandb
+from multiprocessing import Manager
 
-from data import GDPHMMSlicesDataset
+from data import GDPHMMSlicesDataset, SharedLRUCache
 from models import MambaUnet
 from evaluator import Evaluator
 from config import read_sampling_config
@@ -63,12 +64,16 @@ class Trainer:
 
     self.device = self.__detect_device()
 
+    manager = Manager()
+    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], manager=manager)
+    shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], manager=manager)
+
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
       split='train',
       img_size=self.config['data']['img_size'],
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
-      cache_size=self.config['data']['train_cache_size'],
+      cache=shared_train_cache,
     )
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
@@ -81,7 +86,7 @@ class Trainer:
         split='valid',
         img_size=self.config['data']['img_size'],
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
-        cache_size=self.config['data']['valid_cache_size'],
+        cache=shared_valid_cache,
       )
     if self.is_main_process:
       print('Validation dataset size', len(val_dataset))

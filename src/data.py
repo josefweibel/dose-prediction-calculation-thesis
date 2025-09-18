@@ -6,6 +6,7 @@ from torchvision import transforms as T
 from PIL import Image
 import pandas as pd
 from collections import OrderedDict
+from multiprocessing import Manager, Lock
 
 
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
@@ -51,10 +52,11 @@ def normalize_gdphmm_dose(x):
   return (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
 
 class GDPHMMSlicesDataset(Dataset):
-  def __init__(self, dataset_name, split, img_size, limit=None, cache_size=0):
+  def __init__(self, dataset_name, split, img_size, cache, limit=None):
     self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
+    self.cache = cache
 
     dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
     self.index_map = pd.read_csv(dir / '_index.csv')
@@ -62,8 +64,6 @@ class GDPHMMSlicesDataset(Dataset):
     if limit is not None:
       self.index_map = self.index_map.iloc[:limit]
     self.index_map = self.index_map.to_numpy().tolist()
-
-    self.cache = LRUCache(cache_size)
 
     self.ct_transforms = T.Compose([
       T.ToTensor(),
@@ -176,23 +176,60 @@ class PadToFixedSize:
     return f"{self.__class__.__name__}(target_size={self.target_size}, fill={self.fill}, padding_mode={self.padding_mode})"
 
 
-class LRUCache:
-  def __init__(self, cache_size):
-    self.cache_size = cache_size
-    self.cache = OrderedDict()
+class SharedLRUCache:
+  """
+  Process-safe LRU cache using multiprocessing.Manager.
+  Stores arbitrary key → value mappings with a fixed maximum size.
+  Evicts least recently used entries when full.
+  """
 
-  def get(self, path):
-    path = str(path)
-    if path in self.cache:
-      # Move to end to mark as recently used
-      self.cache.move_to_end(path)
-      return self.cache[path]
-    return None
+  def __init__(self, max_size=10, manager=None):
+    if manager is None:
+      manager = Manager()
+    self.data = manager.dict()   # shared key -> value
+    self.order = manager.list()  # shared list to track LRU order
+    self.lock = Lock()           # ensure atomic updates
+    self.max_size = max_size
 
-  def put(self, path, item):
-    path = str(path)
-    self.cache[path] = item
-    self.cache.move_to_end(path)
-    if len(self.cache) > self.cache_size:
-      # Remove least recently used
-      self.cache.popitem(last=False)
+  def get(self, key):
+    with self.lock:
+      if key in self.data:
+        # move to end to mark as recently used
+        try:
+          self.order.remove(key)
+        except ValueError:
+          pass
+        self.order.append(key)
+        return self.data[key]
+
+      return None
+
+  def put(self, key, value):
+    with self.lock:
+      if key in self.data:
+        # update existing
+        try:
+          self.order.remove(key)
+        except ValueError:
+          pass
+      elif len(self.data) >= self.max_size:
+        # evict least recently used
+        oldest = self.order.pop(0)
+        del self.data[oldest]
+
+      self.data[key] = value
+      self.order.append(key)
+
+  def __contains__(self, key):
+    return key in self.data
+
+  def __len__(self):
+    return len(self.data)
+
+  def keys(self):
+    return list(self.data.keys())
+
+  def clear(self):
+    with self.lock:
+      self.data.clear()
+      self.order[:] = []
