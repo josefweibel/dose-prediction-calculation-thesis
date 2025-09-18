@@ -5,8 +5,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms as T
 from PIL import Image
 import pandas as pd
-from collections import OrderedDict
-from multiprocessing import Manager, Lock
+from multiprocessing import shared_memory, Lock
 
 
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
@@ -96,28 +95,35 @@ class GDPHMMSlicesDataset(Dataset):
   def __getitem__(self, idx):
     file, slice_idx = self.index_map[idx]
 
-    vol = self.cache.get(file)
-    if vol is None:
+    item = self.cache.get(file)
+    if item is None:
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
-      self.cache.put(file, vol)
+
+      dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
+      oar_vol = np.stack(
+        [vol[name] if name in vol else np.zeros_like(vol['dose']) for name in GDPHMM_OAR],
+        axis=0
+      )
+      ptv_vol = np.maximum.reduce(
+        [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
+      )
+
+      item = np.stack([
+        np.expand_dims(dose_vol, axis=0),
+        np.expand_dims(ptv_vol, axis=0),
+        np.expand_dims(vol['img'], axis=0),
+        oar_vol,  # already (num_oar, H, W, D)
+      ], axis=0)
+
+      self.cache.put(file, item)
     else:
       print('cache hit', file)
 
-    # reconstruct relevant slices
-    dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
-    oar_vol = np.stack(
-      [vol[name] if name in vol else np.zeros_like(vol['dose']) for name in GDPHMM_OAR],
-      axis=0
-    )
-    ptv_vol = np.maximum.reduce(
-      [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
-    )
-
     sample = {
-      'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
-      'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
-      'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
-      'ct': self.ct_transforms(vol['img'][:, :, slice_idx]),
+      'dose': self.dose_transforms(item[0, :, :, slice_idx]),
+      'ptv': self.ptv_transforms(item[1, :, :, slice_idx]),
+      'ct': self.ct_transforms(item[2, :, :, slice_idx]),
+      'oar': self.oar_transforms(item[3:, :, :, slice_idx]),
       'info': {
         'file_path': str(file),
         'file_name': file.name,
@@ -180,56 +186,99 @@ class PadToFixedSize:
 
 class SharedLRUCache:
   """
-  Process-safe LRU cache using multiprocessing.Manager.
-  Stores arbitrary key → value mappings with a fixed maximum size.
+  Process-safe LRU cache backed by shared memory for heavy numpy arrays.
+  Stores key → (SharedMemory.name, shape, dtype).
   Evicts least recently used entries when full.
   """
 
-  def __init__(self, max_size, manager):
-    self.data = manager.dict()   # shared key -> value
-    self.order = manager.list()  # shared list to track LRU order
-    self.lock = Lock()           # ensure atomic updates
+  def __init__(self, max_size):
+    self.data = {}   # key -> (shm_name, shape, dtype)
+    self.order = []  # track LRU
+    self.lock = Lock()
     self.max_size = max_size
 
   def get(self, key):
     with self.lock:
-      item = self.data.get(key, None)
-      if item is not None:
-        # move to end to mark as recently used
-        try:
-          self.order.remove(key)
-        except ValueError:
-          pass
-        self.order.append(key)
+      if key not in self.data:
+        return None
 
-      return item
+      shm_name, shape, dtype = self.data[key]
 
-  def put(self, key, value):
-    with self.lock:
-      if key in self.data:
-        # update existing
-        try:
-          self.order.remove(key)
-        except ValueError:
-          pass
-      elif len(self.data) >= self.max_size:
-        # evict least recently used
-        oldest = self.order.pop(0)
-        del self.data[oldest]
-
-      self.data[key] = value
+      # touch LRU order
+      try:
+        self.order.remove(key)
+      except ValueError:
+        pass
       self.order.append(key)
 
+    # attach outside the lock to reduce contention
+    shm = shared_memory.SharedMemory(name=shm_name)
+    arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+    # NOTE: do not close shm here, caller must decide when to release
+    return arr
+
+  def put(self, key, value: np.ndarray):
+    """
+    Stores a numpy array in shared memory.
+    If key already exists, overwrite.
+    If full, evicts oldest.
+    """
+    assert isinstance(value, np.ndarray), "SharedLRUCache only supports numpy arrays"
+
+    with self.lock:
+      if key in self.data:
+        # remove old entry
+        shm_name, _, _ = self.data[key]
+        try:
+          shm = shared_memory.SharedMemory(name=shm_name)
+          shm.close()
+          shm.unlink()
+        except FileNotFoundError:
+          pass
+        self.order.remove(key)
+
+      elif len(self.data) >= self.max_size:
+        # evict oldest
+        oldest = self.order.pop(0)
+        shm_name, _, _ = self.data.pop(oldest)
+        try:
+          shm = shared_memory.SharedMemory(name=shm_name)
+          shm.close()
+          shm.unlink()
+        except FileNotFoundError:
+          pass
+
+      # allocate new shared block
+      shm = shared_memory.SharedMemory(create=True, size=value.nbytes)
+      buf = np.ndarray(value.shape, dtype=value.dtype, buffer=shm.buf)
+      buf[:] = value[:]  # copy data into shared memory
+
+      self.data[key] = (shm.name, value.shape, value.dtype)
+      self.order.append(key)
+
+      shm.close()  # keep the block alive, but close handle here
+
   def __contains__(self, key):
-    return key in self.data
+    with self.lock:
+      return key in self.data
 
   def __len__(self):
-    return len(self.data)
+    with self.lock:
+      return len(self.data)
 
   def keys(self):
-    return list(self.data.keys())
+    with self.lock:
+      return list(self.data.keys())
 
   def clear(self):
     with self.lock:
+      for k, (shm_name, _, _) in self.data.items():
+        try:
+          shm = shared_memory.SharedMemory(name=shm_name)
+          shm.close()
+          shm.unlink()
+        except FileNotFoundError:
+          pass
+
       self.data.clear()
-      self.order[:] = []
+      self.order.clear()

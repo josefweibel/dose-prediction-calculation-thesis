@@ -9,7 +9,6 @@ import torch.distributed as dist
 from tqdm import tqdm
 import copy
 import wandb
-from multiprocessing import Manager
 
 from data import GDPHMMSlicesDataset, SharedLRUCache
 from models import MambaUnet
@@ -64,9 +63,8 @@ class Trainer:
 
     self.device = self.__detect_device()
 
-    self.manager = Manager()
-    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], manager=self.manager)
-    shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], manager=self.manager)
+    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'])
+    shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'])
 
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
