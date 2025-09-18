@@ -68,6 +68,7 @@ class Trainer:
       split='train',
       img_size=self.config['data']['img_size'],
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
+      cache_size=self.config['data']['train_cache_size'],
     )
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
@@ -80,6 +81,7 @@ class Trainer:
         split='valid',
         img_size=self.config['data']['img_size'],
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
+        cache_size=self.config['data']['valid_cache_size'],
       )
     if self.is_main_process:
       print('Validation dataset size', len(val_dataset))

@@ -4,8 +4,9 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms as T
 from PIL import Image
-from tqdm import tqdm
 import pandas as pd
+from collections import OrderedDict
+
 
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
 
@@ -50,7 +51,7 @@ def normalize_gdphmm_dose(x):
   return (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
 
 class GDPHMMSlicesDataset(Dataset):
-  def __init__(self, dataset_name, split, img_size, limit=None):
+  def __init__(self, dataset_name, split, img_size, limit=None, cache_size=0):
     self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
@@ -61,6 +62,8 @@ class GDPHMMSlicesDataset(Dataset):
     if limit is not None:
       self.index_map = self.index_map.iloc[:limit]
     self.index_map = self.index_map.to_numpy().tolist()
+
+    self.cache = LRUCache(cache_size)
 
     self.ct_transforms = T.Compose([
       T.ToTensor(),
@@ -92,7 +95,11 @@ class GDPHMMSlicesDataset(Dataset):
 
   def __getitem__(self, idx):
     file, slice_idx = self.index_map[idx]
-    vol = np.load(file, allow_pickle=True)['arr_0'].item()
+
+    vol = self.cache.get(file)
+    if vol is None:
+      vol = np.load(file, allow_pickle=True)['arr_0'].item()
+      self.cache.put(file, vol)
 
     # reconstruct relevant slices
     dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
@@ -167,3 +174,25 @@ class PadToFixedSize:
 
   def __repr__(self):
     return f"{self.__class__.__name__}(target_size={self.target_size}, fill={self.fill}, padding_mode={self.padding_mode})"
+
+
+class LRUCache:
+  def __init__(self, cache_size):
+    self.cache_size = cache_size
+    self.cache = OrderedDict()
+
+  def get(self, path):
+    path = str(path)
+    if path in self.cache:
+      # Move to end to mark as recently used
+      self.cache.move_to_end(path)
+      return self.cache[path]
+    return None
+
+  def put(self, path, item):
+    path = str(path)
+    self.cache[path] = item
+    self.cache.move_to_end(path)
+    if len(self.cache) > self.cache_size:
+      # Remove least recently used
+      self.cache.popitem(last=False)

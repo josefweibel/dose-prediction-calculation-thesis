@@ -3,6 +3,8 @@ data:
   img_size: [176, 160]
   train_limit: 32
   val_on_train: true
+  train_cache_size: 128
+  valid_cache_size: 32
 
 batch_size: 32
 lr: 0.01

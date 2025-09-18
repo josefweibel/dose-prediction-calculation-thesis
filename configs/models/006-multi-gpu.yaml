@@ -1,6 +1,8 @@
 data:
   dataset_name: gdphmm-hn-vmat
   img_size: [176, 160]
+  train_cache_size: 128
+  valid_cache_size: 32
 
 batch_size: 64
 lr: 0.01
