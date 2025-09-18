@@ -24,7 +24,7 @@ sbatch <<EOF
 #SBATCH -p gpu
 #SBATCH -q job_gpu
 #SBATCH --time 24:00:00
-#SBATCH --mem 32G
+#SBATCH --mem 48G
 #SBATCH --gpus h100:1
 #SBATCH --cpus-per-gpu 16
 #SBATCH --out=${HOME_PATH}/logs/${CONFIG_NAME}-%j.log
@@ -32,29 +32,34 @@ sbatch <<EOF
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
-echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to ${TMPDIR}/data/${DATASET}"
+echo "SLURM_JOB_ID=\$SLURM_JOB_ID"
+echo "TMPDIR=\$TMPDIR"
+echo "HOSTNAME=\$HOSTNAME"
+echo
 
-if [ -d "${TMPDIR}" ]; then
-  rm -rf "${TMPDIR}"/*
+SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
+
+echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to \${SCRATCH_BASE_DIR}/data/${DATASET}"
+
+if [ -d "\${SCRATCH_BASE_DIR}" ]; then
+  rm -rf "\${SCRATCH_BASE_DIR}"/*
 fi
 
-mkdir -p "${TMPDIR}/data/${DATASET}"
-cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "${TMPDIR}/data/${DATASET}"
-
-ls -la "${TMPDIR}/data/${DATASET}"
+mkdir -p "\${SCRATCH_BASE_DIR}/data"
+cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "\${SCRATCH_BASE_DIR}/data/"
 
 singularity exec \
   --nv \
   --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
-  --bind "${TMPDIR}/data/${DATASET}:/work/data/${DATASET}" \
+  --bind "\${SCRATCH_BASE_DIR}/data/${DATASET}:/work/data/${DATASET}" \
   --pwd /work \
   ${HOME_PATH}/images/dose-prediction-thesis.sif \
-  bash -c 'ls -la /work/data/${DATASET} && PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME}'
+  bash -c 'ls -la /work/data/${DATASET}/ && PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME}'
 
 echo "job ${CONFIG_NAME} completed"
 
-rm -rf "${TMPDIR}"/*
+rm -rf "\${SCRATCH_BASE_DIR}"/*
 
-echo "cleaned up ${TMPDIR}"
+echo "cleaned up \${SCRATCH_BASE_DIR}"
 
 EOF
