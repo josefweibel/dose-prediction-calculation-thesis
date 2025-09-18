@@ -100,6 +100,8 @@ class GDPHMMSlicesDataset(Dataset):
     if vol is None:
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
       self.cache.put(file, vol)
+    else:
+      print('cache hit', file)
 
     # reconstruct relevant slices
     dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
@@ -183,9 +185,7 @@ class SharedLRUCache:
   Evicts least recently used entries when full.
   """
 
-  def __init__(self, max_size=10, manager=None):
-    if manager is None:
-      manager = Manager()
+  def __init__(self, max_size, manager):
     self.data = manager.dict()   # shared key -> value
     self.order = manager.list()  # shared list to track LRU order
     self.lock = Lock()           # ensure atomic updates
@@ -193,16 +193,16 @@ class SharedLRUCache:
 
   def get(self, key):
     with self.lock:
-      if key in self.data:
+      item = self.data.get(key, None)
+      if item is not None:
         # move to end to mark as recently used
         try:
           self.order.remove(key)
         except ValueError:
           pass
         self.order.append(key)
-        return self.data[key]
 
-      return None
+      return item
 
   def put(self, key, value):
     with self.lock:

@@ -64,9 +64,9 @@ class Trainer:
 
     self.device = self.__detect_device()
 
-    manager = Manager()
-    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], manager=manager)
-    shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], manager=manager)
+    self.manager = Manager()
+    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], manager=self.manager)
+    shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], manager=self.manager)
 
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
