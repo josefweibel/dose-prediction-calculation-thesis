@@ -195,8 +195,14 @@ class Trainer:
     else:
       self.wandb_run = None
 
-    sampling_config = read_sampling_config(self.config['validation_sampler'])
-    self.evaluator = Evaluator(self.val_dataloader, model_config, sampling_config, self.device)
+    self.evaluator = Evaluator(
+      self.val_dataloader,
+      model_config,
+      read_sampling_config(self.config['validation_sampler']),
+      self.device,
+      rank=self.rank,
+      world_size=self.world_size,
+    )
 
   def train(self):
     pbar_epochs = tqdm(range(self.epoch + 1, self.to_epoch), desc='Training', disable=not self.is_main_process)
@@ -248,11 +254,11 @@ class Trainer:
 
       if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
         self.ema_model.eval()  # Ensure model is in eval mode
-        if self.is_main_process:
-          metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch-{self.epoch}')
+        metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch-{self.epoch}')
+
+        if self.is_main_process and self.wandb_run:
           metrics = {f'eval/{key}': value for key, value in metrics.items()}
-          if self.wandb_run:
-            self.wandb_run.log({**metrics, 'epoch': self.epoch})
+          self.wandb_run.log({**metrics, 'epoch': self.epoch})
 
     if self.is_main_process and self.wandb_run:
       self.wandb_run.finish()

@@ -1,5 +1,6 @@
 from time import time
 import torch
+import torch.distributed as dist
 from torchmetrics import MeanSquaredError
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, MultiScaleStructuralSimilarityIndexMeasure
 from tqdm import tqdm
@@ -10,11 +11,13 @@ from metrics import DVHScore, DoseScore, HomogeneityIndex
 from sampler import build_sampler
 
 class Evaluator:
-  def __init__(self, dataloader, model_config, sampling_config, device):
+  def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1):
     self.dataloader = dataloader
     self.model_config = model_config
     self.sampling_config = sampling_config
     self.device = device
+    self.rank = rank
+    self.world_size = world_size
 
     dose_range = dataloader.dataset.dose_range[1] - dataloader.dataset.dose_range[0]
     self.metrics = {
@@ -44,7 +47,7 @@ class Evaluator:
       sum_duration = 0.0
       n_duration = 0
 
-      pbar = tqdm(self.dataloader, desc='Evaluating', leave=False)
+      pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
       for structure, target, info in pbar:
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
@@ -62,14 +65,20 @@ class Evaluator:
           metric.update(pred, target)
 
         if dir is not None:
-          dir.mkdir(parents=True, exist_ok=True)
+          if self.rank == 0:
+            dir.mkdir(parents=True, exist_ok=True)
+
           for i, (file_name, slice_index) in enumerate(zip(info['file_name'], info['index'])):
             p = Path(file_name)
             out_path = Path(dir) / f"{p.stem}-{slice_index.item()}.npy"
             np.save(out_path, pred[i].cpu().numpy())
 
+    if self.world_size > 1:
+      duration_tensor = torch.tensor([sum_duration, n_duration], device=self.device, dtype=torch.float32)
+      dist.all_reduce(duration_tensor, op=dist.ReduceOp.SUM)
+      sum_duration, n_duration = duration_tensor[0].item(), int(duration_tensor[1].item())
+
     return {
       'duration': sum_duration / n_duration,
       **{k: m.compute().item() for k, m in self.metrics.items()}
     }
-
