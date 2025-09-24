@@ -4,6 +4,7 @@ from torchmetrics import MeanSquaredError
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, MultiScaleStructuralSimilarityIndexMeasure
 from tqdm import tqdm
 import numpy as np
+from pathlib import Path
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex
 from sampler import build_sampler
@@ -15,11 +16,12 @@ class Evaluator:
     self.sampling_config = sampling_config
     self.device = device
 
+    dose_range = dataloader.dataset.dose_range[1] - dataloader.dataset.dose_range[0]
     self.metrics = {
       'mse': MeanSquaredError(),
       'rmse': MeanSquaredError(squared=False),
-      'psnr': PeakSignalNoiseRatio(data_range=dataloader.dataset.dose_range),
-      'ssim': StructuralSimilarityIndexMeasure(data_range=dataloader.dataset.dose_range),
+      'psnr': PeakSignalNoiseRatio(data_range=dose_range),
+      'ssim': StructuralSimilarityIndexMeasure(data_range=dose_range),
       'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(
         data_range=dataloader.dataset.dose_range,
         betas=(0.0448, 0.2856, 0.3001, 0.2363), # only 4 values since image size is 160x176
@@ -61,10 +63,10 @@ class Evaluator:
 
         if dir is not None:
           dir.mkdir(parents=True, exist_ok=True)
-          print('info', info)
-          for i, file_name in enumerate(info['file_name']):
-            out_path = dir / file_name
-            np.save(out_path.with_suffix('.npy'), pred[i].cpu().numpy())
+          for i, (file_name, slice_index) in enumerate(zip(info['file_name'], info['index'])):
+            p = Path(file_name)
+            out_path = Path(dir) / f"{p.stem}-{slice_index.item()}.npy"
+            np.save(out_path, pred[i].cpu().numpy())
 
     return {
       'duration': sum_duration / n_duration,

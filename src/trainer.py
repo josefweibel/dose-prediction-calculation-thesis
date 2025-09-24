@@ -6,9 +6,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 import copy
 import wandb
+from multiprocessing import Manager
 
 from data import GDPHMMSlicesDataset, SharedLRUCache
 from models import MambaUnet
@@ -43,6 +45,7 @@ class DiffusionModelTrainerModule(nn.Module):
 
   def forward(self, x_0, condition):
     t = torch.randint(self.T, size=(x_0.shape[0], ), device=x_0.device)
+    # t = torch.full((x_0.shape[0], ), 1, device=x_0.device)
     noise = torch.randn_like(x_0)
     x_t = (
       extract(self.sqrt_alphas_bar, t, x_0.shape) * x_0 +
@@ -50,6 +53,7 @@ class DiffusionModelTrainerModule(nn.Module):
     )
 
     noise_pred = self.model(x_t, condition, t)
+
     return F.mse_loss(noise_pred, noise, reduction='none').mean()
 
 class Trainer:
@@ -63,14 +67,15 @@ class Trainer:
 
     self.device = self.__detect_device()
 
-    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'])
-    shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'])
+    self.manager = Manager()
 
+    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], self.manager)
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
       split='train',
       img_size=self.config['data']['img_size'],
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
+      skip=self.config['data']['train_skip'] if 'train_skip' in self.config['data'] else 0,
       cache=shared_train_cache,
     )
     if self.is_main_process:
@@ -79,11 +84,13 @@ class Trainer:
     if 'val_on_train' in self.config['data'] and self.config['data']['val_on_train']:
       val_dataset = train_dataset
     else:
+      shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], self.manager)
       val_dataset = GDPHMMSlicesDataset(
         dataset_name=self.config['data']['dataset_name'],
         split='valid',
         img_size=self.config['data']['img_size'],
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
+        skip=self.config['data']['valid_skip'] if 'valid_skip' in self.config['data'] else 0,
         cache=shared_valid_cache,
       )
     if self.is_main_process:
@@ -135,6 +142,7 @@ class Trainer:
       img_size=self.config['data']['img_size'],
       in_struc_channels=train_dataset.n_structures
     ).to(self.device)
+    self.underlying_model = self.net_model
 
     if self.is_distributed:
       self.net_model = DDP(
@@ -152,7 +160,7 @@ class Trainer:
       T=self.config['T']
     ).to(self.device)
 
-    self.optim = torch.optim.AdamW(self.underlying_model.parameters(), lr=self.config['lr'])
+    self.__setup_optimizer()
     self.use_mixed_precision = self.device.type == 'cuda' and self.config['mixed_precision']
     self.scaler = torch.amp.GradScaler('cuda') if self.use_mixed_precision else None
 
@@ -167,6 +175,7 @@ class Trainer:
       self.underlying_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
+      self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
 
       if self.scaler is not None and 'scaler_state_dict' in checkpoint:
         self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -189,11 +198,6 @@ class Trainer:
     sampling_config = read_sampling_config(self.config['validation_sampler'])
     self.evaluator = Evaluator(self.val_dataloader, model_config, sampling_config, self.device)
 
-  @property
-  def underlying_model(self):
-    """Get the underlying model without DDP wrapper."""
-    return self.net_model.module if self.is_distributed else self.net_model
-
   def train(self):
     pbar_epochs = tqdm(range(self.epoch + 1, self.to_epoch), desc='Training', disable=not self.is_main_process)
     for self.epoch in pbar_epochs:
@@ -208,10 +212,11 @@ class Trainer:
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
 
-        with torch.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
+        with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, structure)
 
-        # Scale loss and backward pass
+        current_lr = self.optim.param_groups[0]['lr']
+
         if self.scaler is not None:
           self.scaler.scale(loss).backward()
           self.scaler.unscale_(self.optim)
@@ -222,13 +227,14 @@ class Trainer:
           loss.backward()
           torch.nn.utils.clip_grad_norm_(self.underlying_model.parameters(), self.config['grad_clip'])
           self.optim.step()
+          self.lr_scheduler.step()
 
         self.__update_ema_weigths(self.underlying_model, self.ema_model, self.config['ema_decay'])
 
         if self.is_main_process:
           pbar_epochs.set_postfix(loss=loss.item())
           if self.wandb_run:
-            self.wandb_run.log({'train/loss': loss.item(), 'epoch': self.epoch})
+              self.wandb_run.log({'train/loss': loss.item(), 'train/lr': current_lr, 'epoch': self.epoch})
 
       if self.is_distributed:
         dist.barrier()
@@ -243,7 +249,7 @@ class Trainer:
       if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
         self.ema_model.eval()  # Ensure model is in eval mode
         if self.is_main_process:
-          metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch_{self.epoch}')
+          metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch-{self.epoch}')
           metrics = {f'eval/{key}': value for key, value in metrics.items()}
           if self.wandb_run:
             self.wandb_run.log({**metrics, 'epoch': self.epoch})
@@ -266,6 +272,7 @@ class Trainer:
       'net_model_state_dict': self.underlying_model.state_dict(),
       'ema_model_state_dict': self.ema_model.state_dict(),
       'optimizer_state_dict': self.optim.state_dict(),
+      'lr_scheduler_state_dict': self.lr_scheduler.state_dict(),
       'wandb_run_id': self.wandb_run.id
     }
 
@@ -305,6 +312,7 @@ class Trainer:
     if checkpoint:
       return wandb.init(
         project='dose-prediction-thesis',
+        entity='joseph-weibel',
         name=self.name,
         id=checkpoint['wandb_run_id'],
         config=self.config,
@@ -313,10 +321,32 @@ class Trainer:
     else:
       return wandb.init(
         project='dose-prediction-thesis',
+        entity='joseph-weibel',
         name=self.name,
         id=None,
         config=self.config,
       )
+
+  def __setup_optimizer(self):
+    if 'lr_scheduler' in self.config:
+      start_decay = self.config['lr_scheduler']['start_decay']
+      end_decay = self.config['lr_scheduler']['end_decay']
+      end_lr = self.config['lr_scheduler']['end_lr']
+      start_lr = self.config['lr_scheduler']['start_lr']
+
+      def linear_lr_schedule(step):
+        if step < start_decay:
+          return 1.0
+        else:
+          progress = (step - start_decay) / (end_decay - start_decay)
+          scale = (end_lr / start_lr) + (1 - progress) * (1 - end_lr / start_lr)
+          return max(scale, end_lr / start_lr)
+
+      self.optim = torch.optim.AdamW(self.underlying_model.parameters(), lr=start_lr)
+      self.lr_scheduler = LambdaLR(self.optim, lr_lambda=linear_lr_schedule)
+    else:
+      self.optim = torch.optim.AdamW(self.underlying_model.parameters(), lr=self.config['lr'])
+      self.lr_scheduler = LambdaLR(self.optim, lr_lambda=lambda step: 1.0)
 
 class PrefetchLoader:
   def __init__(self, loader, device):

@@ -55,6 +55,8 @@ if __name__ == '__main__':
   print(json.dumps(config, indent=2))
   print()
 
+  mp.set_start_method('spawn', force=True)
+
   if args.distributed:
     world_size = torch.cuda.device_count()
     if world_size == 0:
@@ -64,7 +66,6 @@ if __name__ == '__main__':
     print(f'Training with {world_size} process(es)')
     print()
 
-    mp.set_start_method('spawn', force=True)
     mp.spawn(
       train_worker,
       args=(world_size, config, args.epochs),

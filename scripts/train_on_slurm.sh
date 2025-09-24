@@ -21,12 +21,12 @@ fi
 
 sbatch <<EOF
 #!/bin/bash
-#SBATCH -p gpu
-#SBATCH -q job_gpu
+#SBATCH -p gpu-invest
+#SBATCH -q job_gpu_caim 
 #SBATCH --time 24:00:00
-#SBATCH --mem 48G
-#SBATCH --gpus h100:1
-#SBATCH --cpus-per-gpu 16
+#SBATCH --mem 180G
+#SBATCH --gpus h100:2
+#SBATCH --cpus-per-gpu 8 
 #SBATCH --out=${HOME_PATH}/logs/${CONFIG_NAME}-%j.log
 #SBATCH --job-name=${CONFIG_NAME}
 #SBATCH --mail-type=END,FAIL
@@ -48,13 +48,18 @@ fi
 mkdir -p "\${SCRATCH_BASE_DIR}/data"
 cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "\${SCRATCH_BASE_DIR}/data/"
 
+echo
+df -h /dev/shm
+echo
+
 singularity exec \
   --nv \
   --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
   --bind "\${SCRATCH_BASE_DIR}/data/${DATASET}:/work/data/${DATASET}" \
+  --bind "/storage/scratch/users/jw19s096:/storage/scratch/users/jw19s096" \
   --pwd /work \
   ${HOME_PATH}/images/dose-prediction-thesis.sif \
-  bash -c 'ls -la /work/data/${DATASET}/ && PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME}'
+  bash -c 'PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME}'
 
 echo "job ${CONFIG_NAME} completed"
 

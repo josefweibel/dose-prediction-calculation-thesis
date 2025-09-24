@@ -7,14 +7,13 @@ from PIL import Image
 import pandas as pd
 from multiprocessing import shared_memory, Lock
 
-
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
 
 GDPHMM_IMG_MIN = -1024
 GDPHMM_IMG_MAX = 3071
 
 GDPHMM_DOSE_MIN = 0
-GDPHMM_DOSE_MAX = 122
+GDPHMM_DOSE_MAX = 88 
 
 GDPHMM_OAR = [
   'Cochlea_L', 'Cochlea_R', 'Eyes', 'Lens_L', 'Lens_R', 'OpticNerve_L', 'OpticNerve_R',
@@ -51,7 +50,7 @@ def normalize_gdphmm_dose(x):
   return (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
 
 class GDPHMMSlicesDataset(Dataset):
-  def __init__(self, dataset_name, split, img_size, cache, limit=None):
+  def __init__(self, dataset_name, split, img_size, cache, limit=None, skip=0):
     self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
@@ -60,6 +59,7 @@ class GDPHMMSlicesDataset(Dataset):
     dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
     self.index_map = pd.read_csv(dir / '_index.csv')
     self.index_map['file'] = self.index_map['file'].apply(lambda f: dir / f)
+    self.index_map = self.index_map[skip:]
     if limit is not None:
       self.index_map = self.index_map.iloc[:limit]
     self.index_map = self.index_map.to_numpy().tolist()
@@ -95,35 +95,34 @@ class GDPHMMSlicesDataset(Dataset):
   def __getitem__(self, idx):
     file, slice_idx = self.index_map[idx]
 
-    item = self.cache.get(file)
-    if item is None:
+    dose_vol, dose_shm = self.cache.get(file.name + ':dose')
+    if dose_vol is None:
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
 
-      dose_vol = vol['dose'] * vol['dose_scale'] * vol['Body']
+      dose_vol = (vol['dose'] * vol['dose_scale'] * vol['Body']).astype(np.float32)
       oar_vol = np.stack(
-        [vol[name] if name in vol else np.zeros_like(vol['dose']) for name in GDPHMM_OAR],
+        [vol[name].astype(np.uint8) if name in vol else np.zeros_like(vol['dose'].astype(np.uint8)) for name in GDPHMM_OAR],
         axis=0
-      )
+      ).astype(np.uint8)
       ptv_vol = np.maximum.reduce(
         [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
-      )
+      ).astype(np.uint8)
+      ct_vol = vol['img'].astype(np.float32)
 
-      item = np.stack([
-        np.expand_dims(dose_vol, axis=0),
-        np.expand_dims(ptv_vol, axis=0),
-        np.expand_dims(vol['img'], axis=0),
-        oar_vol,  # already (num_oar, H, W, D)
-      ], axis=0)
-
-      self.cache.put(file, item)
+      self.cache.put(file.name + ':dose', dose_vol)
+      self.cache.put(file.name + ':ptv', ptv_vol)
+      self.cache.put(file.name + ':ct', ct_vol)
+      self.cache.put(file.name + ':oar', oar_vol)
     else:
-      print('cache hit', file)
+      ptv_vol, ptv_shm = self.cache.get(file.name + ':ptv')
+      ct_vol, ct_shm = self.cache.get(file.name + ':ct')
+      oar_vol, oar_shm = self.cache.get(file.name + ':oar')
 
     sample = {
-      'dose': self.dose_transforms(item[0, :, :, slice_idx]),
-      'ptv': self.ptv_transforms(item[1, :, :, slice_idx]),
-      'ct': self.ct_transforms(item[2, :, :, slice_idx]),
-      'oar': self.oar_transforms(item[3:, :, :, slice_idx]),
+      'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
+      'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
+      'ct': self.ct_transforms(ct_vol[:, :, slice_idx]),
+      'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
       'info': {
         'file_path': str(file),
         'file_name': file.name,
@@ -131,6 +130,12 @@ class GDPHMMSlicesDataset(Dataset):
         'index': slice_idx
       }
     }
+
+    if dose_shm:
+      dose_shm.close()
+      ptv_shm.close()
+      ct_shm.close()
+      oar_shm.close()
 
     structure = torch.cat([sample['ct'], sample['ptv'], sample['oar']], dim=0)
     return structure, sample['dose'], sample['info']
@@ -191,18 +196,19 @@ class SharedLRUCache:
   Evicts least recently used entries when full.
   """
 
-  def __init__(self, max_size):
-    self.data = {}   # key -> (shm_name, shape, dtype)
-    self.order = []  # track LRU
+  def __init__(self, max_size, manager):
+    self.data = manager.dict()   # key -> (shm_name, shape, dtypei, nbytes)
+    self.order = manager.list()  # track LRU
     self.lock = Lock()
     self.max_size = max_size
+    self.nbytes = 0
 
   def get(self, key):
     with self.lock:
       if key not in self.data:
-        return None
+        return None, None
 
-      shm_name, shape, dtype = self.data[key]
+      shm_name, shape, dtype, _ = self.data[key]
 
       # touch LRU order
       try:
@@ -215,7 +221,7 @@ class SharedLRUCache:
     shm = shared_memory.SharedMemory(name=shm_name)
     arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
     # NOTE: do not close shm here, caller must decide when to release
-    return arr
+    return arr, shm
 
   def put(self, key, value: np.ndarray):
     """
@@ -228,7 +234,7 @@ class SharedLRUCache:
     with self.lock:
       if key in self.data:
         # remove old entry
-        shm_name, _, _ = self.data[key]
+        shm_name, _, _, nbytes = self.data[key]
         try:
           shm = shared_memory.SharedMemory(name=shm_name)
           shm.close()
@@ -236,25 +242,30 @@ class SharedLRUCache:
         except FileNotFoundError:
           pass
         self.order.remove(key)
+        self.nbytes -= nbytes
 
       elif len(self.data) >= self.max_size:
         # evict oldest
         oldest = self.order.pop(0)
-        shm_name, _, _ = self.data.pop(oldest)
+        shm_name, _, _, nbytes = self.data.pop(oldest)
         try:
           shm = shared_memory.SharedMemory(name=shm_name)
           shm.close()
           shm.unlink()
         except FileNotFoundError:
           pass
+        
+        self.nbytes -= nbytes
 
       # allocate new shared block
       shm = shared_memory.SharedMemory(create=True, size=value.nbytes)
       buf = np.ndarray(value.shape, dtype=value.dtype, buffer=shm.buf)
       buf[:] = value[:]  # copy data into shared memory
 
-      self.data[key] = (shm.name, value.shape, value.dtype)
+      nbytes = value.nbytes
+      self.data[key] = (shm.name, value.shape, value.dtype, nbytes)
       self.order.append(key)
+      self.nbytes += nbytes
 
       shm.close()  # keep the block alive, but close handle here
 
@@ -272,7 +283,7 @@ class SharedLRUCache:
 
   def clear(self):
     with self.lock:
-      for k, (shm_name, _, _) in self.data.items():
+      for k, (shm_name, _, _, _) in self.data.items():
         try:
           shm = shared_memory.SharedMemory(name=shm_name)
           shm.close()
