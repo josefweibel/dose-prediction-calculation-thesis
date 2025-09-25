@@ -1,9 +1,15 @@
-FROM pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime
+FROM pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel
 
-COPY --from=ghcr.io/josefweibel/dose-prediction-thesis-builder:latest /opt/conda/lib/python3.11/site-packages /opt/conda/lib/python3.11/site-packages
+RUN apt-get update && apt-get install -y \
+    git \
+    rdma-core \
+    libibverbs-dev \
+    librdmacm-dev \
+    ibutils \
+    perftest \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-
+RUN pip install --no-cache-dir mamba-ssm
 RUN pip install --no-cache-dir \
   numpy \
   pandas \
@@ -16,7 +22,8 @@ RUN pip install --no-cache-dir \
   jupyter \
   PyYAML \
   wandb \
-  torchmetrics
+  torchmetrics \
+  python-dotenv
 
 ENV PATH=/opt/conda/bin:$PATH
 
