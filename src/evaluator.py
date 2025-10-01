@@ -8,7 +8,7 @@ import numpy as np
 from pathlib import Path
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex
-from sampler import build_sampler
+from model_sampler import build_sampler
 
 class Evaluator:
   def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1):

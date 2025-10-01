@@ -1,172 +1,119 @@
 import torch
-from torch import nn
-from torch.nn import functional as F
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from multiprocessing import Manager
+from pathlib import Path
+import pandas as pd
+
+from config import read_model_config
+from data import GDPHMMSlicesDataset, SharedLRUCache
+from evaluator import Evaluator
+from models import MambaUnet
+from utils.mp import detect_device, PrefetchLoader
+from utils.checkpointing import load_last_checkpoint, load_checkpoint
 
 
-def build_sampler(model_config, sampling_config, model):
-  if sampling_config['sampler'] == 'ddpm':
-    return GaussianDiffusionSampler(
-      model,
-      model_config['beta_1'],
-      model_config['beta_T'],
-      model_config['T'],
-      sampling_config['T'],
+N_SAMPLES_FOR_TIME_ESTIMATE = 5
+
+SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
+
+
+class Sampler:
+  def __init__(
+    self,
+    model_name,
+    sampling_config,
+    data_split,
+    epoch=None,
+    rank=None,
+    world_size=None,
+    local_rank=None,
+  ):
+    self.model_name = model_name
+    self.model_config = read_model_config(model_name)
+    self.sampling_config = sampling_config
+    self.data_split = data_split
+    self.rank = rank
+    self.world_size = world_size if world_size is not None else 1
+    self.is_distributed = rank is not None and world_size is not None
+    self.is_main_process = not self.is_distributed or rank == 0
+
+    self.device = detect_device(local_rank)
+
+    self.manager = Manager()
+    dummy_cache = SharedLRUCache(0, self.manager)
+    self.dataset = GDPHMMSlicesDataset(
+      dataset_name=self.model_config['data']['dataset_name'],
+      split=data_split,
+      img_size=self.model_config['data']['img_size'],
+      cache=dummy_cache,
     )
-  elif sampling_config['sampler'] == 'ddim':
-    return DDIMSampler(
-      model,
-      model_config['beta_1'],
-      model_config['beta_T'],
-      model_config['T'],
-      sampling_config['T'],
-      eta=sampling_config['eta']
-    )
-  else:
-    raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
+    if self.is_main_process:
+      print('Dataset size', len(self.dataset))
 
+    self.sampler = None
+    if self.is_distributed:
+      self.sampler = DistributedSampler(
+        self.dataset,
+        num_replicas=world_size,
+        rank=rank,
+      )
 
-def extract(v, t, x_shape):
-  """
-  Extract some coefficients at specified timesteps, then reshape to
-  [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
-  """
-  out = v.to(t.device).gather(0, t).float()
-  return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
-
-class GaussianDiffusionSampler(nn.Module):
-  def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None):
-    super().__init__()
-
-    self.model = model
-    self.train_T = train_T
-    self.sampling_T = sampling_T or train_T  # default: full schedule
-
-    betas = torch.linspace(beta_1, beta_T, train_T).float()
-    alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, dim=0)
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:train_T]
-
-    step = train_T // self.sampling_T
-    self.sampling_indices = reversed(torch.arange(0, train_T, step)[:self.sampling_T].tolist())
-
-    self.register_buffer("betas", betas)
-    self.register_buffer("alphas", alphas)
-    self.register_buffer("alphas_bar", alphas_bar)
-    self.register_buffer("alphas_bar_prev", alphas_bar_prev)
-    self.register_buffer('sqrt_recip_alphas_bar', torch.sqrt(1. / alphas_bar))
-    self.register_buffer('sqrt_recipm1_alphas_bar', torch.sqrt(1. / alphas_bar - 1))
-
-    self.register_buffer(
-      'posterior_var',
-      betas * (1. - alphas_bar_prev) / (1. - alphas_bar))
-    self.register_buffer(
-      'posterior_log_var_clipped',
-      torch.log(self.posterior_var.clamp(min=1e-20)))
-    self.register_buffer(
-      'posterior_mean_coef1',
-      torch.sqrt(alphas_bar_prev) * betas / (1. - alphas_bar))
-    self.register_buffer(
-      'posterior_mean_coef2',
-      torch.sqrt(alphas) * (1. - alphas_bar_prev) / (1. - alphas_bar))
-
-  def q_mean_variance(self, x_0, x_t, t):
-    """
-    Compute the mean and variance of the diffusion posterior
-    q(x_{t-1} | x_t, x_0)
-    """
-    assert x_0.shape == x_t.shape
-    posterior_mean = (
-      extract(self.posterior_mean_coef1, t, x_t.shape) * x_0 +
-      extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
-    )
-    posterior_log_var_clipped = extract(self.posterior_log_var_clipped, t, x_t.shape)
-    return posterior_mean, posterior_log_var_clipped
-
-  def predict_xstart_from_eps(self, x_t, t, eps):
-    assert x_t.shape == eps.shape
-    return (
-      extract(self.sqrt_recip_alphas_bar, t, x_t.shape) * x_t -
-      extract(self.sqrt_recipm1_alphas_bar, t, x_t.shape) * eps
+    self.dataloader = DataLoader(
+      self.dataset,
+      batch_size=self.sampling_config['batch_size'] // self.world_size,
+      shuffle=False,
+      sampler=self.sampler,
+      num_workers=self.sampling_config['num_workers'],
+      pin_memory=True,
+      prefetch_factor=self.sampling_config['prefetch_factor'],
+      persistent_workers=self.sampling_config['num_workers'] > 0,
     )
 
-  def p_mean_variance(self, x_t, condition, t):
-    eps = self.model(x_t, condition, t)
-    x_0 = self.predict_xstart_from_eps(x_t, t, eps)
+    if self.sampling_config['prefetch_on_gpu'] and self.device.type == 'cuda':
+      self.dataloader = PrefetchLoader(self.dataloader, self.device)
 
-    model_mean, model_log_var = self.q_mean_variance(x_0, x_t, t)
-    return model_mean, model_log_var
+    self.ema_model = MambaUnet(
+      img_size=self.model_config['data']['img_size'],
+      in_struc_channels=self.dataset.n_structures
+    ).to(self.device)
+    self.underlying_model = self.ema_model
 
-  def forward(self, x_T, condition):
-    x = x_T
+    if self.is_distributed:
+      self.ema_model = DDP(
+        self.ema_model,
+        device_ids=[self.rank] if self.device.type == 'cuda' else None,
+        find_unused_parameters=False
+      )
 
-    for t in self.sampling_indices:
-      t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x_T.device)
-      mean, log_var = self.p_mean_variance(x, condition, t_vec)
+    if epoch is None:
+      checkpoint = load_last_checkpoint(model_name)
+    else:
+      checkpoint = load_checkpoint(model_name, epoch)
 
-      # no noise when t == 0
-      if t > 0:
-        noise = torch.randn_like(x)
-      else:
-        noise = 0
-      x = mean + torch.exp(0.5 * log_var) * noise
+    self.epoch = checkpoint['epoch']
+    self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
 
-    return x
+    self.evaluator = Evaluator(
+      self.dataloader,
+      self.model_config,
+      self.sampling_config,
+      self.device,
+      rank=self.rank,
+      world_size=self.world_size,
+    )
 
-class DDIMSampler(nn.Module):
-  def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None, eta=0.0):
-    super().__init__()
-    self.model = model
-    self.train_T = train_T
-    self.sampling_T = sampling_T or train_T  # default: full schedule
-    self.eta = eta
+  def sample(self):
+    dir = SAMPLES_PATH / self.model_name / self.sampling_config['name'] / f'{self.data_split}_{self.epoch}'
+    self.underlying_model.eval()
+    sample_metrics, overall_metrics = self.evaluator.evaluate(self.underlying_model, dir=dir)
 
-    betas = torch.linspace(beta_1, beta_T, train_T).float()
-    alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, 0)
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:train_T]
+    if self.is_main_process:
+      pd.DataFrame(sample_metrics).to_csv(dir / '_sample_metrics.csv', index=False)
+      pd.DataFrame(overall_metrics).to_csv(dir / '_overall_metrics.csv', index=False)
 
-    sqrt_alphas_bar = torch.sqrt(alphas_bar)
-    sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
-    sqrt_alphas_bar_prev = torch.sqrt(alphas_bar_prev)
+    if self.is_main_process:
+      for i in range(N_SAMPLES_FOR_TIME_ESTIMATE):
+        pass
 
-    sigma = torch.zeros_like(alphas_bar)
-    dir_coeff = torch.zeros_like(alphas_bar)
 
-    if eta > 0:
-      frac = (1 - alphas_bar_prev) / (1 - alphas_bar)
-      inner = 1 - (alphas_bar / alphas_bar_prev)
-      sigma = eta * torch.sqrt(torch.clamp(frac * inner, min=0.0))
-
-    dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev - sigma**2, min=0.0))
-
-    step = train_T // self.sampling_T
-    self.sampling_indices = reversed(torch.arange(0, train_T, step)[:self.sampling_T].tolist())
-
-    self.register_buffer("alphas", alphas)
-    self.register_buffer("alphas_bar", alphas_bar)
-    self.register_buffer("alphas_bar_prev", alphas_bar_prev)
-    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
-    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
-    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
-    self.register_buffer("sigma", sigma)
-    self.register_buffer("dir_coeff", dir_coeff)
-
-  def forward(self, x_T, condition):
-    x = x_T
-
-    for t in self.sampling_indices:
-      t_tensor = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
-      eps = self.model(x, condition, t_tensor)
-
-      sqrt_alpha_bar_t = extract(self.sqrt_alphas_bar, t_tensor, x.shape)
-      sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alphas_bar, t_tensor, x.shape)
-      sqrt_a_bar_prev = extract(self.sqrt_alphas_bar_prev, t_tensor, x.shape)
-      sigma = extract(self.sigma, t_tensor, x.shape)
-      dir_coeff = extract(self.dir_coeff, t_tensor, x.shape)
-
-      x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
-
-      noise = sigma * torch.randn_like(x) if t > 0 else 0
-      x = sqrt_a_bar_prev * x0 + dir_coeff * eps + noise
-
-    return x

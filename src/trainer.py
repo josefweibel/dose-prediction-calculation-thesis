@@ -17,8 +17,8 @@ from data import GDPHMMSlicesDataset, SharedCache, SharedLRUCache
 from models import MambaUnet
 from evaluator import Evaluator
 from config import read_sampling_config
-
-CHECKPOINTS_PATH = Path(__file__).parents[1] / 'checkpoints'
+from utils.mp import detect_device, PrefetchLoader
+from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
 
 
 def extract(v, t, x_shape):
@@ -67,7 +67,8 @@ class Trainer:
     self.is_distributed = rank is not None and world_size is not None
     self.is_main_process = not self.is_distributed or rank == 0
 
-    self.device = self.__detect_device()
+    self.device = detect_device(local_rank)
+
     self.manager = Manager()
 
     if self.config['data']['train_cache_size'] == 'inf':
@@ -175,7 +176,7 @@ class Trainer:
 
     self.epoch = -1
 
-    checkpoint = self.__load_last_checkpoint()
+    checkpoint = load_last_checkpoint(self.name)
     if checkpoint:
       self.epoch = checkpoint['epoch']
       if self.is_main_process:
@@ -188,10 +189,8 @@ class Trainer:
 
       if self.scaler is not None and 'scaler_state_dict' in checkpoint:
         self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    else:
-      if self.is_main_process:
-        print('Start fresh run')
-        (CHECKPOINTS_PATH / self.name).mkdir(parents=True, exist_ok=True)
+    elif self.is_main_process:
+      print('Start fresh run')
 
     if n_epochs is None:
       self.to_epoch = self.config['epochs']
@@ -249,14 +248,14 @@ class Trainer:
         if self.is_main_process:
           pbar_epochs.set_postfix(loss=loss.item())
           if self.wandb_run:
-              self.wandb_run.log({'train/loss': loss.item(), 'train/lr': current_lr, 'epoch': self.epoch})
+            self.wandb_run.log({'train/loss': loss.item(), 'train/lr': current_lr, 'epoch': self.epoch})
 
       if self.is_distributed:
         dist.barrier()
 
       if self.is_main_process:
         self.__save_checkpoint()
-        self.__cleanup_checkpoints()
+        cleanup_checkpoints(self.name, self.config['checkpoint_interval'])
 
       if self.is_distributed:
         dist.barrier()
@@ -277,16 +276,7 @@ class Trainer:
     self.train_dataloader.dataset.finish()
     self.val_dataloader.dataset.finish()
 
-  def __load_last_checkpoint(self):
-    checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
-    if not checkpoint_files:
-      return None
-
-    return torch.load(max(checkpoint_files, key=lambda f: int(f.stem)))
-
   def __save_checkpoint(self):
-    checkpoint_path = CHECKPOINTS_PATH / self.name / f'{self.epoch}.pt'
-
     checkpoint_data = {
       'epoch': self.epoch,
       'net_model_state_dict': self.underlying_model.state_dict(),
@@ -299,15 +289,7 @@ class Trainer:
     if self.scaler is not None:
       checkpoint_data['scaler_state_dict'] = self.scaler.state_dict()
 
-    torch.save(checkpoint_data, checkpoint_path)
-
-  def __cleanup_checkpoints(self):
-    checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
-    checkpoint_files = sorted(checkpoint_files, key=lambda f: int(f.stem))
-    checkpoint_files = checkpoint_files[:-1] # keep latest
-    for file in checkpoint_files:
-      if (int(file.stem) + 1) % self.config['checkpoint_interval'] > 0:
-        file.unlink()
+    save_checkpoint(self.name, checkpoint_data)
 
   def __update_ema_weigths(self, source, target, decay):
     source_dict = source.state_dict()
@@ -316,17 +298,6 @@ class Trainer:
       target_dict[key].data.copy_(
         target_dict[key].data * decay + source_dict[key].data * (1 - decay)
       )
-
-  def __detect_device(self):
-    if self.is_distributed:
-      # In distributed mode, use the specified rank as device
-      return torch.device(f"cuda:{self.local_rank}")
-    elif torch.cuda.is_available():
-      return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-      return torch.device("mps")
-    else:
-      return torch.device("cpu")
 
   def __setup_wandb_run(self, checkpoint):
     if checkpoint:
@@ -367,42 +338,3 @@ class Trainer:
     else:
       self.optim = torch.optim.AdamW(self.underlying_model.parameters(), lr=self.config['lr'])
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=lambda step: 1.0)
-
-class PrefetchLoader:
-  def __init__(self, loader, device):
-    self.loader = loader
-    self.device = device
-    self.stream = torch.cuda.Stream()
-
-  def __getattribute__(self, name):
-    if name in ['loader', 'device', 'stream', 'iter', 'next_batch', 'preload', '__iter__', '__next__']:
-      return object.__getattribute__(self, name)
-    return getattr(self.loader, name)
-
-  def __iter__(self):
-    self.iter = iter(self.loader)
-    self.preload()
-    return self
-
-  def __next__(self):
-    torch.cuda.current_stream().wait_stream(self.stream)
-    batch = self.next_batch
-    if batch is None:
-      raise StopIteration
-    self.preload()
-    return batch
-
-  def __len__(self):
-    return len(self.loader)
-
-  def preload(self):
-    try:
-      batch = next(self.iter)
-    except StopIteration:
-      self.next_batch = None
-      return
-    with torch.cuda.stream(self.stream):
-      self.next_batch = tuple(
-        x.to(self.device, non_blocking=True) if torch.is_tensor(x) else x
-        for x in batch
-      )
