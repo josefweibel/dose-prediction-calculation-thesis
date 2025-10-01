@@ -1,7 +1,7 @@
 import torch
 from pathlib import Path
 
-CHECKPOINTS_PATH = Path(__file__).parents[1] / 'checkpoints'
+CHECKPOINTS_PATH = Path(__file__).parents[2] / 'checkpoints'
 
 
 def load_last_checkpoint(model_name):
@@ -19,7 +19,7 @@ def load_checkpoint(model_name, epoch):
 
 def save_checkpoint(model_name, checkpoint_data):
   (CHECKPOINTS_PATH / model_name).mkdir(parents=True, exist_ok=True)
-  checkpoint_path = CHECKPOINTS_PATH / model_name / f'{checkpoint_data['epoch']}.pt'
+  checkpoint_path = CHECKPOINTS_PATH / model_name / f"{checkpoint_data['epoch']}.pt"
   torch.save(checkpoint_data, checkpoint_path)
 
 def cleanup_checkpoints(model_name, checkpoint_interval):

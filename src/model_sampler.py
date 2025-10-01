@@ -84,13 +84,13 @@ class GaussianDiffusionSampler(nn.Module):
       sqrt_one_minus_alpha_bar_t = torch.sqrt(1. - alpha_bar_t)
       sqrt_recip_alpha_t = torch.sqrt(1. / alpha_t)
 
-      mean = sqrt_recip_alpha_t * (x - (beta_t / sqrt_one_minus_alpha_bar_t) * eps)
+      x = sqrt_recip_alpha_t * (x - (beta_t / sqrt_one_minus_alpha_bar_t) * eps)
 
       if t > 0:
-          noise = torch.randn_like(x)
-          x = mean + torch.sqrt(beta_t) * noise
-      else:
-          x = mean
+        noise = torch.randn_like(x)
+        x += torch.sqrt(beta_t) * noise
+
+    return x
 
   # def q_mean_variance(self, x_0, x_t, t):
   #   """
