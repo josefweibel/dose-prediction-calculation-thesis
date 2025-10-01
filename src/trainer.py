@@ -11,8 +11,9 @@ from tqdm import tqdm
 import copy
 import wandb
 from multiprocessing import Manager
+import os
 
-from data import GDPHMMSlicesDataset, SharedLRUCache
+from data import GDPHMMSlicesDataset, SharedCache, SharedLRUCache
 from models import MambaUnet
 from evaluator import Evaluator
 from config import read_sampling_config
@@ -57,19 +58,23 @@ class DiffusionModelTrainerModule(nn.Module):
     return F.mse_loss(noise_pred, noise, reduction='none').mean()
 
 class Trainer:
-  def __init__(self, model_config, n_epochs=None, rank=None, world_size=None):
+  def __init__(self, model_config, n_epochs=None, rank=None, world_size=None, local_rank=None):
     self.name = model_config["name"]
     self.config = model_config
     self.rank = rank
+    self.local_rank = local_rank
     self.world_size = world_size if world_size is not None else 1
     self.is_distributed = rank is not None and world_size is not None
     self.is_main_process = not self.is_distributed or rank == 0
 
     self.device = self.__detect_device()
-
     self.manager = Manager()
 
-    shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], self.manager)
+    if self.config['data']['train_cache_size'] == 'inf':
+      shared_train_cache = SharedCache(self.manager)
+    else:
+      shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], self.manager)
+
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
       split='train',
@@ -84,7 +89,11 @@ class Trainer:
     if 'val_on_train' in self.config['data'] and self.config['data']['val_on_train']:
       val_dataset = train_dataset
     else:
-      shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], self.manager)
+      if self.config['data']['valid_cache_size'] == 'inf':
+        shared_valid_cache = SharedCache(self.manager)
+      else:
+        shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], self.manager)
+
       val_dataset = GDPHMMSlicesDataset(
         dataset_name=self.config['data']['dataset_name'],
         split='valid',
@@ -96,7 +105,6 @@ class Trainer:
     if self.is_main_process:
       print('Validation dataset size', len(val_dataset))
 
-    # Setup distributed samplers
     self.train_sampler = None
     self.val_sampler = None
     if self.is_distributed:
@@ -147,8 +155,9 @@ class Trainer:
     if self.is_distributed:
       self.net_model = DDP(
         self.net_model,
-        device_ids=[self.rank] if self.device.type == 'cuda' else None,
-        find_unused_parameters=False
+        device_ids=[self.local_rank],
+        output_device=self.local_rank,
+        find_unused_parameters=False,
       )
 
     self.ema_model = copy.deepcopy(self.underlying_model).to(self.device)
@@ -253,15 +262,20 @@ class Trainer:
         dist.barrier()
 
       if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
-        self.ema_model.eval()  # Ensure model is in eval mode
+        self.ema_model.eval()
         metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch-{self.epoch}')
 
         if self.is_main_process and self.wandb_run:
           metrics = {f'eval/{key}': value for key, value in metrics.items()}
           self.wandb_run.log({**metrics, 'epoch': self.epoch})
 
+  def finish(self):
+    print('finishing trainer instance', flush=True)
     if self.is_main_process and self.wandb_run:
       self.wandb_run.finish()
+
+    self.train_dataloader.dataset.finish()
+    self.val_dataloader.dataset.finish()
 
   def __load_last_checkpoint(self):
     checkpoint_files = list((CHECKPOINTS_PATH / self.name).glob('*.pt'))
@@ -306,7 +320,7 @@ class Trainer:
   def __detect_device(self):
     if self.is_distributed:
       # In distributed mode, use the specified rank as device
-      return torch.device(f"cuda:{self.rank}")
+      return torch.device(f"cuda:{self.local_rank}")
     elif torch.cuda.is_available():
       return torch.device("cuda")
     elif torch.backends.mps.is_available():

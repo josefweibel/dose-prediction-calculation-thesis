@@ -68,10 +68,14 @@ class Evaluator:
           if self.rank == 0:
             dir.mkdir(parents=True, exist_ok=True)
 
+          dist.barrier()
+
           for i, (file_name, slice_index) in enumerate(zip(info['file_name'], info['index'])):
             p = Path(file_name)
             out_path = Path(dir) / f"{p.stem}-{slice_index.item()}.npy"
             np.save(out_path, pred[i].cpu().numpy())
+
+          dist.barrier()
 
     if self.world_size > 1:
       duration_tensor = torch.tensor([sum_duration, n_duration], device=self.device, dtype=torch.float32)

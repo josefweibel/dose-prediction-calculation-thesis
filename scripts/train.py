@@ -5,39 +5,15 @@ from pathlib import Path
 import argparse
 import json
 import os
+import signal
+import sys
+import atexit
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from config import read_model_config
 from trainer import Trainer
-
-
-def train_worker(rank, world_size, config, n_epochs):
-  try:
-    setup_distributed(rank, world_size)
-
-    trainer = Trainer(config, n_epochs=n_epochs, rank=rank, world_size=world_size)
-    trainer.train()
-  except Exception as e:
-    print(f"Error in worker {rank}: {e}")
-    raise
-  finally:
-    cleanup_distributed()
-
-
-def setup_distributed(rank, world_size, backend='nccl'):
-  """Initialize distributed training."""
-  os.environ['MASTER_ADDR'] = 'localhost'
-  os.environ['MASTER_PORT'] = '12355'
-
-  # Initialize the process group
-  dist.init_process_group(backend, rank=rank, world_size=world_size)
-
-
-def cleanup_distributed():
-  """Clean up distributed training."""
-  dist.destroy_process_group()
 
 
 if __name__ == '__main__':
@@ -57,21 +33,47 @@ if __name__ == '__main__':
 
   mp.set_start_method('spawn', force=True)
 
+  trainer = None
+  def cleanup():
+    if trainer is not None:
+      trainer.finish()
+
+  atexit.register(cleanup)
+
+  def handle_signal(signum, frame):
+    print(f"Received signal {signum}")
+    cleanup()
+    sys.exit(0)
+
+  signal.signal(signal.SIGTERM, handle_signal)
+  signal.signal(signal.SIGINT, handle_signal)
+
   if args.distributed:
-    world_size = torch.cuda.device_count()
-    if world_size == 0:
-      print("No CUDA devices available. Falling back to single-process training.")
-      world_size = 1
+    rank = int(os.environ["SLURM_PROCID"])
+    local_rank = int(os.environ["SLURM_LOCALID"])
+    world_size = int(os.environ["SLURM_NTASKS"])
+    master_addr = os.environ["MASTER_ADDR"]
+    master_port = os.environ.get("MASTER_PORT", "12355")
 
-    print(f'Training with {world_size} process(es)')
-    print()
+    print(f"Distributed training: rank {rank}, local_rank {local_rank}, world_size {world_size}", flush=True)
+    print(f"{rank} tcp://{master_addr}:{master_port}", flush=True)
 
-    mp.spawn(
-      train_worker,
-      args=(world_size, config, args.epochs),
-      nprocs=world_size,
-      join=True
+    torch.cuda.set_device(local_rank)
+
+    dist.init_process_group(
+      backend="nccl",
+      init_method=f"tcp://{master_addr}:{master_port}",
+      rank=rank,
+      world_size=world_size,
+      device_id=local_rank,
     )
+
+    dist.barrier()
+
+    trainer = Trainer(config, n_epochs=args.epochs, rank=rank, world_size=world_size, local_rank=local_rank)
+    trainer.train()
+
+    dist.destroy_process_group()
   else:
     print(f'Training with a single process')
     print()

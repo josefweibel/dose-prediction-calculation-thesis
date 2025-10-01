@@ -143,6 +143,9 @@ class GDPHMMSlicesDataset(Dataset):
   def denormalize_target(self, x):
     return x * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
 
+  def finish(self):
+    return self.cache.clear()
+
 class PadToFixedSize:
   def __init__(self, target_size, fill=0, padding_mode='constant'):
     """
@@ -192,7 +195,7 @@ class PadToFixedSize:
 class SharedLRUCache:
   """
   Process-safe LRU cache backed by shared memory for heavy numpy arrays.
-  Stores key → (SharedMemory.name, shape, dtype).
+  Stores key → (SharedMemory.name, shape, dtype, nbytes).
   Evicts least recently used entries when full.
   """
 
@@ -292,4 +295,86 @@ class SharedLRUCache:
           pass
 
       self.data.clear()
-      self.order.clear()
+      self.order[:] = []
+
+
+class SharedCache:
+    """
+    Process-safe cache backed by shared memory for heavy numpy arrays.
+    Stores key → (SharedMemory.name, shape, dtype, nbytes).
+    Does NOT evict entries (grows until manually cleared).
+    """
+
+    def __init__(self, manager):
+        self.data = manager.dict()   # key -> (shm_name, shape, dtype, nbytes)
+        self.lock = Lock()
+        self.nbytes = 0
+
+    def get(self, key):
+        with self.lock:
+            if key not in self.data:
+                return None, None
+
+            shm_name, shape, dtype, _ = self.data[key]
+
+        # attach outside lock
+        shm = shared_memory.SharedMemory(name=shm_name)
+        arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+        # caller must close() shm when done
+        return arr, shm
+
+    def put(self, key, value: np.ndarray):
+        """
+        Stores a numpy array in shared memory.
+        Overwrites if key already exists.
+        """
+        assert isinstance(value, np.ndarray), "SharedCache only supports numpy arrays"
+
+        with self.lock:
+            if key in self.data:
+                # remove old block
+                shm_name, _, _, nbytes = self.data[key]
+                try:
+                    shm = shared_memory.SharedMemory(name=shm_name)
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+                self.nbytes -= nbytes
+
+            # allocate new block
+            shm = shared_memory.SharedMemory(create=True, size=value.nbytes)
+            buf = np.ndarray(value.shape, dtype=value.dtype, buffer=shm.buf)
+            buf[:] = value[:]  # copy data
+
+            nbytes = value.nbytes
+            self.data[key] = (shm.name, value.shape, value.dtype, nbytes)
+            self.nbytes += nbytes
+
+            shm.close()  # keep alive in shared mem
+
+    def __contains__(self, key):
+        with self.lock:
+            return key in self.data
+
+    def __len__(self):
+        with self.lock:
+            return len(self.data)
+
+    def keys(self):
+        with self.lock:
+            return list(self.data.keys())
+
+    def clear(self):
+        with self.lock:
+            for k, (shm_name, _, _, _) in self.data.items():
+                try:
+                    shm = shared_memory.SharedMemory(name=shm_name)
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+            self.data.clear()
+            self.nbytes = 0
+
