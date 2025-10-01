@@ -106,11 +106,7 @@ class Sampler:
   def sample(self):
     dir = SAMPLES_PATH / self.model_name / self.sampling_config['name'] / f'{self.data_split}_{self.epoch}'
     self.underlying_model.eval()
-    sample_metrics, overall_metrics = self.evaluator.evaluate(self.underlying_model, dir=dir)
-
-    if self.is_main_process:
-      pd.DataFrame(sample_metrics).to_csv(dir / '_sample_metrics.csv', index=False)
-      pd.DataFrame(overall_metrics).to_csv(dir / '_overall_metrics.csv', index=False)
+    _ = self.evaluator.evaluate(self.underlying_model, dir=dir)
 
     if self.is_main_process:
       for i in range(N_SAMPLES_FOR_TIME_ESTIMATE):

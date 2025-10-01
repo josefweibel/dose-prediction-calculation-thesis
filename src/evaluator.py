@@ -6,6 +6,7 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
+import pandas as pd
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex
 from model_sampler import build_sampler
@@ -21,17 +22,18 @@ class Evaluator:
 
     dose_range = dataloader.dataset.dose_range[1] - dataloader.dataset.dose_range[0]
     self.metrics = {
-      'mse': MeanSquaredError(),
-      'rmse': MeanSquaredError(squared=False),
-      'psnr': PeakSignalNoiseRatio(data_range=dose_range),
-      'ssim': StructuralSimilarityIndexMeasure(data_range=dose_range),
+      'mse': MeanSquaredError(sync_on_compute=False),
+      'rmse': MeanSquaredError(squared=False, sync_on_compute=False),
+      'psnr': PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False),
+      'ssim': StructuralSimilarityIndexMeasure(data_range=dose_range, sync_on_compute=False),
       'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(
         data_range=dataloader.dataset.dose_range,
         betas=(0.0448, 0.2856, 0.3001, 0.2363), # only 4 values since image size is 160x176
+        sync_on_compute=False,
       ),
-      'dvh': DVHScore(),
-      'dose_score': DoseScore(),
-      'homogeneity_index': HomogeneityIndex()
+      'dvh': DVHScore(sync_on_compute=False),
+      'dose_score': DoseScore(sync_on_compute=False),
+      'homogeneity_index': HomogeneityIndex(sync_on_compute=False)
     }
 
     self.metrics = {k: v.to(device) for k, v in self.metrics.items()}
@@ -41,11 +43,7 @@ class Evaluator:
     sampler = build_sampler(self.model_config, self.sampling_config, model).to(self.device)
 
     with torch.no_grad():
-      for metric in self.metrics.values():
-        metric.reset()
-
-      sum_duration = 0.0
-      n_duration = 0
+      sample_metrics = []
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
       for structure, target, info in pbar:
@@ -56,13 +54,26 @@ class Evaluator:
         start = time()
         x_T = torch.randn_like(target, device=self.device)
         pred = sampler(x_T, structure)
-        sum_duration += time() - start
-        n_duration += target.shape[0]
+        duration = time() - start
         pred = torch.clamp(pred, 0., 1.)
-        pred = self.dataloader.dataset.denormalize_target(pred)
 
-        for metric in self.metrics.values():
-          metric.update(pred, target)
+        # Calculate metrics for each sample in the batch
+        for i in range(target.shape[0]):
+          sample_pred = pred[i:i+1]  # Keep batch dimension
+          sample_target = target[i:i+1]
+
+          sample_row = {
+            'file_name': info['file_name'][i],
+            'slice_index': info['index'][i].item(),
+            'duration': duration / target.shape[0]
+          }
+
+          for metric_name, metric in self.metrics.items():
+            metric.reset()
+            metric.update(sample_pred, sample_target)
+            sample_row[metric_name] = metric.compute().item()
+
+          sample_metrics.append(sample_row)
 
         if dir is not None:
           if self.rank == 0:
@@ -78,11 +89,18 @@ class Evaluator:
           dist.barrier()
 
     if self.world_size > 1:
-      duration_tensor = torch.tensor([sum_duration, n_duration], device=self.device, dtype=torch.float32)
-      dist.all_reduce(duration_tensor, op=dist.ReduceOp.SUM)
-      sum_duration, n_duration = duration_tensor[0].item(), int(duration_tensor[1].item())
+      all_sample_metrics = [None] * self.world_size
+      dist.all_gather_object(all_sample_metrics, sample_metrics)
 
-    return {
-      'duration': sum_duration / n_duration,
-      **{k: m.compute().item() for k, m in self.metrics.items()}
-    }
+      if self.rank == 0:
+        sample_metrics = [item for sublist in all_sample_metrics for item in sublist]
+
+    overall_metrics = {}
+    for metric_name in self.metrics.keys():
+      overall_metrics[metric_name] = np.mean([row[metric_name] for row in sample_metrics])
+
+    if dir is not None and self.rank == 0:
+      pd.DataFrame(sample_metrics).to_csv(dir / '_sample_metrics.csv', index=False)
+      pd.DataFrame(overall_metrics).to_csv(dir / '_overall_metrics.csv', index=False)
+
+    return sample_metrics, overall_metrics

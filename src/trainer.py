@@ -262,7 +262,7 @@ class Trainer:
 
       if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
         self.ema_model.eval()
-        metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch-{self.epoch}')
+        _, metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch-{self.epoch}')
 
         if self.is_main_process and self.wandb_run:
           metrics = {f'eval/{key}': value for key, value in metrics.items()}
