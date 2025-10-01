@@ -44,7 +44,6 @@ class GaussianDiffusionSampler(nn.Module):
     betas = torch.linspace(beta_1, beta_T, train_T).float()
     alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, dim=0)
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:train_T]
 
     indices = torch.linspace(self.train_T - 1, 0, self.sampling_T, dtype=torch.long)
     self.sampling_indices = indices.tolist()
@@ -52,22 +51,9 @@ class GaussianDiffusionSampler(nn.Module):
     self.register_buffer("betas", betas)
     self.register_buffer("alphas", alphas)
     self.register_buffer("alphas_bar", alphas_bar)
-    self.register_buffer("alphas_bar_prev", alphas_bar_prev)
-    self.register_buffer('sqrt_recip_alphas_bar', torch.sqrt(1. / alphas_bar))
-    self.register_buffer('sqrt_recipm1_alphas_bar', torch.sqrt(1. / alphas_bar - 1))
-
-    self.register_buffer(
-      'posterior_var',
-      betas * (1. - alphas_bar_prev) / (1. - alphas_bar))
-    self.register_buffer(
-      'posterior_log_var_clipped',
-      torch.log(self.posterior_var.clamp(min=1e-20)))
-    self.register_buffer(
-      'posterior_mean_coef1',
-      torch.sqrt(alphas_bar_prev) * betas / (1. - alphas_bar))
-    self.register_buffer(
-      'posterior_mean_coef2',
-      torch.sqrt(alphas) * (1. - alphas_bar_prev) / (1. - alphas_bar))
+    self.register_buffer("sqrt_betas", torch.sqrt(betas))
+    self.register_buffer("sqrt_one_minus_alphas_bar", torch.sqrt(1. - alphas_bar))
+    self.register_buffer("sqrt_recip_alphas", torch.sqrt(1. / alphas))
 
   def forward(self, x_T, condition):
     x = x_T
@@ -77,63 +63,17 @@ class GaussianDiffusionSampler(nn.Module):
       eps = self.model(x, condition, t_vec)
 
       beta_t = extract(self.betas, t_vec, x.shape)
-      alpha_t = extract(self.alphas, t_vec, x.shape)
-      alpha_bar_t = extract(self.alphas_bar, t_vec, x.shape)
-
-      # TODO precompute
-      sqrt_one_minus_alpha_bar_t = torch.sqrt(1. - alpha_bar_t)
-      sqrt_recip_alpha_t = torch.sqrt(1. / alpha_t)
+      sqrt_beta_t = extract(self.sqrt_betas, t_vec, x.shape)
+      sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alphas_bar, t_vec, x.shape)
+      sqrt_recip_alpha_t = extract(self.sqrt_recip_alphas, t_vec, x.shape)
 
       x = sqrt_recip_alpha_t * (x - (beta_t / sqrt_one_minus_alpha_bar_t) * eps)
 
       if t > 0:
         noise = torch.randn_like(x)
-        x += torch.sqrt(beta_t) * noise
+        x += sqrt_beta_t * noise
 
     return x
-
-  # def q_mean_variance(self, x_0, x_t, t):
-  #   """
-  #   Compute the mean and variance of the diffusion posterior
-  #   q(x_{t-1} | x_t, x_0)
-  #   """
-  #   assert x_0.shape == x_t.shape
-  #   posterior_mean = (
-  #     extract(self.posterior_mean_coef1, t, x_t.shape) * x_0 +
-  #     extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
-  #   )
-  #   posterior_log_var_clipped = extract(self.posterior_log_var_clipped, t, x_t.shape)
-  #   return posterior_mean, posterior_log_var_clipped
-
-  # def predict_xstart_from_eps(self, x_t, t, eps):
-  #   assert x_t.shape == eps.shape
-  #   return (
-  #     extract(self.sqrt_recip_alphas_bar, t, x_t.shape) * x_t -
-  #     extract(self.sqrt_recipm1_alphas_bar, t, x_t.shape) * eps
-  #   )
-
-  # def p_mean_variance(self, x_t, condition, t):
-  #   eps = self.model(x_t, condition, t)
-  #   x_0 = self.predict_xstart_from_eps(x_t, t, eps)
-
-  #   model_mean, model_log_var = self.q_mean_variance(x_0, x_t, t)
-  #   return model_mean, model_log_var
-
-  # def forward(self, x_T, condition):
-  #   x = x_T
-
-  #   for t in self.sampling_indices:
-  #     t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x_T.device)
-  #     mean, log_var = self.p_mean_variance(x, condition, t_vec)
-
-  #     # no noise when t == 0
-  #     if t > 0:
-  #       noise = torch.randn_like(x)
-  #     else:
-  #       noise = 0
-  #     x = mean + torch.exp(0.5 * log_var) * noise
-
-  #   return x
 
 class DDIMSampler(nn.Module):
   def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None, eta=0.0):
