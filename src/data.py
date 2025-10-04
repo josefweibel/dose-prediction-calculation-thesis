@@ -61,7 +61,8 @@ class GDPHMMSlicesDataset(Dataset):
     self.index_map['file'] = self.index_map['file'].apply(lambda f: dir / f)
     self.index_map = self.index_map[skip:]
     if limit is not None:
-      self.index_map = self.index_map.iloc[:limit]
+      indices = np.linspace(0, len(self.index_map) - 1, limit, dtype=int)
+      self.index_map = self.index_map.iloc[indices]
     self.index_map = self.index_map.to_numpy().tolist()
 
     self.ct_transforms = T.Compose([
@@ -81,7 +82,7 @@ class GDPHMMSlicesDataset(Dataset):
       T.Lambda(to_plain_tensor),
       T.Lambda(to_float),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
-    ]) 
+    ])
 
     self.dose_transforms = T.Compose([
       T.ToTensor(),
