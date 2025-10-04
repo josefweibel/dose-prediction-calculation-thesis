@@ -25,13 +25,6 @@ def build_sampler(model_config, sampling_config, model):
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
 
 
-def extract(v, t, x_shape):
-  """
-  Extract some coefficients at specified timesteps, then reshape to
-  [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
-  """
-  return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
-
 class GaussianDiffusionSampler(nn.Module):
   def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None):
     super().__init__()
@@ -105,9 +98,6 @@ class DDIMSampler(nn.Module):
     step = train_T // self.sampling_T
     self.sampling_indices = reversed(torch.arange(0, train_T, step)[:self.sampling_T].tolist())
 
-    self.register_buffer("alphas", alphas)
-    self.register_buffer("alphas_bar", alphas_bar)
-    self.register_buffer("alphas_bar_prev", alphas_bar_prev)
     self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
     self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
     self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
@@ -118,18 +108,20 @@ class DDIMSampler(nn.Module):
     x = x_T
 
     for t in self.sampling_indices:
-      t_tensor = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
-      eps = self.model(x, condition, t_tensor)
+      t_vec = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
+      eps = self.model(x, condition, t_vec)
 
-      sqrt_alpha_bar_t = extract(self.sqrt_alphas_bar, t_tensor, x.shape)
-      sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alphas_bar, t_tensor, x.shape)
-      sqrt_a_bar_prev = extract(self.sqrt_alphas_bar_prev, t_tensor, x.shape)
-      sigma = extract(self.sigma, t_tensor, x.shape)
-      dir_coeff = extract(self.dir_coeff, t_tensor, x.shape)
+      sqrt_alpha_bar_t = self.sqrt_alphas_bar[t]
+      sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[t]
+      sqrt_a_bar_prev = self.sqrt_alphas_bar_prev[t]
+      sigma = self.sigma[t]
+      dir_coeff = self.dir_coeff[t]
 
       x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
+      x = sqrt_a_bar_prev * x0 + dir_coeff * eps
 
-      noise = sigma * torch.randn_like(x) if t > 0 else 0
-      x = sqrt_a_bar_prev * x0 + dir_coeff * eps + noise
+      if t > 0:
+        noise = torch.randn_like(x)
+        x += sigma * noise
 
     return x
