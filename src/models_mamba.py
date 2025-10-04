@@ -345,11 +345,11 @@ class VisionMamba(nn.Module):
             self.rope = VisionRotaryEmbeddingFast(
                 dim=half_head_dim, pt_seq_len=pt_hw_seq_len, ft_seq_len=hw_seq_len
             )
-        self.head = (
-            nn.Linear(self.num_features, num_classes)
-            if num_classes > 0
-            else nn.Identity()
-        )
+        # self.head = (
+        #     nn.Linear(self.num_features, num_classes)
+        #     if num_classes > 0
+        #     else nn.Identity()
+        # )
 
         # TODO: release this comment
         dpr = [
@@ -388,7 +388,7 @@ class VisionMamba(nn.Module):
 
         # original init
         self.apply(segm_init_weights)
-        self.head.apply(segm_init_weights)
+        # self.head.apply(segm_init_weights)
         if if_abs_pos_embed:
             trunc_normal_(self.pos_embed, std=0.02)
 
