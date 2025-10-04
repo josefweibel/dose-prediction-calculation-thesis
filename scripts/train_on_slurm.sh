@@ -34,7 +34,6 @@ sbatch <<EOF
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
-
 # export NCCL_DEBUG=INFO
 # export NCCL_DEBUG_SUBSYS=ALL
 # export TORCH_NCCL_DEBUG=INFO
@@ -48,7 +47,7 @@ sbatch <<EOF
 # export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
 
-
+# export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 export MASTER_ADDR=\$(scontrol show hostname \${SLURM_NODELIST} | head -n 1)
 export MASTER_PORT=12356
@@ -62,14 +61,15 @@ SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
 
 echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to \${SCRATCH_BASE_DIR}/data/${DATASET}"
 
+function clean_up {
+  rm -rf "\${SCRATCH_BASE_DIR:?}"/*
+  find /dev/shm -user "\$USER" -delete
+  echo "Cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
+}
+trap clean_up EXIT
+
 srun bash -c '
   SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
-
-  function clean_up {
-    rm -rf "\${SCRATCH_BASE_DIR}"/*
-    echo "cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
-  }
-  trap clean_up EXIT
 
   if [ "\${SLURM_LOCALID}" -eq 0 ]; then
     echo "[\$(hostname)] copying dataset..."
@@ -99,7 +99,7 @@ srun bash -c '
     --bind /dev/infiniband:/dev/infiniband \
     --pwd /work \
     ${HOME_PATH}/images/dose-prediction-thesis.sif \
-    bash -c "ls -l /dev/infiniband && ibv_devices && PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME} --distributed"
+    bash -c "PYTHONPATH=/work/src python scripts/train.py --config ${CONFIG_NAME} --distributed"
 '
 
 echo "job ${CONFIG_NAME} completed"

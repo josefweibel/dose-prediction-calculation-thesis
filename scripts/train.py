@@ -33,21 +33,6 @@ if __name__ == '__main__':
 
   mp.set_start_method('spawn', force=True)
 
-  trainer = None
-  def cleanup():
-    if trainer is not None:
-      trainer.finish()
-
-  atexit.register(cleanup)
-
-  def handle_signal(signum, frame):
-    print(f"Received signal {signum}")
-    cleanup()
-    sys.exit(0)
-
-  signal.signal(signal.SIGTERM, handle_signal)
-  signal.signal(signal.SIGINT, handle_signal)
-
   if args.distributed:
     rank = int(os.environ["SLURM_PROCID"])
     local_rank = int(os.environ["SLURM_LOCALID"])
@@ -70,15 +55,49 @@ if __name__ == '__main__':
 
     dist.barrier()
 
-    trainer = Trainer(config, n_epochs=args.epochs, rank=rank, world_size=world_size, local_rank=local_rank)
-    trainer.train()
+    try:
+      trainer = Trainer(config, n_epochs=args.epochs, rank=rank, world_size=world_size, local_rank=local_rank)
 
-    dist.destroy_process_group()
+      def cleanup():
+        print('cleanup of trainer tried')
+        trainer.finish()
+
+      atexit.register(cleanup)
+
+      def handle_signal(signum, frame):
+        print(f"Received signal {signum}")
+        cleanup()
+        sys.exit(0)
+
+      signal.signal(signal.SIGTERM, handle_signal)
+      signal.signal(signal.SIGINT, handle_signal)
+
+      try:
+        trainer.train()
+      finally:
+        trainer.finish()
+    finally:
+      dist.destroy_process_group()
   else:
     print(f'Training with a single process')
     print()
 
     trainer = Trainer(config, n_epochs=args.epochs)
+
+    def cleanup():
+      print('cleanup of trainer tried')
+      trainer.finish()
+
+    atexit.register(cleanup)
+
+    def handle_signal(signum, frame):
+      print(f"Received signal {signum}")
+      cleanup()
+      sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
     trainer.train()
 
   print('Training completed successfully.')
