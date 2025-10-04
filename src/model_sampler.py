@@ -30,8 +30,7 @@ def extract(v, t, x_shape):
   Extract some coefficients at specified timesteps, then reshape to
   [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
   """
-  out = v.to(t.device).gather(0, t).float()
-  return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
+  return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 class GaussianDiffusionSampler(nn.Module):
   def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None):
@@ -57,15 +56,16 @@ class GaussianDiffusionSampler(nn.Module):
 
   def forward(self, x_T, condition):
     x = x_T
+
     for t in self.sampling_indices:
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
 
       eps = self.model(x, condition, t_vec)
 
-      beta_t = extract(self.betas, t_vec, x.shape)
-      sqrt_beta_t = extract(self.sqrt_betas, t_vec, x.shape)
-      sqrt_one_minus_alpha_bar_t = extract(self.sqrt_one_minus_alphas_bar, t_vec, x.shape)
-      sqrt_recip_alpha_t = extract(self.sqrt_recip_alphas, t_vec, x.shape)
+      beta_t = self.betas[t]
+      sqrt_beta_t = self.sqrt_betas[t]
+      sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[t]
+      sqrt_recip_alpha_t = self.sqrt_recip_alphas[t]
 
       x = sqrt_recip_alpha_t * (x - (beta_t / sqrt_one_minus_alpha_bar_t) * eps)
 
