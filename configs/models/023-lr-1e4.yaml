@@ -1,11 +1,11 @@
 data:
   dataset_name: gdphmm-hn-vmat
   img_size: [176, 160]
-  train_cache_size: 'inf'
-  valid_cache_size: 'inf'
+  train_cache_size: inf
+  valid_cache_size: inf
 
 batch_size: 128
-epochs: 500 
+epochs: 500
 
 lr_scheduler:
   start_lr: 0.0001
@@ -15,7 +15,7 @@ lr_scheduler:
 
 mixed_precision: false
 num_workers: 4
-prefetch_factor: 4 
+prefetch_factor: 4
 prefetch_on_gpu: false
 
 beta_1: 0.0001
