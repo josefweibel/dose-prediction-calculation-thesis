@@ -77,7 +77,11 @@ class GDPHMMSlicesDataset(Dataset):
       T.Lambda(to_byte),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
-    self.ptv_transforms = self.oar_transforms
+    self.ptv_transforms = T.Compose([
+      T.Lambda(to_plain_tensor),
+      T.Lambda(to_float),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+    ]) 
 
     self.dose_transforms = T.Compose([
       T.ToTensor(),
@@ -106,7 +110,7 @@ class GDPHMMSlicesDataset(Dataset):
       ).astype(np.uint8)
       ptv_vol = np.maximum.reduce(
         [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
-      ).astype(np.uint8)
+      ).astype(np.float32)
       ct_vol = vol['img'].astype(np.float32)
 
       self.cache.put(file.name + ':dose', dose_vol)
@@ -247,7 +251,7 @@ class SharedLRUCache:
         self.order.remove(key)
         self.nbytes -= nbytes
 
-      elif len(self.data) >= self.max_size:
+      elif len(self.data) > 0 and len(self.data) >= self.max_size:
         # evict oldest
         oldest = self.order.pop(0)
         shm_name, _, _, nbytes = self.data.pop(oldest)
