@@ -47,8 +47,8 @@ class Evaluator:
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
       for structure, target, info in pbar:
-        structure = structure.to(self.device, non_blocking=True)
-        target = target.to(self.device, non_blocking=True)
+        structure = structure.to(self.device)
+        target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
 
         start = time()
@@ -56,6 +56,7 @@ class Evaluator:
         pred = sampler(x_T, structure)
         duration = time() - start
         pred = torch.clamp(pred, 0., 1.)
+        pred = self.dataloader.dataset.denormalize_target(pred)
 
         # Calculate metrics for each sample in the batch
         for i in range(target.shape[0]):
@@ -70,7 +71,10 @@ class Evaluator:
 
           for metric_name, metric in self.metrics.items():
             metric.reset()
-            metric.update(sample_pred, sample_target)
+
+            m_kwargs = {'mask': structure[i:i+1, 1]} if metric_name == 'homogeneity_index' else {}
+            metric.update(sample_pred, sample_target, **m_kwargs)
+
             sample_row[metric_name] = metric.compute().item()
 
           sample_metrics.append(sample_row)
@@ -86,7 +90,7 @@ class Evaluator:
             out_path = Path(dir) / f"{p.stem}-{slice_index.item()}.npy"
             np.save(out_path, pred[i].cpu().numpy())
 
-          dist.barrier()
+        dist.barrier()
 
     if self.world_size > 1:
       all_sample_metrics = [None] * self.world_size
@@ -95,12 +99,15 @@ class Evaluator:
       if self.rank == 0:
         sample_metrics = [item for sublist in all_sample_metrics for item in sublist]
 
-    overall_metrics = {}
-    for metric_name in self.metrics.keys():
-      overall_metrics[metric_name] = np.mean([row[metric_name] for row in sample_metrics])
+    dist.barrier()
+
+    sample_metrics = pd.DataFrame(sample_metrics).drop_duplicates(['file_name', 'slice_index'])
+    overall_metrics = sample_metrics.mean(numeric_only=True) 
 
     if dir is not None and self.rank == 0:
-      pd.DataFrame(sample_metrics).to_csv(dir / '_sample_metrics.csv', index=False)
-      pd.DataFrame(overall_metrics).to_csv(dir / '_overall_metrics.csv', index=False)
+      sample_metrics.to_csv(dir / '_sample_metrics.csv', index=False)
+      overall_metrics.to_frame().T.to_csv(dir / '_overall_metrics.csv', index=False)
+
+    dist.barrier()
 
     return sample_metrics, overall_metrics
