@@ -1,5 +1,6 @@
 import torch
 from torchmetrics import Metric
+import numpy as np
 
 class DoseScore(Metric):
   def __init__(self, *args, **kwargs):
@@ -20,7 +21,7 @@ class DoseScore(Metric):
     target = target.flatten()
 
     # compute relative differences
-    score = (preds - target) / (target + 1e-5)
+    score = torch.abs(preds - target)  # / (target + 1e-5)
     self.total += score.sum()
     self.count += target.numel()
 
@@ -34,11 +35,6 @@ class DVHScore(Metric):
     self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
     self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
-  def _percentile(self, tensor: torch.Tensor, q: float) -> torch.Tensor:
-    """Compute percentile for a flattened tensor."""
-    k = 1 + round(0.01 * q * (tensor.numel() - 1))
-    return tensor.kthvalue(k).values
-
   def update(self, preds: torch.Tensor, target: torch.Tensor):
     """
     preds: predicted doses, shape (batch_size, ...)
@@ -50,13 +46,13 @@ class DVHScore(Metric):
       p = preds[i].flatten()
       t = target[i].flatten()
 
-      D1_hat = self._percentile(p, 1)
-      D95_hat = self._percentile(p, 95)
-      D99_hat = self._percentile(p, 99)
+      D1_hat = torch.quantile(p, 1 - 0.01)
+      D95_hat = torch.quantile(p, 1 - 0.95)
+      D99_hat = torch.quantile(p, 1 - 0.99)
 
-      D1 = self._percentile(t, 1)
-      D95 = self._percentile(t, 95)
-      D99 = self._percentile(t, 99)
+      D1 = torch.quantile(t, 1 - 0.01)
+      D95 = torch.quantile(t, 1 - 0.95)
+      D99 = torch.quantile(t, 1 - 0.99)
 
       score_i = (torch.abs(D1_hat - D1) +
                   torch.abs(D95_hat - D95) +
@@ -74,20 +70,19 @@ class HomogeneityIndex(Metric):
     self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
     self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
-  def _percentile(self, tensor: torch.Tensor, q: float) -> torch.Tensor:
-    """Compute percentile for a flattened tensor."""
-    k = 1 + round(0.01 * q * (tensor.numel() - 1))
-    return tensor.kthvalue(k).values
-
-  def update(self, preds: torch.Tensor, target: torch.Tensor):
+  def update(self, preds: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
+    mask = mask.to(torch.bool)
     batch_size = preds.shape[0]
 
     for i in range(batch_size):
-      d = preds[i].flatten()
+      d = preds[i][mask[i:i+1]].flatten()
 
-      D2 = self._percentile(d, 2)
-      D98 = self._percentile(d, 98)
-      D50 = self._percentile(d, 50)
+      if d.numel() == 0:
+        continue
+
+      D2 = torch.quantile(d, 1 - 0.02)
+      D98 = torch.quantile(d, 1 - 0.98)
+      D50 = torch.quantile(d, 1 - 0.5)
 
       if D50 < 1e-10:
         D50 = 1e-10
