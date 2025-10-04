@@ -100,5 +100,5 @@ if __name__ == '__main__':
 
     trainer.train()
 
-  print('Training completed successfully.')
+  print('Training script completed.')
 

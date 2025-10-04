@@ -1,19 +1,16 @@
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 from multiprocessing import Manager
 from pathlib import Path
-import pandas as pd
+import numpy as np
 
 from config import read_model_config
-from data import GDPHMMSlicesDataset, SharedLRUCache
+from data import GDPHMMSlicesDataset, SharedLRUCache, SharedCache
 from evaluator import Evaluator
 from models import MambaUnet
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
 
-
-N_SAMPLES_FOR_TIME_ESTIMATE = 5
 
 SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
 
@@ -41,13 +38,18 @@ class Sampler:
     self.device = detect_device(local_rank)
 
     self.manager = Manager()
-    dummy_cache = SharedLRUCache(0, self.manager)
+    if self.sampling_config['data_cache_size'] == 'inf':
+      shared_cache = SharedCache(self.manager)
+    else:
+      shared_cache = SharedLRUCache(self.sampling_config['data_cache_size'], self.manager)
+
     self.dataset = GDPHMMSlicesDataset(
       dataset_name=self.model_config['data']['dataset_name'],
       split=data_split,
       img_size=self.model_config['data']['img_size'],
-      cache=dummy_cache,
+      cache=shared_cache,
     )
+
     if self.is_main_process:
       print('Dataset size', len(self.dataset))
 
@@ -61,7 +63,7 @@ class Sampler:
 
     self.dataloader = DataLoader(
       self.dataset,
-      batch_size=self.sampling_config['batch_size'] // self.world_size,
+      batch_size=self.sampling_config['batch_size_per_gpu'],
       shuffle=False,
       sampler=self.sampler,
       num_workers=self.sampling_config['num_workers'],
@@ -77,14 +79,6 @@ class Sampler:
       img_size=self.model_config['data']['img_size'],
       in_struc_channels=self.dataset.n_structures
     ).to(self.device)
-    self.underlying_model = self.ema_model
-
-    if self.is_distributed:
-      self.ema_model = DDP(
-        self.ema_model,
-        device_ids=[self.rank] if self.device.type == 'cuda' else None,
-        find_unused_parameters=False
-      )
 
     if epoch is None:
       checkpoint = load_last_checkpoint(model_name)
@@ -104,12 +98,28 @@ class Sampler:
     )
 
   def sample(self):
+    self.set_seed(self.sampling_config['seed'])
+
     dir = SAMPLES_PATH / self.model_name / self.sampling_config['name'] / f'{self.data_split}_{self.epoch}'
-    self.underlying_model.eval()
-    _ = self.evaluator.evaluate(self.underlying_model, dir=dir)
 
-    if self.is_main_process:
-      for i in range(N_SAMPLES_FOR_TIME_ESTIMATE):
-        pass
+    self.ema_model.eval()
+    _ = self.evaluator.evaluate(self.ema_model, dir=dir)
 
+  def finish(self):
+    print('finishing sampler instance', flush=True)
+
+    self.dataset.finish()
+    self.dataloader = None
+
+    torch.cuda.empty_cache()
+
+  def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+      torch.cuda.manual_seed(seed)
+      torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
