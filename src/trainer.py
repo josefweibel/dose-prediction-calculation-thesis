@@ -26,8 +26,7 @@ def extract(v, t, x_shape):
   Extract some coefficients at specified timesteps, then reshape to
   [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
   """
-  out = v.to(t.device).gather(0, t).float()
-  return out.view([t.shape[0]] + [1] * (len(x_shape) - 1))
+  return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
 class DiffusionModelTrainerModule(nn.Module):
@@ -37,8 +36,8 @@ class DiffusionModelTrainerModule(nn.Module):
     self.model = denoising_model
     self.T = T
 
-    self.register_buffer('betas', torch.linspace(beta_1, beta_T, T).float())
-    alphas = 1. - self.betas
+    betas = torch.linspace(beta_1, beta_T, T).float()
+    alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, dim=0)
 
     self.register_buffer('sqrt_alphas_bar', torch.sqrt(alphas_bar))
@@ -46,7 +45,7 @@ class DiffusionModelTrainerModule(nn.Module):
 
   def forward(self, x_0, condition):
     t = torch.randint(self.T, size=(x_0.shape[0], ), device=x_0.device)
-    # t = torch.full((x_0.shape[0], ), 1, device=x_0.device)
+
     noise = torch.randn_like(x_0)
     x_t = (
       extract(self.sqrt_alphas_bar, t, x_0.shape) * x_0 +
@@ -151,24 +150,22 @@ class Trainer:
       img_size=self.config['data']['img_size'],
       in_struc_channels=train_dataset.n_structures
     ).to(self.device)
-    self.underlying_model = self.net_model
-
-    if self.is_distributed:
-      self.net_model = DDP(
-        self.net_model,
-        device_ids=[self.local_rank],
-        output_device=self.local_rank,
-        find_unused_parameters=False,
-      )
-
-    self.ema_model = copy.deepcopy(self.underlying_model).to(self.device)
+    self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
     self.model = DiffusionModelTrainerModule(
-      denoising_model=self.underlying_model,
+      denoising_model=self.net_model,
       beta_1=self.config['beta_1'],
       beta_T=self.config['beta_T'],
       T=self.config['T']
     ).to(self.device)
+    
+    if self.is_distributed:
+      self.model = DDP(
+        self.model,
+        device_ids=[self.local_rank],
+        output_device=self.local_rank,
+        find_unused_parameters=False,
+      )
 
     self.__setup_optimizer()
     self.use_mixed_precision = self.device.type == 'cuda' and self.config['mixed_precision']
@@ -182,10 +179,10 @@ class Trainer:
       if self.is_main_process:
         print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
 
-      self.underlying_model.load_state_dict(checkpoint['net_model_state_dict'])
+      self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
-      self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+      self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
       if self.scaler is not None and 'scaler_state_dict' in checkpoint:
         self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -218,7 +215,7 @@ class Trainer:
       if self.is_distributed and self.train_sampler is not None:
         self.train_sampler.set_epoch(self.epoch)
 
-      self.net_model.train()
+      self.model.train()
 
       pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False, disable=not self.is_main_process)
       for structure, target, _ in pbar_batches:
@@ -234,16 +231,16 @@ class Trainer:
         if self.scaler is not None:
           self.scaler.scale(loss).backward()
           self.scaler.unscale_(self.optim)
-          torch.nn.utils.clip_grad_norm_(self.underlying_model.parameters(), self.config['grad_clip'])
+          torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.scaler.step(self.optim)
           self.scaler.update()
         else:
           loss.backward()
-          torch.nn.utils.clip_grad_norm_(self.underlying_model.parameters(), self.config['grad_clip'])
+          torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
           self.lr_scheduler.step()
 
-        self.__update_ema_weigths(self.underlying_model, self.ema_model, self.config['ema_decay'])
+        self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
 
         if self.is_main_process:
           pbar_epochs.set_postfix(loss=loss.item())
@@ -261,11 +258,14 @@ class Trainer:
         dist.barrier()
 
       if self.epoch == 0 or (self.epoch + 1) % self.config['eval_interval'] == 0:
+        for t in self.ema_model.state_dict().values():
+          dist.broadcast(t, src=0)
+
         self.ema_model.eval()
         _, metrics = self.evaluator.evaluate(self.ema_model, dir=CHECKPOINTS_PATH / self.name / f'epoch-{self.epoch}')
 
         if self.is_main_process and self.wandb_run:
-          metrics = {f'eval/{key}': value for key, value in metrics.items()}
+          metrics = {f'eval/{key}': value for key, value in metrics.to_dict().items()}
           self.wandb_run.log({**metrics, 'epoch': self.epoch})
 
   def finish(self):
@@ -276,10 +276,15 @@ class Trainer:
     self.train_dataloader.dataset.finish()
     self.val_dataloader.dataset.finish()
 
+    self.train_dataloader = None
+    self.val_dataloader = None
+
+    torch.cuda.empty_cache()
+
   def __save_checkpoint(self):
     checkpoint_data = {
       'epoch': self.epoch,
-      'net_model_state_dict': self.underlying_model.state_dict(),
+      'net_model_state_dict': self.net_model.state_dict(),
       'ema_model_state_dict': self.ema_model.state_dict(),
       'optimizer_state_dict': self.optim.state_dict(),
       'lr_scheduler_state_dict': self.lr_scheduler.state_dict(),
@@ -333,8 +338,8 @@ class Trainer:
           scale = (end_lr / start_lr) + (1 - progress) * (1 - end_lr / start_lr)
           return max(scale, end_lr / start_lr)
 
-      self.optim = torch.optim.AdamW(self.underlying_model.parameters(), lr=start_lr)
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=start_lr)
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=linear_lr_schedule)
     else:
-      self.optim = torch.optim.AdamW(self.underlying_model.parameters(), lr=self.config['lr'])
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr'])
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=lambda step: 1.0)
