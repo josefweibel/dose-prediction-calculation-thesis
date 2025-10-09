@@ -69,7 +69,7 @@ if __name__ == '__main__':
         model_name=args.model,
         sampling_config=sampling_config,
         data_split=args.data_split,
-        epoch=args.epoch if args.epoch and len(args.epoch) else None,
+        epoch=args.epoch if args.epoch else None,
         rank=rank,
         world_size=world_size,
         local_rank=local_rank,
