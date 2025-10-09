@@ -13,11 +13,19 @@ from sampler import Sampler
 
 
 if __name__ == '__main__':
+  def parse_epoch(value):
+    if value == "latest":
+      return value
+    try:
+      return int(value)
+    except ValueError:
+      raise argparse.ArgumentTypeError("epoch must be an integer or 'latest'")
+
   parser = argparse.ArgumentParser()
   parser.add_argument('--model', type=str, required=True, help='Name of the model configuration file (without .yaml extension)')
   parser.add_argument('--config', type=str, required=True, help='Name of the sampling configuration file (without .yaml extension)')
   parser.add_argument('--data-split', type=str, choices=['train', 'val', 'test'], default='test', help='Data split to use for sampling.')
-  parser.add_argument('--epoch', type=int, default=None, help='Use checkpoint from this epoch. If None, use the latest checkpoint.')
+  parser.add_argument('--epoch', type=parse_epoch, default=None, help='Use checkpoint from this epoch. Use "latest" for the most recent checkpoint.')
   parser.add_argument('--distributed', action='store_true', help='Set to True to use distributed sampling across multiple GPUs.')
   args = parser.parse_args()
 
@@ -32,6 +40,9 @@ if __name__ == '__main__':
   mp.set_start_method('spawn', force=True)
 
   if args.distributed:
+    print("CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
+    print("torch.cuda.device_count() =", torch.cuda.device_count())
+
     rank = int(os.environ["SLURM_PROCID"])
     local_rank = int(os.environ["SLURM_LOCALID"])
     world_size = int(os.environ["SLURM_NTASKS"])
@@ -79,7 +90,7 @@ if __name__ == '__main__':
       signal.signal(signal.SIGINT, handle_signal)
 
       try:
-        sampler.train()
+        sampler.sample()
       finally:
         sampler.finish()
     finally:
@@ -109,7 +120,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    sampler.train()
+    sampler.sample()
 
   print('Sampling script completed.')
 

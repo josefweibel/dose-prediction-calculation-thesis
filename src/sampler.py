@@ -80,7 +80,7 @@ class Sampler:
       in_struc_channels=self.dataset.n_structures
     ).to(self.device)
 
-    if epoch is None:
+    if epoch is None or epoch == 'latest':
       checkpoint = load_last_checkpoint(model_name)
     else:
       checkpoint = load_checkpoint(model_name, epoch)
@@ -98,6 +98,7 @@ class Sampler:
     )
 
   def sample(self):
+    print('Rank', self.rank, 'starts sampling')
     self.set_seed(self.sampling_config['seed'])
 
     dir = SAMPLES_PATH / self.model_name / self.sampling_config['name'] / f'{self.data_split}_{self.epoch}'
@@ -113,7 +114,7 @@ class Sampler:
 
     torch.cuda.empty_cache()
 
-  def set_seed(seed):
+  def set_seed(self, seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():

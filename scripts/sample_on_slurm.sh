@@ -8,7 +8,7 @@ DATASET=gdphmm-hn-vmat
 MODEL_NAME=$1
 CONFIG_NAME=$2
 DATA_SPLIT=${3:-test}
-EPOCH=${4:-''}
+EPOCH=${4:-'latest'}
 
 if [ -z "$MODEL_NAME" ]; then
   echo "no model name provided" 1>&2
@@ -32,13 +32,12 @@ sbatch <<EOF
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim
 #SBATCH --time 4:00:00
-#SBATCH --mem 90G
+#SBATCH --mem 189G
 #SBATCH --gpus rtx4090:8
 #SBATCH --ntasks=8
-#SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
-#SBATCH --out=${HOME_PATH}/logs/${CONFIG_NAME}-sample-%j.log
-#SBATCH --job-name=s-${CONFIG_NAME}
+#SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-sample-%j.log
+#SBATCH --job-name=s-${MODEL_NAME}
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
@@ -94,7 +93,7 @@ srun bash -c '
     --bind /dev/infiniband:/dev/infiniband \
     --pwd /work \
     ${HOME_PATH}/images/dose-prediction-thesis.sif \
-    bash -c "PYTHONPATH=/work/src python scripts/sample.py --model ${MODEL_NAME} --config ${CONFIG_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH} --distributed"
+    bash -c "PYTHONPATH=/work/src python scripts/sample.py --model ${MODEL_NAME} --config ${CONFIG_NAME} --data-split ${DATA_SPLIT} --epoch "${EPOCH}" --distributed"
 '
 
 echo "job ${CONFIG_NAME} completed"
