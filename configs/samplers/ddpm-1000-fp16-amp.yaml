@@ -8,4 +8,4 @@ prefetch_on_gpu: false
 
 seed: 1
 batch_size_per_gpu: 32
-precision: 'amp'
+precision: 'fp16_amp'

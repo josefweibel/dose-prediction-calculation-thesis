@@ -52,7 +52,13 @@ class Evaluator:
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
 
-        with torch.amp.autocast('cuda', dtype=torch.float16) if self.sampling_config['precision'] == 'amp' else contextlib.nullcontext():
+        autocast = contextlib.nullcontext()
+        if self.sampling_config['precision'] == 'fp16_amp':
+          autocast = torch.amp.autocast('cuda', dtype=torch.float16)
+        elif self.sampling_config['precision'] == 'bf16_amp':
+          autocast = torch.amp.autocast('cuda', dtype=torch.bfloat16)
+
+        with autocast:
           start = time()
           x_T = torch.randn_like(target, device=self.device)
           pred = sampler(x_T, structure)
