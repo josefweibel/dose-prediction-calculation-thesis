@@ -7,6 +7,7 @@ from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 import pandas as pd
+import contextlib
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex
 from model_sampler import build_sampler
@@ -51,10 +52,12 @@ class Evaluator:
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
 
-        start = time()
-        x_T = torch.randn_like(target, device=self.device)
-        pred = sampler(x_T, structure)
-        duration = time() - start
+        with torch.amp.autocast('cuda', dtype=torch.float16) if self.sampling_config['precision'] == 'amp' else contextlib.nullcontext():
+          start = time()
+          x_T = torch.randn_like(target, device=self.device)
+          pred = sampler(x_T, structure)
+          duration = time() - start
+
         pred = torch.clamp(pred, 0., 1.)
         pred = self.dataloader.dataset.denormalize_target(pred)
 
@@ -102,7 +105,7 @@ class Evaluator:
     dist.barrier()
 
     sample_metrics = pd.DataFrame(sample_metrics).drop_duplicates(['file_name', 'slice_index'])
-    overall_metrics = sample_metrics.mean(numeric_only=True) 
+    overall_metrics = sample_metrics.mean(numeric_only=True)
 
     if dir is not None and self.rank == 0:
       sample_metrics.to_csv(dir / '_sample_metrics.csv', index=False)
