@@ -222,3 +222,4 @@ data/gdphmm-hn-vmat/test
 checkpoints/
 !checkpoints/.gitkeep
 wandb/
+samples/
