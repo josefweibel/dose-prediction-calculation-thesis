@@ -95,8 +95,8 @@ class DDIMSampler(nn.Module):
 
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev - sigma**2, min=0.0))
 
-    step = train_T // self.sampling_T
-    self.sampling_indices = reversed(torch.arange(0, train_T, step)[:self.sampling_T].tolist())
+    indices = torch.linspace(self.train_T - 1, 0, self.sampling_T, dtype=torch.long)
+    self.sampling_indices = indices.tolist()
 
     self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
     self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
