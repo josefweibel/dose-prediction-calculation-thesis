@@ -1,5 +1,6 @@
 sampler: ddim
 T: 1
+schedule: linear
 eta: 0
 
 data_cache_size: inf

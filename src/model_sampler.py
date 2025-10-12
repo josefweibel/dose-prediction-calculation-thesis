@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+import numpy as np
 
 
 def build_sampler(model_config, sampling_config, model):
@@ -11,6 +12,7 @@ def build_sampler(model_config, sampling_config, model):
       model_config['beta_T'],
       model_config['T'],
       sampling_config['T'],
+      schedule=sampling_config['schedule'],
     )
   elif sampling_config['sampler'] == 'ddim':
     return DDIMSampler(
@@ -19,14 +21,73 @@ def build_sampler(model_config, sampling_config, model):
       model_config['beta_T'],
       model_config['T'],
       sampling_config['T'],
-      eta=sampling_config['eta']
+      eta=sampling_config['eta'],
+      schedule=sampling_config['schedule'],
     )
   else:
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
 
 
+def make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T):
+  """
+  Create sampling indices for different time schedules.
+  Args:
+      train_T: total training steps (e.g. 1000)
+      sampling_T: number of inference steps (e.g. 50)
+      schedule: 'linear', 'cosine', or 'karras'
+  Returns:
+      sampling_indices (torch.LongTensor)
+  """
+  if schedule == "linear":
+    # Uniform in t
+    indices = torch.linspace(train_T - 1, 0, sampling_T, dtype=torch.long)
+
+  elif schedule == "cosine":
+    # Map cosine cumulative alphas to training timesteps
+    s = 0.008
+    steps = torch.linspace(0, 1, train_T)
+    alphas_cumprod = torch.cos(((steps + s) / (1 + s)) * np.pi / 2) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]  # normalize
+
+    # Choose sampling points equally spaced in log-SNR
+    rho = torch.log(alphas_cumprod / (1 - alphas_cumprod))
+    rho_target = torch.linspace(rho[-1], rho[0], sampling_T)
+    indices = torch.tensor([
+      torch.argmin(torch.abs(rho - rt)).item() for rt in rho_target
+    ], dtype=torch.long)
+
+  elif schedule == "karras":
+    # Log-spaced sigmas between high and low noise
+    sigma_min, sigma_max, rho_val = 0.002, 80, 7.0
+    i = torch.linspace(0, 1, sampling_T)
+    sigmas = (sigma_max ** (1 / rho_val) + i * (sigma_min ** (1 / rho_val) - sigma_max ** (1 / rho_val))) ** rho_val
+    sigmas = torch.flip(sigmas, dims=[0])
+
+    # Match sigma levels to closest training timestep
+    betas = torch.linspace(beta_1, beta_T, train_T)
+    alphas = 1. - betas
+    alphas_bar = torch.cumprod(alphas, dim=0)
+    noise_levels = torch.sqrt((1 - alphas_bar) / alphas_bar)
+
+    indices = torch.tensor([
+      torch.argmin(torch.abs(noise_levels - s)).item() for s in sigmas
+    ], dtype=torch.long)
+
+  else:
+    raise ValueError(f"Unknown schedule: {schedule}")
+
+  return indices.tolist()
+
 class GaussianDiffusionSampler(nn.Module):
-  def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None):
+  def __init__(
+    self,
+    model,
+    beta_1,
+    beta_T,
+    train_T,
+    sampling_T=None,
+    schedule: str = "linear", # "linear", "cosine", or "karras"
+  ):
     super().__init__()
 
     self.model = model
@@ -37,8 +98,7 @@ class GaussianDiffusionSampler(nn.Module):
     alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, dim=0)
 
-    indices = torch.linspace(self.train_T - 1, 0, self.sampling_T, dtype=torch.long)
-    self.sampling_indices = indices.tolist()
+    self.sampling_indices = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
 
     self.register_buffer("betas", betas)
     self.register_buffer("alphas", alphas)
@@ -69,7 +129,16 @@ class GaussianDiffusionSampler(nn.Module):
     return x
 
 class DDIMSampler(nn.Module):
-  def __init__(self, model, beta_1, beta_T, train_T, sampling_T=None, eta=0.0):
+  def __init__(
+      self,
+      model,
+      beta_1,
+      beta_T,
+      train_T,
+      sampling_T=None,
+      eta=0.0,
+      schedule: str = "linear", # "linear", "cosine", or "karras"
+    ):
     super().__init__()
     self.model = model
     self.train_T = train_T
@@ -84,9 +153,7 @@ class DDIMSampler(nn.Module):
     sqrt_alphas_bar = torch.sqrt(alphas_bar)
     sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
     sqrt_alphas_bar_prev = torch.sqrt(alphas_bar_prev)
-
     sigma = torch.zeros_like(alphas_bar)
-    dir_coeff = torch.zeros_like(alphas_bar)
 
     if eta > 0:
       frac = (1 - alphas_bar_prev) / (1 - alphas_bar)
@@ -95,8 +162,7 @@ class DDIMSampler(nn.Module):
 
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev - sigma**2, min=0.0))
 
-    indices = torch.linspace(self.train_T - 1, 0, self.sampling_T, dtype=torch.long)
-    self.sampling_indices = indices.tolist()
+    self.sampling_indices = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
 
     self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
     self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)

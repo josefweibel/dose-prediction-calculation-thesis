@@ -1,5 +1,6 @@
 sampler: ddpm
 T: 2000
+schedule: linear
 
 data_cache_size: inf
 num_workers: 4
