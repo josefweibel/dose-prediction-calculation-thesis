@@ -362,6 +362,7 @@ class DEISSampler(nn.Module):
         # extrapolate to next target time (time_grid[i+1]) using up to order+1 previous eps
         if self._precomputed_weights is not None:
           prev_indices, w = self._precomputed_weights[i]
+          w = w.to(x.device)
           # prev_indices are indices like [i, i-1, ...] referring to positions in the time_grid
           # but we stored eps_buffer with most recent eps appended each iteration; its length might be less than needed.
           # build a list of eps tensors matching prev_indices ordering:
