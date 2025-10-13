@@ -160,10 +160,13 @@ class DDIMSampler(nn.Module):
     self.sampling_T = sampling_T or train_T  # default: full schedule
     self.eta = eta
 
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    self.sampling_indices = sampling_idx.tolist()
+
     betas = torch.linspace(beta_1, beta_T, train_T).float()
     alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, 0)
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:train_T]
+    alphas_bar = torch.cumprod(alphas, 0)[sampling_idx]
+    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:sampling_T]
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar)
     sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
@@ -177,14 +180,11 @@ class DDIMSampler(nn.Module):
 
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev - sigma**2, min=0.0))
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
-    self.sampling_indices = sampling_idx.tolist()
-
-    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar[sampling_idx])
-    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar[sampling_idx])
-    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev[sampling_idx])
-    self.register_buffer("sigma", sigma[sampling_idx])
-    self.register_buffer("dir_coeff", dir_coeff[sampling_idx])
+    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
+    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
+    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
+    self.register_buffer("sigma", sigma)
+    self.register_buffer("dir_coeff", dir_coeff)
 
   def forward(self, x_T, condition):
     x = x_T
@@ -195,12 +195,12 @@ class DDIMSampler(nn.Module):
 
       sqrt_alpha_bar_t = self.sqrt_alphas_bar[i]
       sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
-      sqrt_a_bar_prev = self.sqrt_alphas_bar_prev[i]
+      sqrt_alpha_bar_prev = self.sqrt_alphas_bar_prev[i]
       sigma = self.sigma[i]
       dir_coeff = self.dir_coeff[i]
 
       x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
-      x = sqrt_a_bar_prev * x0 + dir_coeff * eps
+      x = sqrt_alpha_bar_prev * x0 + dir_coeff * eps
 
       if t > 0:
         noise = torch.randn_like(x)
@@ -252,24 +252,24 @@ class DEISSampler(nn.Module):
     assert self.order >= 0, "order must be >= 0"
     self.parameterization = parameterization
 
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    self.sampling_indices = sampling_idx.tolist()
+
     betas = torch.linspace(beta_1, beta_T, self.train_T).float()
     alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, dim=0)
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:train_T]
+    alphas_bar = torch.cumprod(alphas, dim=0)[sampling_idx]
+    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:sampling_T]
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar)
     sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
     sqrt_alphas_bar_prev = torch.sqrt(alphas_bar_prev)
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev, min=0.0))
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
-    self.sampling_indices = sampling_idx.tolist()
-
-    self.register_buffer("alphas_bar", alphas_bar[sampling_idx])
-    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar[sampling_idx])
-    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar[sampling_idx])
-    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev[sampling_idx])
-    self.register_buffer("dir_coeff", dir_coeff[sampling_idx])
+    self.register_buffer("alphas_bar", alphas_bar)
+    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
+    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
+    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
+    self.register_buffer("dir_coeff", dir_coeff)
 
     # Precompute normalized time grid in [0,1] for the selected indices.
     # We use a simple mapping: t = idx / (train_T - 1).
