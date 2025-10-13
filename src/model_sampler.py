@@ -166,7 +166,7 @@ class DDIMSampler(nn.Module):
     betas = torch.linspace(beta_1, beta_T, train_T).float()
     alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, 0)[sampling_idx]
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:sampling_T]
+    alphas_bar_prev = torch.cat((alphas_bar[1:], alphas_bar[0:1]))
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar)
     sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
@@ -258,7 +258,7 @@ class DEISSampler(nn.Module):
     betas = torch.linspace(beta_1, beta_T, self.train_T).float()
     alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, dim=0)[sampling_idx]
-    alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:sampling_T]
+    alphas_bar_prev = torch.cat((alphas_bar[1:], alphas_bar[0:1]))
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar)
     sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
