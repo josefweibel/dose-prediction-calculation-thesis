@@ -90,7 +90,7 @@ def make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T):
   else:
     raise ValueError(f"Unknown schedule: {schedule}")
 
-  return indices.tolist()
+  return indices
 
 class GaussianDiffusionSampler(nn.Module):
   def __init__(
@@ -112,27 +112,28 @@ class GaussianDiffusionSampler(nn.Module):
     alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, dim=0)
 
-    self.sampling_indices = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    self.sampling_indices = sampling_idx.tolist()
 
-    self.register_buffer("betas", betas)
-    self.register_buffer("alphas", alphas)
-    self.register_buffer("alphas_bar", alphas_bar)
-    self.register_buffer("sqrt_betas", torch.sqrt(betas))
-    self.register_buffer("sqrt_one_minus_alphas_bar", torch.sqrt(1. - alphas_bar))
-    self.register_buffer("sqrt_recip_alphas", torch.sqrt(1. / alphas))
+    self.register_buffer("betas", betas[sampling_idx])
+    self.register_buffer("alphas", alphas[sampling_idx])
+    self.register_buffer("alphas_bar", alphas_bar[sampling_idx])
+    self.register_buffer("sqrt_betas", torch.sqrt(betas)[sampling_idx])
+    self.register_buffer("sqrt_one_minus_alphas_bar", torch.sqrt(1. - alphas_bar)[sampling_idx])
+    self.register_buffer("sqrt_recip_alphas", torch.sqrt(1. / alphas)[sampling_idx])
 
   def forward(self, x_T, condition):
     x = x_T
 
-    for t in self.sampling_indices:
+    for i, t in enumerate(self.sampling_indices):
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
 
       eps = self.model(x, condition, t_vec)
 
-      beta_t = self.betas[t]
-      sqrt_beta_t = self.sqrt_betas[t]
-      sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[t]
-      sqrt_recip_alpha_t = self.sqrt_recip_alphas[t]
+      beta_t = self.betas[i]
+      sqrt_beta_t = self.sqrt_betas[i]
+      sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
+      sqrt_recip_alpha_t = self.sqrt_recip_alphas[i]
 
       x = sqrt_recip_alpha_t * (x - (beta_t / sqrt_one_minus_alpha_bar_t) * eps)
 
@@ -176,26 +177,27 @@ class DDIMSampler(nn.Module):
 
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev - sigma**2, min=0.0))
 
-    self.sampling_indices = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    self.sampling_indices = sampling_idx.tolist()
 
-    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
-    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
-    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
-    self.register_buffer("sigma", sigma)
-    self.register_buffer("dir_coeff", dir_coeff)
+    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar[sampling_idx])
+    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar[sampling_idx])
+    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev[sampling_idx])
+    self.register_buffer("sigma", sigma[sampling_idx])
+    self.register_buffer("dir_coeff", dir_coeff[sampling_idx])
 
   def forward(self, x_T, condition):
     x = x_T
 
-    for t in self.sampling_indices:
+    for i, t in enumerate(self.sampling_indices):
       t_vec = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
       eps = self.model(x, condition, t_vec)
 
-      sqrt_alpha_bar_t = self.sqrt_alphas_bar[t]
-      sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[t]
-      sqrt_a_bar_prev = self.sqrt_alphas_bar_prev[t]
-      sigma = self.sigma[t]
-      dir_coeff = self.dir_coeff[t]
+      sqrt_alpha_bar_t = self.sqrt_alphas_bar[i]
+      sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
+      sqrt_a_bar_prev = self.sqrt_alphas_bar_prev[i]
+      sigma = self.sigma[i]
+      dir_coeff = self.dir_coeff[i]
 
       x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
       x = sqrt_a_bar_prev * x0 + dir_coeff * eps
@@ -260,13 +262,14 @@ class DEISSampler(nn.Module):
     sqrt_alphas_bar_prev = torch.sqrt(alphas_bar_prev)
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev, min=0.0))
 
-    self.sampling_indices = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    self.sampling_indices = sampling_idx.tolist()
 
-    self.register_buffer("alphas_bar", alphas_bar)
-    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
-    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
-    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
-    self.register_buffer("dir_coeff", dir_coeff)
+    self.register_buffer("alphas_bar", alphas_bar[sampling_idx])
+    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar[sampling_idx])
+    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar[sampling_idx])
+    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev[sampling_idx])
+    self.register_buffer("dir_coeff", dir_coeff[sampling_idx])
 
     # Precompute normalized time grid in [0,1] for the selected indices.
     # We use a simple mapping: t = idx / (train_T - 1).
@@ -316,8 +319,8 @@ class DEISSampler(nn.Module):
 
     # We'll iterate sampling_indices in order (from largest time index to smallest)
     # i loops over positions in the sampling_indices list; at each iteration we are at x = x_{i+1}
-    for i, idx in enumerate(self.sampling_indices):
-      t_vec = torch.full((x.shape[0],), idx, dtype=torch.long, device=x.device)
+    for i, t in enumerate(self.sampling_indices):
+      t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
 
       # model output
       model_out = self.model(x, condition, t_vec)
@@ -327,24 +330,24 @@ class DEISSampler(nn.Module):
       elif self.parameterization == "x0":
         # model returns x0 -> convert to eps consistent with notation:
         # eps = (x - sqrt(alpha_bar_t)*x0) / sqrt(1 - alpha_bar_t)
-        alpha_bar_t = self.alphas_bar[idx]
-        sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[idx]
-        eps = (x - math.sqrt(alpha_bar_t) * model_out) / max(1e-12, sqrt_one_minus_alpha_bar_t)
+        alpha_bar_t = self.alphas_bar[i]
+        sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
+        eps = (x - torch.sqrt(alpha_bar_t) * model_out) / (sqrt_one_minus_alpha_bar_t + 1e-12)
       elif self.parameterization == "v":
         # v = alpha_t * eps - sigma_t * x0  (paper convention); we invert to eps
         # Here we assume v = model_out; use alphas_bar to build alpha_t and sigma_t approx
         # For simplicity use sqrt(alpha_bar) as alpha_t (approx) and sigma = sqrt(1-alpha_bar)
-        alpha_bar_t = self.alphas_bar[idx]
-        alpha_t = math.sqrt(alpha_bar_t)
-        sigma_t = math.sqrt(max(1e-12, 1.0 - alpha_bar_t))
+        alpha_bar_t = self.alphas_bar[i]
+        alpha_t = torch.sqrt(alpha_bar_t)
+        sigma_t = torch.sqrt(torch.clamp(1.0 - alpha_bar_t, 1e-12))
         v = model_out
         # from v = alpha_t * eps - sigma_t * x0  and x = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*eps
         # solve linear system for eps: (this uses algebra; rearranged for eps)
         # express x0 from v and eps: x0 = (alpha_t*eps - v)/sigma_t
         # plug into x equation: x = sqrt(alpha_bar)*(alpha_t*eps - v)/sigma_t + sqrt(1-alpha_bar)*eps
         # solve for eps: eps * (sqrt(alpha_bar)*alpha_t/sigma_t + sqrt(1-alpha_bar)) = x + sqrt(alpha_bar)*v/sigma_t
-        lhs = (math.sqrt(alpha_bar_t) * alpha_t / (sigma_t + 1e-12) + math.sqrt(max(1e-12, 1.0 - alpha_bar_t)))
-        rhs = x + (math.sqrt(alpha_bar_t) * v) / (sigma_t + 1e-12)
+        lhs = torch.sqrt(alpha_bar_t) * alpha_t / (sigma_t + 1e-12) + torch.sqrt(torch.clamp(1.0 - alpha_bar_t, 1e-12))
+        rhs = x + (torch.sqrt(alpha_bar_t) * v) / (sigma_t + 1e-12)
         eps = rhs / (lhs + 1e-12)
       else:
         raise ValueError("Unknown parameterization")
