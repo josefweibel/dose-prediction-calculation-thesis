@@ -1,7 +1,6 @@
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from multiprocessing import Manager
-from pathlib import Path
 import numpy as np
 
 from config import read_model_config
@@ -10,9 +9,7 @@ from evaluator import Evaluator
 from models import MambaUnet
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
-
-
-SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
+from results import SAMPLES_PATH
 
 
 class Sampler:
