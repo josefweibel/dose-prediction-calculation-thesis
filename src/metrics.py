@@ -93,3 +93,24 @@ class HomogeneityIndex(Metric):
 
   def compute(self):
     return self.total / self.count
+
+class BodyMaskedMetric(Metric):
+  def __init__(self, base_metric: Metric, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.base_metric = base_metric
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
+    mask = mask.to(torch.bool)
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      p = preds[i][mask[i:i+1]].flatten()
+      t = target[i][mask[i:i+1]].flatten()
+
+      if p.numel() == 0 or t.numel() == 0:
+        continue
+
+      self.base_metric.update(p.unsqueeze(0), t.unsqueeze(0))
+
+  def compute(self):
+    return self.base_metric.compute()

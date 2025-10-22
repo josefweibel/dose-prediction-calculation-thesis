@@ -9,8 +9,57 @@ from pathlib import Path
 import pandas as pd
 import contextlib
 
-from metrics import DVHScore, DoseScore, HomogeneityIndex
+from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric
 from model_sampler import build_sampler
+from data import GDP
+
+
+def build_metrics(dataset, device):
+  dose_range = dataset.dose_range[1] - dataset.dose_range[0]
+  ms_ssim_kwargs = dict(
+    data_range=dose_range,
+    betas=(0.0448, 0.2856, 0.3001, 0.2363), # only 4 values since image size is 160x176
+  )
+
+  metrics = {
+    'mse': MeanSquaredError(sync_on_compute=False),
+    'rmse': MeanSquaredError(squared=False, sync_on_compute=False),
+    'psnr': PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False),
+    'ssim': StructuralSimilarityIndexMeasure(data_range=dose_range, sync_on_compute=False),
+    'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(**ms_ssim_kwargs, sync_on_compute=False),
+    'dvh': DVHScore(sync_on_compute=False),
+    'dose_score': DoseScore(sync_on_compute=False),
+    'homogeneity_index': HomogeneityIndex(sync_on_compute=False),
+
+    'mse_body': BodyMaskedMetric(MeanSquaredError(sync_on_compute=False), sync_on_compute=False),
+    'rmse_body': BodyMaskedMetric(MeanSquaredError(squared=False, sync_on_compute=False), sync_on_compute=False),
+    'psnr_body': BodyMaskedMetric(PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False), sync_on_compute=False),
+    'ssim_body': BodyMaskedMetric(StructuralSimilarityIndexMeasure(data_range=dose_range, sync_on_compute=False), sync_on_compute=False),
+    'ms_ssim_body': BodyMaskedMetric(MultiScaleStructuralSimilarityIndexMeasure(**ms_ssim_kwargs, sync_on_compute=False), sync_on_compute=False),
+    'dose_score_body': BodyMaskedMetric(DoseScore(sync_on_compute=False), sync_on_compute=False),
+  }
+
+  return {k: v.to(device) for k, v in metrics.items()}
+
+
+def evaluate(metrics, pred, target, structure, body):
+  sample_row = {
+    'file_name': info['file_name'][i],
+    'slice_index': info['index'][i].item(),
+    'duration': duration / target.shape[0]
+  }
+
+  for name, metric in metrics.items():
+    metric.reset()
+
+    if isinstance(metric, BodyMaskedMetric):
+      metric.update(pred, target, body)
+    elif isinstance(metric, HomogeneityIndex):
+      metric.update(pred, target, structure[:, 1])
+    else:
+      metric.update(pred, target)
+
+
 
 class Evaluator:
   def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1):
@@ -21,23 +70,7 @@ class Evaluator:
     self.rank = rank
     self.world_size = world_size
 
-    dose_range = dataloader.dataset.dose_range[1] - dataloader.dataset.dose_range[0]
-    self.metrics = {
-      'mse': MeanSquaredError(sync_on_compute=False),
-      'rmse': MeanSquaredError(squared=False, sync_on_compute=False),
-      'psnr': PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False),
-      'ssim': StructuralSimilarityIndexMeasure(data_range=dose_range, sync_on_compute=False),
-      'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(
-        data_range=dataloader.dataset.dose_range,
-        betas=(0.0448, 0.2856, 0.3001, 0.2363), # only 4 values since image size is 160x176
-        sync_on_compute=False,
-      ),
-      'dvh': DVHScore(sync_on_compute=False),
-      'dose_score': DoseScore(sync_on_compute=False),
-      'homogeneity_index': HomogeneityIndex(sync_on_compute=False)
-    }
-
-    self.metrics = {k: v.to(device) for k, v in self.metrics.items()}
+    self.metrics = build_metrics(dataloader.dataset, device)
 
   def evaluate(self, model, dir=None):
     model.eval()
@@ -82,8 +115,12 @@ class Evaluator:
           for metric_name, metric in self.metrics.items():
             metric.reset()
 
-            m_kwargs = {'mask': structure[i:i+1, 1]} if metric_name == 'homogeneity_index' else {}
-            metric.update(sample_pred, sample_target, **m_kwargs)
+            if isinstance(metric, BodyMaskedMetric):
+              metric.update(sample_pred, sample_target, body[i:i+1])
+            elif isinstance(metric, HomogeneityIndex):
+              metric.update(sample_pred, sample_target, structure[i:i+1, 1])
+            else:
+              metric.update(sample_pred, sample_target)
 
             sample_row[metric_name] = metric.compute().item()
 
