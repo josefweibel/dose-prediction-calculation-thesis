@@ -47,10 +47,11 @@ class Evaluator:
       sample_metrics = []
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
-      for structure, target, info in pbar:
+      for structure, target, body, info in pbar:
         structure = structure.to(self.device)
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
+        body = body.to(self.device)
 
         autocast = contextlib.nullcontext()
         if self.sampling_config['precision'] == 'fp16_amp':

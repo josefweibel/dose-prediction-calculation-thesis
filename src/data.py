@@ -50,7 +50,15 @@ def normalize_gdphmm_dose(x):
   return (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
 
 class GDPHMMSlicesDataset(Dataset):
-  def __init__(self, dataset_name, split, img_size, cache, limit=None, skip=0):
+  def __init__(
+    self,
+    dataset_name,
+    split,
+    img_size,
+    cache,
+    limit=None,
+    skip=0,
+  ):
     self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
@@ -113,21 +121,25 @@ class GDPHMMSlicesDataset(Dataset):
         [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
       ).astype(np.float32)
       ct_vol = vol['img'].astype(np.float32)
+      body_vol = vol['Body'].astype(np.uint8)
 
       self.cache.put(file.name + ':dose', dose_vol)
       self.cache.put(file.name + ':ptv', ptv_vol)
       self.cache.put(file.name + ':ct', ct_vol)
       self.cache.put(file.name + ':oar', oar_vol)
+      self.cache.put(file.name + ':body', body_vol)
     else:
       ptv_vol, ptv_shm = self.cache.get(file.name + ':ptv')
       ct_vol, ct_shm = self.cache.get(file.name + ':ct')
       oar_vol, oar_shm = self.cache.get(file.name + ':oar')
+      body_vol, body_shm = self.cache.get(file.name + ':body')
 
     sample = {
       'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
       'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
       'ct': self.ct_transforms(ct_vol[:, :, slice_idx]),
       'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
+      'body': self.oar_transforms(body_vol[:, :, slice_idx]),
       'info': {
         'file_path': str(file),
         'file_name': file.name,
@@ -141,9 +153,11 @@ class GDPHMMSlicesDataset(Dataset):
       ptv_shm.close()
       ct_shm.close()
       oar_shm.close()
+      body_shm.close()
 
     structure = torch.cat([sample['ct'], sample['ptv'], sample['oar']], dim=0)
-    return structure, sample['dose'], sample['info']
+
+    return structure, sample['dose'], sample['body'], sample['info']
 
   def denormalize_target(self, x):
     return x * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN

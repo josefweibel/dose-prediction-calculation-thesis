@@ -86,7 +86,7 @@ class Trainer:
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
 
-    if 'val_on_train' in self.config['data'] and self.config['data']['val_on_train']:
+    if self.config['data'].get('val_on_train', False):
       val_dataset = train_dataset
     else:
       if self.config['data']['valid_cache_size'] == 'inf':
@@ -158,7 +158,7 @@ class Trainer:
       beta_T=self.config['beta_T'],
       T=self.config['T']
     ).to(self.device)
-    
+
     if self.is_distributed:
       self.model = DDP(
         self.model,
@@ -218,7 +218,7 @@ class Trainer:
       self.model.train()
 
       pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False, disable=not self.is_main_process)
-      for structure, target, _ in pbar_batches:
+      for structure, target, _, _ in pbar_batches:
         self.optim.zero_grad()
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
