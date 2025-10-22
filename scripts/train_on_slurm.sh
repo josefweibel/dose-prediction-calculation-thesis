@@ -23,7 +23,7 @@ sbatch <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim 
-#SBATCH --time 24:00:00
+#SBATCH --time 6:00:00
 #SBATCH --mem 180G
 #SBATCH --gpus h100:2
 #SBATCH --ntasks=2
@@ -50,7 +50,7 @@ export NCCL_P2P_DISABLE=1
 # export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 export MASTER_ADDR=\$(scontrol show hostname \${SLURM_NODELIST} | head -n 1)
-export MASTER_PORT=12356
+export MASTER_PORT=$((12000 + RANDOM % 1000))
 
 echo "SLURM_JOB_ID=\$SLURM_JOB_ID"
 echo "TMPDIR=\$TMPDIR"

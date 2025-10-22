@@ -44,7 +44,7 @@ sbatch <<EOF
 export NCCL_P2P_DISABLE=1
 
 export MASTER_ADDR=\$(scontrol show hostname \${SLURM_NODELIST} | head -n 1)
-export MASTER_PORT=12357
+export MASTER_PORT=$((12000 + RANDOM % 1000))
 
 echo "SLURM_JOB_ID=\$SLURM_JOB_ID"
 echo "TMPDIR=\$TMPDIR"

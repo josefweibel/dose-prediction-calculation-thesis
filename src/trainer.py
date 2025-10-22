@@ -273,8 +273,11 @@ class Trainer:
     if self.is_main_process and self.wandb_run:
       self.wandb_run.finish()
 
-    self.train_dataloader.dataset.finish()
-    self.val_dataloader.dataset.finish()
+    if self.train_dataloader is not None:
+      self.train_dataloader.dataset.finish()
+
+    if self.val_dataloader is not None:
+      self.val_dataloader.dataset.finish()
 
     self.train_dataloader = None
     self.val_dataloader = None
