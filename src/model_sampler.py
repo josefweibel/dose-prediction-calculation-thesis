@@ -33,8 +33,8 @@ def build_sampler(model_config, sampling_config, model):
       model_config['beta_T'],
       model_config['T'],
       sampling_config['T'],
+      method=sampling_config['method'],
       order=sampling_config['order'],
-      parameterization='epsilon',
       schedule=sampling_config['schedule'],
       use_precomputed=True,
     )
@@ -241,8 +241,8 @@ class DEISSampler(nn.Module):
     beta_T,
     train_T,
     sampling_T=None,
+    method: str = "rhoAB", # "rhoAB" or "tAB"
     order: int = 0, # 0 == DDIM-like; 1..k for multistep extrapolation
-    parameterization: str = "epsilon", # "epsilon" (default), "v" or "x0"
     schedule: str = "linear", # "linear", "cosine", or "karras"
     use_precomputed: bool = True,
   ):
@@ -250,9 +250,10 @@ class DEISSampler(nn.Module):
     self.model = model
     self.train_T = train_T
     self.sampling_T = sampling_T or train_T
+    self.method = method
+    assert method in ("rhoAB", "tAB"), "method must be 'rhoAB' or 'tAB'"
     self.order = order
     assert self.order >= 0, "order must be >= 0"
-    self.parameterization = parameterization
 
     sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
     self.sampling_indices = sampling_idx.tolist()
@@ -273,10 +274,11 @@ class DEISSampler(nn.Module):
     self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
     self.register_buffer("dir_coeff", dir_coeff)
 
-    # Precompute normalized time grid in [0,1] for the selected indices.
-    # We use a simple mapping: t = idx / (train_T - 1).
-    idxs = torch.tensor(self.sampling_indices, dtype=torch.float32)
-    time_grid = idxs / float(max(1, self.train_T - 1))
+    if self.method == "rhoAB":
+      grid = torch.log(alphas_bar / (1 - alphas_bar))
+    else:  # "tAB"
+      idxs = torch.tensor(self.sampling_indices, dtype=torch.float32)
+      grid = idxs / float(max(1, self.train_T - 1))
 
     # Precompute Lagrange weights for each step to extrapolate eps from previous points
     # For step i (going from sampling_indices[i] -> sampling_indices[i+1] in time),
@@ -286,20 +288,19 @@ class DEISSampler(nn.Module):
       # the available previous times to the *next* target time. The number of available previous
       # points depends on i (warm-up region).
       precomp = []
-      times = time_grid.numpy()
-      for i in range(len(time_grid)):
+      for i in range(len(grid)):
         # we are at time t_i = time_grid[i]; we will step to next index j = i+1 (smaller time).
         # But in our loop we iterate from high t to low t, so target time is time_grid[i+1] when available.
         # For the last step there is no next target, but we still precompute an empty list.
-        if i + 1 >= len(time_grid):
+        if i + 1 >= len(grid):
           precomp.append(None)
           continue
         # we will use up-to (order+1) previous points: these are at indices [i, i-1, i-2, ...]
         max_m = min(self.order + 1, i + 1)  # can't use more points than available
         # collect previous times in descending order (most recent first)
         prev_indices = [i - j for j in range(max_m)]
-        prev_times = times[prev_indices]  # array of length max_m
-        t_target = float(times[i + 1])   # target is next time (one step further in sampling)
+        prev_times = grid[prev_indices]  # array of length max_m
+        t_target = float(grid[i + 1])   # target is next time (one step further in sampling)
         weights = lagrange_weights(torch.tensor(prev_times), t_target)
         # store weights along with the corresponding prev_indices so we can apply them to eps buffer
         precomp.append((prev_indices, weights))
@@ -324,37 +325,7 @@ class DEISSampler(nn.Module):
     for i, t in enumerate(self.sampling_indices):
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
 
-      # model output
-      model_out = self.model(x, condition, t_vec)
-      # convert model_out to epsilon if necessary
-      if self.parameterization == "epsilon":
-        eps = model_out
-      elif self.parameterization == "x0":
-        # model returns x0 -> convert to eps consistent with notation:
-        # eps = (x - sqrt(alpha_bar_t)*x0) / sqrt(1 - alpha_bar_t)
-        alpha_bar_t = self.alphas_bar[i]
-        sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
-        eps = (x - torch.sqrt(alpha_bar_t) * model_out) / (sqrt_one_minus_alpha_bar_t + 1e-12)
-      elif self.parameterization == "v":
-        # v = alpha_t * eps - sigma_t * x0  (paper convention); we invert to eps
-        # Here we assume v = model_out; use alphas_bar to build alpha_t and sigma_t approx
-        # For simplicity use sqrt(alpha_bar) as alpha_t (approx) and sigma = sqrt(1-alpha_bar)
-        alpha_bar_t = self.alphas_bar[i]
-        alpha_t = torch.sqrt(alpha_bar_t)
-        sigma_t = torch.sqrt(torch.clamp(1.0 - alpha_bar_t, 1e-12))
-        v = model_out
-        # from v = alpha_t * eps - sigma_t * x0  and x = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*eps
-        # solve linear system for eps: (this uses algebra; rearranged for eps)
-        # express x0 from v and eps: x0 = (alpha_t*eps - v)/sigma_t
-        # plug into x equation: x = sqrt(alpha_bar)*(alpha_t*eps - v)/sigma_t + sqrt(1-alpha_bar)*eps
-        # solve for eps: eps * (sqrt(alpha_bar)*alpha_t/sigma_t + sqrt(1-alpha_bar)) = x + sqrt(alpha_bar)*v/sigma_t
-        lhs = torch.sqrt(alpha_bar_t) * alpha_t / (sigma_t + 1e-12) + torch.sqrt(torch.clamp(1.0 - alpha_bar_t, 1e-12))
-        rhs = x + (torch.sqrt(alpha_bar_t) * v) / (sigma_t + 1e-12)
-        eps = rhs / (lhs + 1e-12)
-      else:
-        raise ValueError("Unknown parameterization")
-
-      # push the most recent eps onto buffer (most recent at right)
+      eps = self.model(x, condition, t_vec)
       eps_buffer.append(eps)
 
       # Decide which epsilon to use for the deterministic DDIM-like update:

@@ -1,6 +1,7 @@
 sampler: deis
 T: 100
 schedule: linear
+method: rhoAB
 order: 0
 
 data_cache_size: inf
