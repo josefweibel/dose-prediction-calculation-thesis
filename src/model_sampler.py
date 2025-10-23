@@ -61,7 +61,6 @@ def make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T):
     s = 0.008
     steps = torch.linspace(0, 1, train_T)
     alphas_cumprod = torch.cos(((steps + s) / (1 + s)) * np.pi / 2) ** 2
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]  # normalize
 
     # Choose sampling points equally spaced in log-SNR
     rho = torch.log(alphas_cumprod / (1 - alphas_cumprod))
@@ -90,7 +89,9 @@ def make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T):
   else:
     raise ValueError(f"Unknown schedule: {schedule}")
 
-  print(f"Sampling indices: {indices}")
+  indices = torch.unique_consecutive(indices)
+
+  print(f"Sampling indices (n={len(indices)}): {indices}")
   return indices
 
 class GaussianDiffusionSampler(nn.Module):
