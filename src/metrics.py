@@ -104,8 +104,8 @@ class BodyMaskedMetric(Metric):
     batch_size = preds.shape[0]
 
     for i in range(batch_size):
-      p = preds[i][mask[i:i+1]].flatten()
-      t = target[i][mask[i:i+1]].flatten()
+      p = preds[i][mask[i]].flatten()
+      t = target[i][mask[i]].flatten()
 
       if p.numel() == 0 or t.numel() == 0:
         continue
