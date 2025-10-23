@@ -24,9 +24,9 @@ if __name__ == '__main__':
 
   metric_recalculator = MetricsRecalculator(
     model_name=args.model,
-    sampling_config=args.sampling,
+    sampling_name=args.sampling,
     data_split=args.data_split,
-    epoch=args.epochs,
+    epoch=args.epoch,
   )
 
   def cleanup():
@@ -43,7 +43,7 @@ if __name__ == '__main__':
   signal.signal(signal.SIGTERM, handle_signal)
   signal.signal(signal.SIGINT, handle_signal)
 
-  metric_recalculator.sample()
+  metric_recalculator.calculate()
 
   print('Sampling script completed.')
 

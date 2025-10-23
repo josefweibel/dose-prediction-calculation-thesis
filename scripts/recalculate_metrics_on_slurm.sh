@@ -31,7 +31,7 @@ sbatch <<EOF
 #!/bin/bash
 #SBATCH -p epyc2
 #SBATCH -q job_cpu
-#SBATCH --time 4:00:00
+#SBATCH --time 0:30:00
 #SBATCH --mem 64G
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -51,7 +51,10 @@ echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to \${SC
 
 function clean_up {
   rm -rf "\${SCRATCH_BASE_DIR:?}"/*
-  find /dev/shm -user "\$USER" -delete
+  if [ "\$(squeue -w \$(hostname) -h -o '%i' | wc -l)" -eq 1 ]; then
+    echo 'Deleting shared memory of user'
+    find /dev/shm -user "\$USER" -delete
+  fi
   echo "Cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
 }
 trap clean_up EXIT

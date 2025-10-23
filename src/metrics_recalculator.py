@@ -38,7 +38,7 @@ class MetricsRecalculator:
       cache=shared_cache,
     )
 
-    self.device = detect_device(0)
+    self.device = detect_device(None)
     self.metrics = build_metrics(self.dataset, self.device)
 
     self.samples_path = SAMPLES_PATH / model_name / sampling_name / f'{data_split}_{epoch}'
@@ -51,7 +51,8 @@ class MetricsRecalculator:
       structure, target, body, info = self.dataset[idx]
       structure = structure.unsqueeze(0).to(self.device)
       target = target.unsqueeze(0).to(self.device)
-      body = body.unsqueeze(0).to(self.device)
+      target = self.dataset.denormalize_target(target)
+      body = body.to(self.device)
 
       file_name = info['file_name']
       slice_idx = info['index']
@@ -66,7 +67,8 @@ class MetricsRecalculator:
         metric.reset()
 
       with torch.no_grad():
-        pred = np.load(self.samples_path / f'{file_name}-{slice_idx}.npy')
+        pred = np.load(self.samples_path / f'{file_name.replace(".npz", "")}-{slice_idx}.npy')
+        pred = torch.Tensor(pred).unsqueeze(0).to(self.device)
 
         for name, metric in self.metrics.items():
           if isinstance(metric, BodyMaskedMetric):

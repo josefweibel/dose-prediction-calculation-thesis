@@ -11,7 +11,7 @@ import contextlib
 
 from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric
 from model_sampler import build_sampler
-from data import GDP
+from data import GDPHMM_OAR 
 
 
 def build_metrics(dataset, device):
@@ -34,8 +34,6 @@ def build_metrics(dataset, device):
     'mse_body': BodyMaskedMetric(MeanSquaredError(sync_on_compute=False), sync_on_compute=False),
     'rmse_body': BodyMaskedMetric(MeanSquaredError(squared=False, sync_on_compute=False), sync_on_compute=False),
     'psnr_body': BodyMaskedMetric(PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False), sync_on_compute=False),
-    'ssim_body': BodyMaskedMetric(StructuralSimilarityIndexMeasure(data_range=dose_range, sync_on_compute=False), sync_on_compute=False),
-    'ms_ssim_body': BodyMaskedMetric(MultiScaleStructuralSimilarityIndexMeasure(**ms_ssim_kwargs, sync_on_compute=False), sync_on_compute=False),
     'dose_score_body': BodyMaskedMetric(DoseScore(sync_on_compute=False), sync_on_compute=False),
   }
 
