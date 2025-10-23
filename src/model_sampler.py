@@ -90,6 +90,7 @@ def make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T):
   else:
     raise ValueError(f"Unknown schedule: {schedule}")
 
+  print(f"Sampling indices: {indices}")
   return indices
 
 class GaussianDiffusionSampler(nn.Module):
