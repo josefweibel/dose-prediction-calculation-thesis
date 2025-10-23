@@ -71,7 +71,7 @@ class HomogeneityIndex(Metric):
     self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
   def update(self, preds: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
-    mask = mask.to(torch.bool)
+    mask = mask.to(torch.bool) > 0
     batch_size = preds.shape[0]
 
     for i in range(batch_size):
@@ -100,7 +100,7 @@ class BodyMaskedMetric(Metric):
     self.base_metric = base_metric
 
   def update(self, preds: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
-    mask = mask.to(torch.bool)
+    mask = mask.to(torch.bool) > 0
     batch_size = preds.shape[0]
 
     for i in range(batch_size):
