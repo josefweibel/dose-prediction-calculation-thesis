@@ -89,22 +89,23 @@ def make_sampling_indices(train_T, sampling_T, schedule, alphas_bar):
   elif schedule == "karras":
     # Log-spaced sigmas between high and low noise
     sigma_min, sigma_max, rho_val = 0.002, 80, 7.0
-    i = torch.linspace(0, 1, sampling_T)
-    sigmas = (sigma_max ** (1 / rho_val) + i * (sigma_min ** (1 / rho_val) - sigma_max ** (1 / rho_val))) ** rho_val
-    sigmas = torch.flip(sigmas, dims=[0])  # high to low noise
+    i = torch.linspace(0, 1, sampling_T, device=alphas_bar.device)
+
+    min_inv_rho = sigma_min ** (1 / rho_val)
+    max_inv_rho = sigma_max ** (1 / rho_val)
+
+    # Interpolate in rho-space and transform back
+    sigmas = (max_inv_rho + i * (min_inv_rho - max_inv_rho)) ** rho_val
+    # Add final sigma=0 for complete denoising
+    sigmas = torch.cat([sigmas, torch.zeros(1, device=alphas_bar.device)])
 
     # convert to corresponding alpha_bar values
     alphas_bar_target = 1 / (1 + sigmas**2)
 
-    # map alpha_bar_target to closest training step
-    indices = torch.tensor([
-      torch.argmin(torch.abs(alphas_bar - ab_t)).item()
-      for ab_t in alphas_bar_target
-    ], dtype=torch.long)
+    distances = torch.abs(alphas_bar.unsqueeze(1) - alphas_bar_target.unsqueeze(0))
+    indices = torch.argmin(distances, dim=0)
   else:
     raise ValueError(f"Unknown schedule: {schedule}")
-
-  indices = torch.unique_consecutive(indices)
 
   print(f"Sampling indices (n={len(indices)}): {indices}")
   return indices
