@@ -1,4 +1,3 @@
-from pathlib import Path
 import contextlib
 import torch
 import torch.nn as nn
@@ -11,10 +10,10 @@ from tqdm import tqdm
 import copy
 import wandb
 from multiprocessing import Manager
-import os
 
 from data import GDPHMMSlicesDataset, SharedCache, SharedLRUCache
 from models import MambaUnet
+from model_cache import DeepCache, CacheConfig
 from evaluator import Evaluator
 from config import read_sampling_config
 from utils.mp import detect_device, PrefetchLoader
@@ -43,6 +42,8 @@ class DiffusionModelTrainerModule(nn.Module):
     self.register_buffer('sqrt_alphas_bar', torch.sqrt(alphas_bar))
     self.register_buffer('sqrt_one_minus_alphas_bar', torch.sqrt(1. - alphas_bar))
 
+    self.cache = DeepCache(CacheConfig(intervals={}, warmup=0))
+
   def forward(self, x_0, condition):
     t = torch.randint(self.T, size=(x_0.shape[0], ), device=x_0.device)
 
@@ -52,7 +53,7 @@ class DiffusionModelTrainerModule(nn.Module):
       extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape) * noise
     )
 
-    noise_pred = self.model(x_t, condition, t)
+    noise_pred = self.model(x_t, condition, t, self.cache)
 
     return F.mse_loss(noise_pred, noise, reduction='none').mean()
 

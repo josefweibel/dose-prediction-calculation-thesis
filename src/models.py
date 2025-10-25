@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import Optional
 
 from models_mamba import VisionMamba
+from model_cache import DeepCache
 
 
 class TimeEmbedding(nn.Module):
@@ -101,7 +103,7 @@ class MambaUnet(nn.Module):
     self.out = nn.Conv2d(48, out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
 
-  def forward(self, x, structure, t):
+  def forward(self, x, structure, t, cache: Optional[DeepCache]=None):
     t_emb = self.time_embedding(t)
 
     t_for_enc1 = self.t_proj_enc1(t_emb)[:, :, None, None]
@@ -113,23 +115,24 @@ class MambaUnet(nn.Module):
     t_for_dec2 = self.t_proj_dec2(t_emb)[:, :, None, None]
     t_for_dec1 = self.t_proj_dec1(t_emb)[:, :, None, None]
 
-    x = self.head(x)
-    structure = self.head_struc(structure)
+    structure = cache.get_or_compute('head_struc', lambda: self.head_struc(structure))
+    out_enc1_struc = cache.get_or_compute('enc1_struc', lambda: self.enc1_struc(structure, return_features=True))
+    out_enc2_struc = cache.get_or_compute('enc2_struc', lambda: self.enc2_struc(out_enc1_struc, return_features=True))
+    out_enc3_struc = cache.get_or_compute('enc3_struc', lambda: self.enc3_struc(out_enc2_struc, return_features=True))
+    out_enc4_struc = cache.get_or_compute('enc4_struc', lambda: self.enc4_struc(out_enc3_struc, return_features=True))
 
-    out_enc1 = self.enc1(x, return_features=True)
-    out_enc1_struc = self.enc1_struc(structure, return_features=True)
+    x = self.head(x)
+
+    out_enc1 = cache.get_or_compute('enc1', lambda: self.enc1(x, return_features=True))
     out_enc1 = out_enc1 + out_enc1_struc + t_for_enc1
 
-    out_enc2 = self.enc2(out_enc1, return_features=True)
-    out_enc2_struc = self.enc2_struc(out_enc1_struc, return_features=True)
+    out_enc2 = cache.get_or_compute('enc2', lambda: self.enc2(out_enc1, return_features=True))
     out_enc2 = out_enc2 + out_enc2_struc + t_for_enc2
 
-    out_enc3 = self.enc3(out_enc2, return_features=True)
-    out_enc3_struc = self.enc3_struc(out_enc2_struc, return_features=True)
+    out_enc3 = cache.get_or_compute('enc3', lambda: self.enc3(out_enc2, return_features=True))
     out_enc3 = out_enc3 + out_enc3_struc + t_for_enc3
 
-    out_enc4 = self.enc4(out_enc3, return_features=True)
-    out_enc4_struc = self.enc4_struc(out_enc3_struc, return_features=True)
+    out_enc4 = cache.get_or_compute('enc4', lambda: self.enc4(out_enc3, return_features=True))
     out_enc4 = out_enc4 + out_enc4_struc + t_for_enc4
 
     in_dec4 = self.up4(out_enc4)

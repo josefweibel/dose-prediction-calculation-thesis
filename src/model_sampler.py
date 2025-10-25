@@ -1,18 +1,33 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-import math
 from collections import deque
 import numpy as np
 
+from model_cache import DeepCache, CacheConfig
+
 
 def build_sampler(model_config, sampling_config, model):
+  if 'cache' in sampling_config:
+    intervals = {
+      key: np.inf if val == 'inf' else val
+      for key, val in sampling_config['cache']['intervals'].items()
+    }
+
+    cache_config = CacheConfig(
+      intervals=intervals,
+      warmup=sampling_config['cache']['warmup_steps'],
+    )
+  else:
+    cache_config = CacheConfig(intervals={}, warmup=0)
+
   if sampling_config['sampler'] == 'ddpm':
     return GaussianDiffusionSampler(
       model,
       model_config['beta_1'],
       model_config['beta_T'],
       model_config['T'],
+      cache_config,
       sampling_config['T'],
       schedule=sampling_config['schedule'],
     )
@@ -22,6 +37,7 @@ def build_sampler(model_config, sampling_config, model):
       model_config['beta_1'],
       model_config['beta_T'],
       model_config['T'],
+      cache_config,
       sampling_config['T'],
       eta=sampling_config['eta'],
       schedule=sampling_config['schedule'],
@@ -32,6 +48,7 @@ def build_sampler(model_config, sampling_config, model):
       model_config['beta_1'],
       model_config['beta_T'],
       model_config['T'],
+      cache_config,
       sampling_config['T'],
       method=sampling_config['method'],
       order=sampling_config['order'],
@@ -99,6 +116,7 @@ class GaussianDiffusionSampler(nn.Module):
     beta_1,
     beta_T,
     train_T,
+    cache_config,
     sampling_T=None,
     schedule: str = "linear", # "linear", "cosine", or "karras"
   ):
@@ -107,6 +125,7 @@ class GaussianDiffusionSampler(nn.Module):
     self.model = model
     self.train_T = train_T
     self.sampling_T = sampling_T or train_T  # default: full schedule
+    self.cache_config = cache_config
 
     betas = torch.linspace(beta_1, beta_T, train_T).float()
     alphas = 1. - betas
@@ -125,10 +144,12 @@ class GaussianDiffusionSampler(nn.Module):
   def forward(self, x_T, condition):
     x = x_T
 
+    cache = DeepCache(self.cache_config)
     for i, t in enumerate(self.sampling_indices):
-      t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
+      cache.set_current_step(i)
 
-      eps = self.model(x, condition, t_vec)
+      t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
+      eps = self.model(x, condition, t_vec, cache)
 
       beta_t = self.betas[i]
       sqrt_beta_t = self.sqrt_betas[i]
@@ -150,6 +171,7 @@ class DDIMSampler(nn.Module):
       beta_1,
       beta_T,
       train_T,
+      cache_config,
       sampling_T=None,
       eta=0.0,
       schedule: str = "linear", # "linear", "cosine", or "karras"
@@ -158,6 +180,7 @@ class DDIMSampler(nn.Module):
     self.model = model
     self.train_T = train_T
     self.sampling_T = sampling_T or train_T  # default: full schedule
+    self.cache_config = cache_config
     self.eta = eta
 
     betas = torch.linspace(beta_1, beta_T, train_T).float()
@@ -191,9 +214,12 @@ class DDIMSampler(nn.Module):
   def forward(self, x_T, condition):
     x = x_T
 
+    cache = DeepCache(self.cache_config)
     for i, t in enumerate(self.sampling_indices):
+      cache.set_current_step(i)
+
       t_vec = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
-      eps = self.model(x, condition, t_vec)
+      eps = self.model(x, condition, t_vec, cache)
 
       sqrt_alpha_bar_t = self.sqrt_alphas_bar[i]
       sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
@@ -240,6 +266,7 @@ class DEISSampler(nn.Module):
     beta_1,
     beta_T,
     train_T,
+    cache_config,
     sampling_T=None,
     method: str = "rhoAB", # "rhoAB" or "tAB"
     order: int = 0, # 0 == DDIM-like; 1..k for multistep extrapolation
@@ -250,6 +277,7 @@ class DEISSampler(nn.Module):
     self.model = model
     self.train_T = train_T
     self.sampling_T = sampling_T or train_T
+    self.cache_config = cache_config
     self.method = method
     assert method in ("rhoAB", "tAB"), "method must be 'rhoAB' or 'tAB'"
     self.order = order
@@ -321,13 +349,16 @@ class DEISSampler(nn.Module):
 
     # buffer holding past epsilon predictions (eps at times corresponding to sampling_indices)
     eps_buffer = deque(maxlen=self.order + 1)
+    cache = DeepCache(self.cache_config)
 
     # We'll iterate sampling_indices in order (from largest time index to smallest)
     # i loops over positions in the sampling_indices list; at each iteration we are at x = x_{i+1}
     for i, t in enumerate(self.sampling_indices):
+      cache.set_current_step(i)
+
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
 
-      eps = self.model(x, condition, t_vec)
+      eps = self.model(x, condition, t_vec, cache)
       eps_buffer.append(eps)
 
       # Decide which epsilon to use for the deterministic DDIM-like update:
