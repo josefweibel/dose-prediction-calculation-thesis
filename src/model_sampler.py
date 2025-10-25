@@ -59,7 +59,7 @@ def build_sampler(model_config, sampling_config, model):
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
 
 
-def make_sampling_indices(train_T, sampling_T, schedule, alphas_bar):
+def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train):
   """
   Create sampling indices for different time schedules.
   Args:
@@ -68,28 +68,36 @@ def make_sampling_indices(train_T, sampling_T, schedule, alphas_bar):
       schedule: 'linear', 'cosine', or 'karras'
   Returns:
       sampling_indices (torch.LongTensor)
+      alphas_bar to use for sampling (torch.Tensor)
   """
   if schedule == "linear":
     # Uniform in t
     indices = torch.linspace(train_T - 1, 0, sampling_T, dtype=torch.long)
-
+    alphas_bar = alphas_bar_train[indices]
   elif schedule == "cosine":
-    # Map cosine cumulative alphas to training timesteps
-    s = 0.008
-    steps = torch.linspace(0, 1, train_T)
-    alphas_cumprod = torch.cos(((steps + s) / (1 + s)) * np.pi / 2) ** 2
+    s = 0.008  # Offset to prevent singularity at t=0
+    steps = torch.linspace(0, 1, sampling_T, device=alphas_bar_train.device)
 
-    # Choose sampling points equally spaced in log-SNR
-    rho = torch.log(alphas_cumprod / (1 - alphas_cumprod))
-    rho_target = torch.linspace(rho[-1], rho[0], sampling_T)
-    indices = torch.tensor([
-      torch.argmin(torch.abs(rho - rt)).item() for rt in rho_target
-    ], dtype=torch.long)
+    # Cosine schedule: alpha_bar(t) = cos^2((t + s) / (1 + s) * pi/2)
+    alphas_bar = torch.cos(((steps + s) / (1 + s)) * np.pi * 0.5) ** 2
 
+    # Normalize to match training range (important for model compatibility)
+    # Map [min_train, max_train] to our cosine curve
+    min_alpha_train = alphas_bar_train.min()
+    max_alpha_train = alphas_bar_train.max()
+
+    # Rescale cosine to match training bounds
+    alphas_bar = min_alpha_train + (max_alpha_train - min_alpha_train) * (
+      (alphas_bar - alphas_bar.min()) / (alphas_bar.max() - alphas_bar.min() + 1e-8)
+    )
+
+    # Map to closest training timesteps for model conditioning
+    distances = torch.abs(alphas_bar_train.unsqueeze(1) - alphas_bar.unsqueeze(0))
+    indices = torch.argmin(distances, dim=0)
   elif schedule == "karras":
     # Log-spaced sigmas between high and low noise
     sigma_min, sigma_max, rho_val = 0.002, 80, 7.0
-    i = torch.linspace(0, 1, sampling_T, device=alphas_bar.device)
+    i = torch.linspace(0, 1, sampling_T, device=alphas_bar_train.device)
 
     min_inv_rho = sigma_min ** (1 / rho_val)
     max_inv_rho = sigma_max ** (1 / rho_val)
@@ -97,18 +105,18 @@ def make_sampling_indices(train_T, sampling_T, schedule, alphas_bar):
     # Interpolate in rho-space and transform back
     sigmas = (max_inv_rho + i * (min_inv_rho - max_inv_rho)) ** rho_val
     # Add final sigma=0 for complete denoising
-    sigmas = torch.cat([sigmas, torch.zeros(1, device=alphas_bar.device)])
+    sigmas = torch.cat([sigmas, torch.zeros(1, device=alphas_bar_train.device)])
 
     # convert to corresponding alpha_bar values
-    alphas_bar_target = 1 / (1 + sigmas**2)
+    alphas_bar = 1 / (1 + sigmas**2)
 
-    distances = torch.abs(alphas_bar.unsqueeze(1) - alphas_bar_target.unsqueeze(0))
+    distances = torch.abs(alphas_bar_train.unsqueeze(1) - alphas_bar.unsqueeze(0))
     indices = torch.argmin(distances, dim=0)
   else:
     raise ValueError(f"Unknown schedule: {schedule}")
 
   print(f"Sampling indices (n={len(indices)}): {indices}")
-  return indices
+  return indices, alphas_bar
 
 class GaussianDiffusionSampler(nn.Module):
   def __init__(
@@ -125,22 +133,47 @@ class GaussianDiffusionSampler(nn.Module):
 
     self.model = model
     self.train_T = train_T
-    self.sampling_T = sampling_T or train_T  # default: full schedule
+    self.sampling_T = sampling_T or train_T
     self.cache_config = cache_config
 
+    # Compute full training schedule
     betas = torch.linspace(beta_1, beta_T, train_T).float()
     alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, dim=0)
+    alphas_bar_train = torch.cumprod(alphas, dim=0)
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, alphas_bar)
+    # Get sampling indices
+    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train=)
     self.sampling_indices = sampling_idx.tolist()
 
-    self.register_buffer("betas", betas[sampling_idx])
-    self.register_buffer("alphas", alphas[sampling_idx])
-    self.register_buffer("alphas_bar", alphas_bar[sampling_idx])
-    self.register_buffer("sqrt_betas", torch.sqrt(betas)[sampling_idx])
-    self.register_buffer("sqrt_one_minus_alphas_bar", torch.sqrt(1. - alphas_bar)[sampling_idx])
-    self.register_buffer("sqrt_recip_alphas", torch.sqrt(1. / alphas)[sampling_idx])
+    # For prev, shift by one position; last step goes to alpha_bar=1 (clean image)
+    alphas_bar_prev = torch.zeros_like(alphas_bar_t)
+    for i in range(len(alphas_bar_t)):
+      if i < len(alphas_bar_t) - 1:
+        alphas_bar_prev[i] = alphas_bar_t[i + 1]
+      else:
+        alphas_bar_prev[i] = 1.0  # Final step: clean image
+
+    # Compute effective betas for each transition
+    betas_eff = 1.0 - (alphas_bar_t / torch.clamp(alphas_bar_prev, min=1e-8))
+    betas_eff = torch.clamp(betas_eff, min=0.0, max=0.999)
+
+    # Posterior variance for DDPM
+    posterior_variance = betas_eff * (1 - alphas_bar_prev) / torch.clamp(1 - alphas_bar_t, min=1e-8)
+    posterior_variance = torch.clamp(posterior_variance, min=0.0)
+
+    # Cache only what's needed in forward pass
+    self.register_buffer("sqrt_one_minus_alphas_bar", torch.sqrt(1. - alphas_bar_t))
+    self.register_buffer("sqrt_recip_alphas_bar", torch.sqrt(1. / torch.clamp(alphas_bar_t, min=1e-8)))
+    self.register_buffer("posterior_std", torch.sqrt(posterior_variance))
+
+    # Precompute mean calculation coefficients
+    sqrt_alpha_bar_prev = torch.sqrt(alphas_bar_prev)
+    sqrt_one_minus_betas_eff = torch.sqrt(1 - betas_eff)
+    one_minus_alphas_bar_t_recip = 1.0 / torch.clamp(1 - alphas_bar_t, min=1e-8)
+
+    # Cache mean coefficients: coef1 * x0_pred + coef2 * x_t
+    self.register_buffer("mean_coef1", sqrt_alpha_bar_prev * betas_eff * one_minus_alphas_bar_t_recip)
+    self.register_buffer("mean_coef2", sqrt_one_minus_betas_eff * (1 - alphas_bar_prev) * one_minus_alphas_bar_t_recip)
 
   def forward(self, x_T, condition):
     x = x_T
@@ -152,56 +185,64 @@ class GaussianDiffusionSampler(nn.Module):
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
       eps = self.model(x, condition, t_vec, cache)
 
-      beta_t = self.betas[i]
-      sqrt_beta_t = self.sqrt_betas[i]
-      sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
-      sqrt_recip_alpha_t = self.sqrt_recip_alphas[i]
+      # Predict x0 using cached coefficients
+      x0_pred = self.sqrt_recip_alphas_bar[i] * (x - self.sqrt_one_minus_alphas_bar[i] * eps)
 
-      x = sqrt_recip_alpha_t * (x - (beta_t / sqrt_one_minus_alpha_bar_t) * eps)
+      # Compute mean using precomputed coefficients
+      mean = self.mean_coef1[i] * x0_pred + self.mean_coef2[i] * x
 
-      if t > 0:
+      x = mean
+
+      # Add noise (not on last step)
+      if i < len(self.sampling_indices) - 1:
         noise = torch.randn_like(x)
-        x += sqrt_beta_t * noise
+        x += self.posterior_std[i] * noise
 
     return x
 
 class DDIMSampler(nn.Module):
   def __init__(
-      self,
-      model,
-      beta_1,
-      beta_T,
-      train_T,
-      cache_config,
-      sampling_T=None,
-      eta=0.0,
-      schedule: str = "linear", # "linear", "cosine", or "karras"
-    ):
+    self,
+    model,
+    beta_1,
+    beta_T,
+    train_T,
+    cache_config,
+    sampling_T=None,
+    eta=0.0,
+    schedule: str = "linear", # "linear", "cosine", or "karras"
+  ):
     super().__init__()
     self.model = model
     self.train_T = train_T
-    self.sampling_T = sampling_T or train_T  # default: full schedule
+    self.sampling_T = sampling_T or train_T
     self.cache_config = cache_config
     self.eta = eta
 
+    # Compute full training schedule
     betas = torch.linspace(beta_1, beta_T, train_T).float()
     alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, 0)
+    alphas_bar_train = torch.cumprod(alphas, 0)
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, alphas_bar)
+    # Get sampling indices
+    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train)
     self.sampling_indices = sampling_idx.tolist()
 
-    alphas_bar = alphas_bar[sampling_idx]
-    alphas_bar_prev = torch.cat((alphas_bar[1:], alphas_bar[-1:].clone()))
+    alphas_bar_prev = torch.zeros_like(alphas_bar_t)
+    for i in range(len(sampling_idx)):
+      if i < len(sampling_idx) - 1:
+        alphas_bar_prev[i] = alphas_bar_t[sampling_idx[i + 1]]
+      else:
+        alphas_bar_prev[i] = 1.0  # Final step goes to clean image
 
-    sqrt_alphas_bar = torch.sqrt(alphas_bar)
-    sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
+    sqrt_alphas_bar = torch.sqrt(alphas_bar_t)
+    sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar_t)
     sqrt_alphas_bar_prev = torch.sqrt(alphas_bar_prev)
-    sigma = torch.zeros_like(alphas_bar)
 
+    sigma = torch.zeros_like(alphas_bar_t)
     if eta > 0:
-      frac = (1 - alphas_bar_prev) / (1 - alphas_bar)
-      inner = 1 - (alphas_bar / alphas_bar_prev)
+      frac = (1 - alphas_bar_prev) / torch.clamp(1 - alphas_bar_t, min=1e-8)
+      inner = 1 - (alphas_bar_t / torch.clamp(alphas_bar_prev, min=1e-8))
       sigma = eta * torch.sqrt(torch.clamp(frac * inner, min=0.0))
 
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev - sigma**2, min=0.0))
@@ -231,7 +272,7 @@ class DDIMSampler(nn.Module):
       x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
       x = sqrt_alpha_bar_prev * x0 + dir_coeff * eps
 
-      if t > 0:
+      if i < len(self.sampling_indices) - 1 and sigma > 0:
         noise = torch.randn_like(x)
         x += sigma * noise
 
@@ -256,7 +297,12 @@ def lagrange_weights(times, t_target):
         continue
       num *= (t - float(times[r]))
       den *= (float(times[j]) - float(times[r]))
-    w[j] = num / den
+
+    if abs(den) < 1e-12:
+      # Degenerate case: duplicate times
+      w[j] = 0.0
+    else:
+      w[j] = num / den
 
   return w.to(torch.get_default_dtype())  # cast back to default dtype
 
@@ -284,121 +330,102 @@ class DEISSampler(nn.Module):
     self.order = order
     assert self.order >= 0, "order must be >= 0"
 
+    # Compute full training schedule
     betas = torch.linspace(beta_1, beta_T, self.train_T).float()
     alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, dim=0)
+    alphas_bar_train = torch.cumprod(alphas, dim=0)
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, alphas_bar)
+    # Get sampling indices
+    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train)
     self.sampling_indices = sampling_idx.tolist()
 
-    alphas_bar = alphas_bar[sampling_idx]
-    alphas_bar_prev = torch.cat((alphas_bar[1:], alphas_bar[-1:].clone()))
+    # For next step alpha_bar
+    alphas_bar_prev = torch.zeros_like(alphas_bar_t)
+    for i in range(len(sampling_idx)):
+      if i < len(sampling_idx) - 1:
+        alphas_bar_prev[i] = alphas_bar_t[sampling_idx[i + 1]]
+      else:
+        alphas_bar_prev[i] = 1.0
 
-    sqrt_alphas_bar = torch.sqrt(alphas_bar)
-    sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar)
+    sqrt_alphas_bar = torch.sqrt(alphas_bar_t)
+    sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar_t)
     sqrt_alphas_bar_prev = torch.sqrt(alphas_bar_prev)
     dir_coeff = torch.sqrt(torch.clamp(1 - alphas_bar_prev, min=0.0))
 
-    self.register_buffer("alphas_bar", alphas_bar)
+    self.register_buffer("alphas_bar", alphas_bar_t)
     self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
     self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
     self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
     self.register_buffer("dir_coeff", dir_coeff)
 
-    if self.method == "rhoAB":
-      grid = torch.log(alphas_bar / (1 - alphas_bar))
+    # Compute interpolation grid
+    if self.method == "rhoAB" or schedule == "karras":
+      grid = torch.log(alphas_bar_t / torch.clamp(1 - alphas_bar_t, min=1e-8))
     else:  # "tAB"
       idxs = torch.tensor(self.sampling_indices, dtype=torch.float32)
       grid = idxs / float(max(1, self.train_T - 1))
 
-    # Precompute Lagrange weights for each step to extrapolate eps from previous points
-    # For step i (going from sampling_indices[i] -> sampling_indices[i+1] in time),
-    # we'll need weights to evaluate polynomial at time_grid[i+1 - 1] (the next target).
+    # Precompute Lagrange weights for multistep extrapolation
     if use_precomputed and self.order > 0:
-      # For each sampling step i (starting from 0), we will compute weights mapping from
-      # the available previous times to the *next* target time. The number of available previous
-      # points depends on i (warm-up region).
       precomp = []
       for i in range(len(grid)):
-        # we are at time t_i = time_grid[i]; we will step to next index j = i+1 (smaller time).
-        # But in our loop we iterate from high t to low t, so target time is time_grid[i+1] when available.
-        # For the last step there is no next target, but we still precompute an empty list.
         if i + 1 >= len(grid):
+          # No next step
           precomp.append(None)
           continue
-        # we will use up-to (order+1) previous points: these are at indices [i, i-1, i-2, ...]
-        max_m = min(self.order + 1, i + 1)  # can't use more points than available
-        # collect previous times in descending order (most recent first)
+
+        # Use up to (order+1) previous points
+        max_m = min(self.order + 1, i + 1)
         prev_indices = [i - j for j in range(max_m)]
-        prev_times = grid[prev_indices]  # array of length max_m
-        t_target = float(grid[i + 1])   # target is next time (one step further in sampling)
-        weights = lagrange_weights(torch.tensor(prev_times), t_target)
-        # store weights along with the corresponding prev_indices so we can apply them to eps buffer
+        prev_times = grid[prev_indices]
+        t_target = float(grid[i + 1])
+
+        weights = lagrange_weights(prev_times, t_target)
         precomp.append((prev_indices, weights))
-      # store as attribute (not a buffer since contains lists); convert weights to tensor on-demand
+
       self._precomputed_weights = precomp
     else:
       self._precomputed_weights = None
 
   def forward(self, x_T, condition):
-    """
-    x_T: initial gaussian sample (batch, C, H, W)
-    condition: conditioning passed to the model
-    returns x_0 estimate
-    """
     x = x_T
 
-    # buffer holding past epsilon predictions (eps at times corresponding to sampling_indices)
     eps_buffer = deque(maxlen=self.order + 1)
     cache = DeepCache(self.cache_config)
 
-    # We'll iterate sampling_indices in order (from largest time index to smallest)
-    # i loops over positions in the sampling_indices list; at each iteration we are at x = x_{i+1}
     for i, t in enumerate(self.sampling_indices):
       cache.set_current_step(i)
 
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
-
       eps = self.model(x, condition, t_vec, cache)
       eps_buffer.append(eps)
 
-      # Decide which epsilon to use for the deterministic DDIM-like update:
-      # - if order == 0: use the current eps (standard DDIM deterministic)
-      # - if order >=1: extrapolate eps to the target next time using Lagrange weights
+      # Determine which epsilon to use for update
       if self.order == 0 or i + 1 >= len(self.sampling_indices):
-        # No extrapolation; use current eps and a direct DDIM-like deterministic update
+        # Use current eps (DDIM-like)
         eps_for_update = eps
       else:
-        # extrapolate to next target time (time_grid[i+1]) using up to order+1 previous eps
-        if self._precomputed_weights is not None:
+        # Extrapolate using Lagrange interpolation
+        if self._precomputed_weights is not None and self._precomputed_weights[i] is not None:
           prev_indices, w = self._precomputed_weights[i]
           w = w.to(x.device)
-          # prev_indices are indices like [i, i-1, ...] referring to positions in the time_grid
-          # but we stored eps_buffer with most recent eps appended each iteration; its length might be less than needed.
-          # build a list of eps tensors matching prev_indices ordering:
-          # prev_indices are relative to "i" value; map them to positions in eps_buffer:
-          # when i=0, eps_buffer contains [eps_at_i], when i=1 contains [eps_at_i, eps_at_i-1], etc.
-          # We stored eps in chronological order of iterations; the mapping below selects appropriate entries.
-          # create list of tensors matching prev_indices (most recent first)
+
+          # Gather eps from buffer
           eps_list = []
           for rel in prev_indices:
-            # rel is i - j where j=0..max_m-1; the element we need is the one appended at iteration rel
-            # position in eps_buffer (0=oldest, -1=most recent)
-            # mapping: iteration index when that eps was produced = rel. The relative offset from current iteration i:
-            offset = i - rel  # e.g., if rel==i then offset=0 -> most recent
-            # We want the element at index -(offset+1) from eps_buffer
-            idx_in_buffer = - (offset + 1)
+            offset = i - rel
+            idx_in_buffer = -(offset + 1)
             eps_list.append(eps_buffer[idx_in_buffer])
-          # stack eps_list as (m, batch, C, H, W) and apply weights w
-          stacked = torch.stack(eps_list, dim=0)  # (m, B, C, H, W)
-          # reshape w to (m,1,1,1,1) to multiply across tensors
+
+          # Apply weights
+          stacked = torch.stack(eps_list, dim=0)
           w_shape = (w.shape[0],) + (1,) * (stacked.ndim - 1)
           w_reshaped = w.view(w_shape)
           eps_for_update = torch.sum(w_reshaped * stacked, dim=0)
         else:
-          # no precomputed weights available, fall back to using the most recent eps
           eps_for_update = eps
 
+      # DDIM-style deterministic update
       sqrt_alpha_bar_t = self.sqrt_alphas_bar[i]
       sqrt_alpha_bar_prev = self.sqrt_alphas_bar_prev[i]
       sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
