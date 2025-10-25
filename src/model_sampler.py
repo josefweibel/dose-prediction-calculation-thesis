@@ -42,7 +42,7 @@ def build_sampler(model_config, sampling_config, model):
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
 
 
-def make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T):
+def make_sampling_indices(train_T, sampling_T, schedule, alphas_bar):
   """
   Create sampling indices for different time schedules.
   Args:
@@ -74,18 +74,16 @@ def make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T):
     sigma_min, sigma_max, rho_val = 0.002, 80, 7.0
     i = torch.linspace(0, 1, sampling_T)
     sigmas = (sigma_max ** (1 / rho_val) + i * (sigma_min ** (1 / rho_val) - sigma_max ** (1 / rho_val))) ** rho_val
-    sigmas = torch.flip(sigmas, dims=[0])
+    sigmas = torch.flip(sigmas, dims=[0])  # high to low noise
 
-    # Match sigma levels to closest training timestep
-    betas = torch.linspace(beta_1, beta_T, train_T)
-    alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, dim=0)
-    noise_levels = torch.sqrt((1 - alphas_bar) / alphas_bar)
+    # convert to corresponding alpha_bar values
+    alphas_bar_target = 1 / (1 + sigmas**2)
 
+    # map alpha_bar_target to closest training step
     indices = torch.tensor([
-      torch.argmin(torch.abs(noise_levels - s)).item() for s in sigmas
+      torch.argmin(torch.abs(alphas_bar - ab_t)).item()
+      for ab_t in alphas_bar_target
     ], dtype=torch.long)
-
   else:
     raise ValueError(f"Unknown schedule: {schedule}")
 
@@ -114,7 +112,7 @@ class GaussianDiffusionSampler(nn.Module):
     alphas = 1. - betas
     alphas_bar = torch.cumprod(alphas, dim=0)
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, alphas_bar)
     self.sampling_indices = sampling_idx.tolist()
 
     self.register_buffer("betas", betas[sampling_idx])
@@ -162,12 +160,14 @@ class DDIMSampler(nn.Module):
     self.sampling_T = sampling_T or train_T  # default: full schedule
     self.eta = eta
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
-    self.sampling_indices = sampling_idx.tolist()
-
     betas = torch.linspace(beta_1, beta_T, train_T).float()
     alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, 0)[sampling_idx]
+    alphas_bar = torch.cumprod(alphas, 0)
+
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, alphas_bar)
+    self.sampling_indices = sampling_idx.tolist()
+
+    alphas_bar = alphas_bar[sampling_idx]
     alphas_bar_prev = torch.cat((alphas_bar[1:], alphas_bar[-1:].clone()))
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar)
@@ -255,12 +255,14 @@ class DEISSampler(nn.Module):
     self.order = order
     assert self.order >= 0, "order must be >= 0"
 
-    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, beta_1, beta_T)
-    self.sampling_indices = sampling_idx.tolist()
-
     betas = torch.linspace(beta_1, beta_T, self.train_T).float()
     alphas = 1. - betas
-    alphas_bar = torch.cumprod(alphas, dim=0)[sampling_idx]
+    alphas_bar = torch.cumprod(alphas, dim=0)
+
+    sampling_idx = make_sampling_indices(train_T, sampling_T, schedule, alphas_bar)
+    self.sampling_indices = sampling_idx.tolist()
+
+    alphas_bar = alphas_bar[sampling_idx]
     alphas_bar_prev = torch.cat((alphas_bar[1:], alphas_bar[-1:].clone()))
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar)
