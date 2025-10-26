@@ -75,25 +75,18 @@ def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train):
     indices = torch.linspace(train_T - 1, 0, sampling_T, dtype=torch.long)
     alphas_bar = alphas_bar_train[indices]
   elif schedule == "cosine":
-    s = 0.008  # Offset to prevent singularity at t=0
-    steps = torch.linspace(0, 1, sampling_T, device=alphas_bar_train.device)
+    eps = 1e-8
+    rho_train = torch.log(alphas_bar_train / (1 - alphas_bar_train + eps))
 
-    # Cosine schedule: alpha_bar(t) = cos^2((t + s) / (1 + s) * pi/2)
-    alphas_bar = torch.cos(((steps + s) / (1 + s)) * np.pi * 0.5) ** 2
+    # Sample evenly in log-SNR space (from high noise to low noise)
+    # rho_train[0] is at t=0 (low noise), rho_train[-1] is at t=T-1 (high noise)
+    rho_target = torch.linspace(rho_train[-1], rho_train[0], sampling_T)
 
-    # Normalize to match training range (important for model compatibility)
-    # Map [min_train, max_train] to our cosine curve
-    min_alpha_train = alphas_bar_train.min()
-    max_alpha_train = alphas_bar_train.max()
-
-    # Rescale cosine to match training bounds
-    alphas_bar = min_alpha_train + (max_alpha_train - min_alpha_train) * (
-      (alphas_bar - alphas_bar.min()) / (alphas_bar.max() - alphas_bar.min() + 1e-8)
-    )
-
-    # Map to closest training timesteps for model conditioning
-    distances = torch.abs(alphas_bar_train.unsqueeze(1) - alphas_bar.unsqueeze(0))
+    # Map to closest training timesteps
+    distances = torch.abs(rho_train.unsqueeze(1) - rho_target.unsqueeze(0))
     indices = torch.argmin(distances, dim=0)
+
+    alphas_bar = alphas_bar_train[indices]
   elif schedule == "karras":
     # Log-spaced sigmas between high and low noise
     sigma_min, sigma_max, rho_val = 0.002, 80, 7.0
