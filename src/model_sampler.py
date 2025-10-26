@@ -135,16 +135,10 @@ class GaussianDiffusionSampler(nn.Module):
     alphas_bar_train = torch.cumprod(alphas, dim=0)
 
     # Get sampling indices
-    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train=)
+    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train)
     self.sampling_indices = sampling_idx.tolist()
 
-    # For prev, shift by one position; last step goes to alpha_bar=1 (clean image)
-    alphas_bar_prev = torch.zeros_like(alphas_bar_t)
-    for i in range(len(alphas_bar_t)):
-      if i < len(alphas_bar_t) - 1:
-        alphas_bar_prev[i] = alphas_bar_t[i + 1]
-      else:
-        alphas_bar_prev[i] = 1.0  # Final step: clean image
+    alphas_bar_prev = torch.cat([alphas_bar_t[1:], torch.ones(1, device=alphas_bar_t.device)])
 
     # Compute effective betas for each transition
     betas_eff = 1.0 - (alphas_bar_t / torch.clamp(alphas_bar_prev, min=1e-8))
@@ -221,12 +215,7 @@ class DDIMSampler(nn.Module):
     sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train)
     self.sampling_indices = sampling_idx.tolist()
 
-    alphas_bar_prev = torch.zeros_like(alphas_bar_t)
-    for i in range(len(sampling_idx)):
-      if i < len(sampling_idx) - 1:
-        alphas_bar_prev[i] = alphas_bar_t[sampling_idx[i + 1]]
-      else:
-        alphas_bar_prev[i] = 1.0  # Final step goes to clean image
+    alphas_bar_prev = torch.cat([alphas_bar_t[1:], torch.ones(1, device=alphas_bar_t.device)])
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar_t)
     sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar_t)
@@ -333,12 +322,7 @@ class DEISSampler(nn.Module):
     self.sampling_indices = sampling_idx.tolist()
 
     # For next step alpha_bar
-    alphas_bar_prev = torch.zeros_like(alphas_bar_t)
-    for i in range(len(sampling_idx)):
-      if i < len(sampling_idx) - 1:
-        alphas_bar_prev[i] = alphas_bar_t[sampling_idx[i + 1]]
-      else:
-        alphas_bar_prev[i] = 1.0
+    alphas_bar_prev = torch.cat([alphas_bar_t[1:], torch.ones(1, device=alphas_bar_t.device)])
 
     sqrt_alphas_bar = torch.sqrt(alphas_bar_t)
     sqrt_one_minus_alphas_bar = torch.sqrt(1 - alphas_bar_t)
