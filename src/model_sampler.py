@@ -98,7 +98,7 @@ def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train):
     # Interpolate in rho-space and transform back
     sigmas = (max_inv_rho + i * (min_inv_rho - max_inv_rho)) ** rho_val
     # Add final sigma=0 for complete denoising
-    sigmas = torch.cat([sigmas, torch.zeros(1, device=alphas_bar_train.device)])
+    sigmas[-1] = 0.0
 
     # convert to corresponding alpha_bar values
     alphas_bar = 1 / (1 + sigmas**2)
