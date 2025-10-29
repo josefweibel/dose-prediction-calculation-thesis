@@ -53,7 +53,6 @@ def build_sampler(model_config, sampling_config, model):
       method=sampling_config['method'],
       order=sampling_config['order'],
       schedule=sampling_config['schedule'],
-      use_precomputed=True,
     )
   else:
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
@@ -260,13 +259,26 @@ class DDIMSampler(nn.Module):
 
     return x
 
+def lagrange_weights(x_points: torch.Tensor, x_target: float) -> torch.Tensor:
+  """Compute Lagrange interpolation weights for extrapolation."""
+  n = len(x_points)
+  weights = torch.zeros(n)
+
+  for j in range(n):
+    numerator = 1.0
+    denominator = 1.0
+    for m in range(n):
+      if m != j:
+        numerator *= (x_target - float(x_points[m]))
+        denominator *= (float(x_points[j]) - float(x_points[m]))
+    weights[j] = numerator / denominator
+
+  return weights
 
 class DEISSampler(nn.Module):
   """
-  Corrected DEIS (Diffusion Exponential Integrator Sampler) implementation.
-
-  Based on the HuggingFace implementation and the DEIS paper.
-  Supports both tAB (time-based Adams-Bashforth) and rhoAB (log-SNR based).
+  DEIS (Diffusion Exponential Integrator Sampler) using DDIM-style updates
+  with polynomial extrapolation of epsilon for higher-order accuracy.
   """
 
   def __init__(
@@ -277,9 +289,10 @@ class DEISSampler(nn.Module):
     train_T: int,
     cache_config,
     sampling_T: int = None,
-    method: str = "rhoAB",  # "rhoAB" or "tAB"
-    order: int = 2,  # 1 for DDIM-like, 2-3 for multistep DEIS
+    method: str = "rhoAB",
+    order: int = 0,  # 0 = DDIM, 1+ = multistep DEIS
     schedule: str = "linear",
+    use_precomputed: bool = True,
   ):
     super().__init__()
     self.model = model
@@ -288,158 +301,119 @@ class DEISSampler(nn.Module):
     self.cache_config = cache_config
     self.method = method
     assert method in ("rhoAB", "tAB"), "method must be 'rhoAB' or 'tAB'"
-    self.order = max(1, order)  # Minimum order 1
+    self.order = order
+    assert self.order >= 0, "order must be >= 0"
 
     # Compute noise schedule
     betas = torch.linspace(beta_1, beta_T, self.train_T).float()
     alphas = 1.0 - betas
     alphas_bar_train = torch.cumprod(alphas, dim=0)
 
-    # Get sampling schedule
+    # Get sampling schedule (decreasing order for denoising)
     sampling_idx, alphas_bar_t = make_sampling_schedule(
       train_T, self.sampling_T, schedule, alphas_bar_train
     )
     self.sampling_indices = sampling_idx.tolist()
 
-    # Store alpha values
+    # Precompute DDIM coefficients
     self.register_buffer("alphas_bar", alphas_bar_t)
 
-    # Compute integration variable based on method
+    # For next step alpha_bar (shift by one)
+    alphas_bar_prev = torch.cat([alphas_bar_t[1:], torch.zeros(1, device=alphas_bar_t.device)])
+
+    sqrt_alphas_bar = torch.sqrt(alphas_bar_t)
+    sqrt_one_minus_alphas_bar = torch.sqrt(1.0 - alphas_bar_t)
+    sqrt_alphas_bar_prev = torch.sqrt(torch.clamp(alphas_bar_prev, min=0.0))
+    dir_coeff = torch.sqrt(torch.clamp(1.0 - alphas_bar_prev, min=0.0))
+
+    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
+    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
+    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
+    self.register_buffer("dir_coeff", dir_coeff)
+
+    # Compute integration grid for extrapolation
     if self.method == "rhoAB":
-      # rhoAB: use log-SNR (rho) as integration variable
-      # lambda (log-SNR) = log(alpha_bar / sqrt(1 - alpha_bar))
-      lambda_t = torch.log(alphas_bar_t) - 0.5 * torch.log(1.0 - alphas_bar_t)
-      self.register_buffer("integration_var", lambda_t)
+      grid = torch.log(alphas_bar_t / torch.clamp(1.0 - alphas_bar_t, min=1e-8))
     else:  # tAB
-      # tAB: use normalized time as integration variable
-      # Since we're denoising (high t → low t), but lambda increases,
-      # we use t/T where t goes from high to low
-      time_var = sampling_idx / float(max(1, self.train_T - 1))
-      self.register_buffer("integration_var", time_var)
+      grid = sampling_idx / float(max(1, self.train_T - 1))
 
-    # Precompute coefficients for each step
-    self._precompute_coefficients()
+    self.register_buffer("grid", grid)
 
-  def _precompute_coefficients(self):
-    """
-    Precompute the integration coefficients for DEIS multistep updates.
-    These are based on integrating the polynomial extrapolation.
-    """
-    coeffs_list = []
+    # Precompute Lagrange weights for extrapolation
+    if use_precomputed and self.order > 0:
+      precomp = []
+      for i in range(len(grid)):
+        if i + 1 >= len(grid):
+          precomp.append(None)
+          continue
 
-    for i in range(len(self.integration_var)):
-      if i + 1 >= len(self.integration_var):
-        coeffs_list.append(None)
-        continue
+        # Use up to (order+1) points: current i and previous i-1, i-2, ...
+        max_history = min(self.order + 1, i + 1)
+        history_indices = list(range(i, i - max_history, -1))
+        history_grid = grid[history_indices]
+        target_grid = float(grid[i + 1])
 
-      # Current and next integration variable values
-      var_s = float(self.integration_var[i])
-      var_t = float(self.integration_var[i + 1])
-      h = var_t - var_s
+        weights = lagrange_weights(history_grid, target_grid)
+        precomp.append((history_indices, weights))
 
-      # Get previous values for multistep
-      order_used = min(self.order, i + 1)
-
-      if order_used == 1:
-        # First-order (DDIM-like): coeff for m_0 only
-        coeff = h
-        coeffs_list.append(([0], torch.tensor([coeff])))
-
-      elif order_used == 2:
-        # Second-order: coeffs for m_0 and m_1
-        if i >= 1:
-          var_s1 = float(self.integration_var[i - 1])
-          h_1 = var_s - var_s1
-
-          # Integration coefficients for 2nd order
-          coeff_0 = h + 0.5 * h ** 2 / h_1
-          coeff_1 = -0.5 * h ** 2 / h_1
-
-          coeffs_list.append(([0, 1], torch.tensor([coeff_0, coeff_1])))
-        else:
-          # Fall back to first order
-          coeffs_list.append(([0], torch.tensor([h])))
-
-      elif order_used == 3:
-        # Third-order: coeffs for m_0, m_1, and m_2
-        if i >= 2:
-          var_s1 = float(self.integration_var[i - 1])
-          var_s2 = float(self.integration_var[i - 2])
-          h_1 = var_s - var_s1
-          h_2 = var_s - var_s2
-
-          # Integration coefficients for 3rd order
-          # These come from integrating the Lagrange polynomial
-          coeff_0 = h + 0.5 * h ** 2 / h_1 + (h ** 2) * (2 * h + 3 * h_1) / (6 * h_1 * h_2)
-          coeff_1 = -0.5 * h ** 2 / h_1 - (h ** 2) * (h + 2 * h_1) / (2 * h_1 * (h_2 - h_1))
-          coeff_2 = (h ** 2) * (h + 2 * h_1) / (6 * h_2 * (h_2 - h_1))
-
-          coeffs_list.append(([0, 1, 2], torch.tensor([coeff_0, coeff_1, coeff_2])))
-        elif i >= 1:
-          # Fall back to second order
-          var_s1 = float(self.integration_var[i - 1])
-          h_1 = var_s - var_s1
-          coeff_0 = h + 0.5 * h ** 2 / h_1
-          coeff_1 = -0.5 * h ** 2 / h_1
-          coeffs_list.append(([0, 1], torch.tensor([coeff_0, coeff_1])))
-        else:
-          # Fall back to first order
-          coeffs_list.append(([0], torch.tensor([h])))
-
-    self._coefficients = coeffs_list
-
-  def _convert_to_m(self, eps: torch.Tensor, i: int) -> torch.Tensor:
-    """
-    Convert epsilon to m (the quantity we integrate in DEIS).
-    m = sigma * epsilon = sqrt(1 - alpha_bar) * epsilon
-    """
-    alpha_bar = self.alphas_bar[i]
-    sigma = torch.sqrt(1.0 - alpha_bar)
-    return sigma * eps
+      self._precomputed_weights = precomp
+    else:
+      self._precomputed_weights = None
 
   def forward(self, x_T, condition):
     x = x_T
 
-    # Buffer to store recent m values (converted epsilon)
-    m_buffer = deque(maxlen=self.order)
+    # Buffer for storing recent epsilon predictions
+    eps_buffer = deque(maxlen=self.order + 1 if self.order > 0 else 1)
     cache = DeepCache(self.cache_config)
 
     for i in range(len(self.sampling_indices)):
       t = self.sampling_indices[i]
       cache.set_current_step(i)
 
-      # Get epsilon prediction
+      # Predict noise
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
       eps = self.model(x, condition, t_vec, cache)
+      eps_buffer.append(eps)
 
-      # Convert to m = sigma * eps
-      m = self._convert_to_m(eps, i)
-      m_buffer.append(m)
-
-      # Check if this is the last step
+      # Last step - no update needed
       if i + 1 >= len(self.sampling_indices):
         break
 
-      # Get precomputed coefficients for this step
-      if self._coefficients[i] is None:
-        break
+      # Determine epsilon to use for update
+      if self.order == 0:
+        # Order 0: DDIM, use current epsilon
+        eps_for_update = eps
+      else:
+        # Higher order: extrapolate using polynomial
+        if self._precomputed_weights is not None and self._precomputed_weights[i] is not None:
+          history_indices, weights = self._precomputed_weights[i]
+          weights = weights.to(x.device)
 
-      offsets, coeffs = self._coefficients[i]
-      coeffs = coeffs.to(x.device)
+          # Gather epsilon predictions
+          eps_list = []
+          for hist_idx in history_indices:
+            buffer_idx = hist_idx - i  # 0, -1, -2, ... (relative to current i)
+            eps_list.append(eps_buffer[buffer_idx])
 
-      # Compute the integral term: sum of coeff_j * m_j
-      integral_term = torch.zeros_like(x)
-      for offset, coeff in zip(offsets, coeffs):
-        # offset 0 = current (m_i), offset 1 = previous (m_{i-1}), etc.
-        m_val = m_buffer[-(offset + 1)]  # Access from end of deque
-        integral_term += coeff * m_val
+          # Apply Lagrange weights
+          stacked = torch.stack(eps_list, dim=0)
+          w_shape = (weights.shape[0],) + (1,) * (stacked.ndim - 1)
+          w_reshaped = weights.view(w_shape)
+          eps_for_update = torch.sum(w_reshaped * stacked, dim=0)
+        else:
+          eps_for_update = eps
 
-      # DEIS update formula in exponential integrator form:
-      # x_{t+1} = (alpha_{t+1} / alpha_t) * x_t + alpha_{t+1} * integral_term
-      alpha_s = self.alphas_bar[i]
-      alpha_t = self.alphas_bar[i + 1]
+      # DDIM update: predict x0, then compute x_{t-1}
+      sqrt_alpha_bar = self.sqrt_alphas_bar[i]
+      sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_bar[i]
+      sqrt_alpha_bar_prev = self.sqrt_alphas_bar_prev[i]
+      dir_coeff = self.dir_coeff[i]
 
-      x = (alpha_t / alpha_s) * x + alpha_t * integral_term
+      # Predict x0 from current x_t and eps
+      x0_pred = (x - sqrt_one_minus_alpha_bar * eps_for_update) / sqrt_alpha_bar
+
+      # Compute x_{t-1} (DDIM deterministic update)
+      x = sqrt_alpha_bar_prev * x0_pred + dir_coeff * eps_for_update
 
     return x
-
