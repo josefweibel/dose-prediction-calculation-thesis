@@ -421,6 +421,12 @@ class DEISSampler(nn.Module):
 
     self.register_buffer('coef_matrix_buf', self.coef_matrix)
 
+    # DEBUG: Print first few rows of coefficient matrix
+    print(f"\n[DEIS DEBUG] Coefficient matrix (first 5 steps, order {self.order}):")
+    for i in range(min(5, T-1)):
+      print(f"  Step {i}: coefs = {self.coef_matrix[i, :min(self.order, 3)].tolist()}")
+    print(f"  rho values (first 5): {self.rho_t[:5].tolist()}")
+
   def step(
     self,
     model_output: torch.Tensor,
@@ -449,6 +455,11 @@ class DEISSampler(nn.Module):
     # Second: x0 -> DEIS model output (noise component)
     # model_output_deis = (x - α*x0) / σ
     deis_output = (sample - alpha_curr * x0_pred) / sigma_curr
+
+    # DEBUG: Check if deis_output equals model_output (epsilon)
+    if step_idx < 3:
+      diff = torch.abs(deis_output - model_output).max().item()
+      print(f"[DEIS DEBUG] Step {step_idx}: deis_output vs epsilon diff = {diff:.6e}")
 
     # Determine effective order based on available history
     num_prev = len(self.model_outputs)
@@ -482,12 +493,29 @@ class DEISSampler(nn.Module):
       # Combine current and previous outputs using precomputed coefficients
       combined_coef = self.coef_matrix_buf[step_idx, 0] * deis_output
 
+      # DEBUG: Print coefficients and history usage
+      if step_idx < 5:
+        print(f"[DEIS DEBUG] Step {step_idx}, Order {eff_order}:")
+        print(f"  coef[{step_idx},0] = {self.coef_matrix_buf[step_idx, 0]:.6f}")
+        print(f"  deis_output mean = {deis_output.mean().item():.6e}")
+        print(f"  num_prev = {num_prev}, history size = {len(self.model_outputs)}")
+
       for i in range(min(num_prev, eff_order - 1)):
         # Access from end of list (most recent first)
-        combined_coef += self.coef_matrix_buf[step_idx, i + 1] * self.model_outputs[-(i+1)]
+        hist_output = self.model_outputs[-(i+1)]
+        coef = self.coef_matrix_buf[step_idx, i + 1]
+        combined_coef += coef * hist_output
+
+        # DEBUG
+        if step_idx < 5:
+          print(f"  coef[{step_idx},{i+1}] = {coef:.6f}, hist[{-(i+1)}] mean = {hist_output.mean().item():.6e}")
 
       # DEIS multistep formula: x_next = α_next * (x/α_curr + combined_coef)
       next_sample = alpha_next * (sample / alpha_curr + combined_coef)
+
+      # DEBUG
+      if step_idx < 5:
+        print(f"  combined_coef mean = {combined_coef.mean().item():.6e}")
 
     # Store model output for future steps (FIFO: append to end)
     self.model_outputs.append(deis_output)
