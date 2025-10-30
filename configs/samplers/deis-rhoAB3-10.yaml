@@ -2,7 +2,7 @@ sampler: deis
 T: 10
 schedule: linear
 method: rhoAB
-order: 2
+order: 1
 
 data_cache_size: inf
 num_workers: 4

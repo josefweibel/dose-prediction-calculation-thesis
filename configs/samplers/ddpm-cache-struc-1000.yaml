@@ -12,7 +12,7 @@ batch_size_per_gpu: 32
 precision: null
 
 cache:
-  warump_steps: 0
+  warmup_steps: 0
   intervals:
     head_struc: inf
     enc1_struc: inf

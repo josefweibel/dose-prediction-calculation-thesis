@@ -2,7 +2,7 @@ sampler: deis
 T: 50
 schedule: linear
 method: tAB
-order: 1
+order: 2
 
 data_cache_size: inf
 num_workers: 4
