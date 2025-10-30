@@ -50,7 +50,6 @@ def build_sampler(model_config, sampling_config, model):
       model_config['T'],
       cache_config,
       sampling_config['T'],
-      method=sampling_config['method'],
       order=sampling_config['order'],
       schedule=sampling_config['schedule'],
     )
@@ -260,6 +259,8 @@ class DDIMSampler(nn.Module):
     return x
 
 class DEISSampler(nn.Module):
+  # uses log-rho space for updates
+  # based on diffusers
   def __init__(
     self,
     model: nn.Module,
@@ -268,7 +269,6 @@ class DEISSampler(nn.Module):
     train_T: int,
     cache_config,
     sampling_T: Optional[int] = None,
-    method: str = "rhoAB",
     order: int = 2,
     schedule: str = "linear",
   ):
@@ -277,7 +277,6 @@ class DEISSampler(nn.Module):
     self.model = model
     self.train_T = train_T
     self.sampling_T = sampling_T if sampling_T is not None else train_T
-    self.method = method.lower()
     self.order = order
     self.schedule = schedule
     self.cache_config = cache_config
@@ -294,25 +293,17 @@ class DEISSampler(nn.Module):
     self.register_buffer('alphas_cumprod', alphas_cumprod)
 
     # Precompute sampling schedule
-    sampling_indices, _ = make_sampling_schedule(
+    sampling_indices, alphas_bar_sampling = make_sampling_schedule(
       train_T, self.sampling_T, schedule, alphas_cumprod
     )
 
     # Store sampling timesteps as buffer
     self.register_buffer('timesteps', sampling_indices)
 
-    alpha_t = torch.sqrt(alphas_cumprod)
-    sigma_t = torch.sqrt(1 - alphas_cumprod)
-    # lambda_t = torch.log(alpha_t) - torch.log(sigma_t)
-    self.register_buffer('alpha_t', alpha_t)
-    self.register_buffer('sigma_t', sigma_t)
-    # self.register_buffer('lambda_t', lambda_t)
-
-    sigmas = np.array(((1 - alphas_cumprod) / alphas_cumprod) ** 0.5)
-    sigmas = np.interp(sampling_indices, np.arange(0, len(sigmas)), sigmas)
+    sigmas = ((1 - alphas_bar_sampling) / alphas_bar_sampling) ** 0.5
     sigma_last = ((1 - alphas_cumprod[0]) / alphas_cumprod[0]) ** 0.5
-    sigmas = np.concatenate([sigmas, [sigma_last]]).astype(np.float32)
-    self.register_buffer('sigmas', torch.from_numpy(sigmas).float())
+    sigmas = torch.cat([sigmas, torch.tensor([sigma_last])]).float()
+    self.register_buffer('sigmas', sigmas)
 
   def __sigma_to_alpha_sigma_t(self, sigma):
     alpha_t = 1 / ((sigma**2 + 1) ** 0.5)
@@ -417,12 +408,6 @@ class DEISSampler(nn.Module):
     x: torch.Tensor,
     model_outputs: list,
   ) -> torch.Tensor:
-    sigma = self.sigmas[step_idx]
-    alpha_t, sigma_t = self.__sigma_to_alpha_sigma_t(sigma)
-
-    # x0_pred = (x - sigma_t * eps) / alpha_t
-    # eps = (x - alpha_t * x0_pred) / sigma_t
-
     for i in range(self.order - 1):
       model_outputs[i] = model_outputs[i + 1]
     model_outputs[-1] = eps
