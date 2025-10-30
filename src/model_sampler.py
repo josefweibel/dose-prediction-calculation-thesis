@@ -292,6 +292,9 @@ class DEISSampler(nn.Module):
     self.register_buffer('alphas', alphas)
     self.register_buffer('alphas_cumprod', alphas_cumprod)
 
+    if schedule != 'linear':
+      raise NotImplementedError("Only 'linear' schedule is implemented for DEISSampler.")
+
     # Precompute sampling schedule
     sampling_indices, alphas_bar_sampling = make_sampling_schedule(
       train_T, self.sampling_T, schedule, alphas_cumprod
@@ -301,8 +304,7 @@ class DEISSampler(nn.Module):
     self.register_buffer('timesteps', sampling_indices)
 
     sigmas = ((1 - alphas_bar_sampling) / alphas_bar_sampling) ** 0.5
-    sigma_last = ((1 - alphas_cumprod[0]) / alphas_cumprod[0]) ** 0.5
-    sigmas = torch.cat([sigmas, torch.tensor([sigma_last])]).float()
+    sigmas = torch.cat([sigmas, torch.zeros(1)]).float()
     self.register_buffer('sigmas', sigmas)
 
   def __sigma_to_alpha_sigma_t(self, sigma):
