@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from collections import deque
 import numpy as np
+from typing import Optional
 
 from model_cache import DeepCache, CacheConfig
 
@@ -259,161 +259,206 @@ class DDIMSampler(nn.Module):
 
     return x
 
-def lagrange_weights(x_points: torch.Tensor, x_target: float) -> torch.Tensor:
-  """Compute Lagrange interpolation weights for extrapolation."""
-  n = len(x_points)
-  weights = torch.zeros(n)
-
-  for j in range(n):
-    numerator = 1.0
-    denominator = 1.0
-    for m in range(n):
-      if m != j:
-        numerator *= (x_target - float(x_points[m]))
-        denominator *= (float(x_points[j]) - float(x_points[m]))
-    weights[j] = numerator / denominator
-
-  return weights
-
 class DEISSampler(nn.Module):
-  """
-  DEIS (Diffusion Exponential Integrator Sampler) using DDIM-style updates
-  with polynomial extrapolation of epsilon for higher-order accuracy.
-  """
-
   def __init__(
     self,
-    model,
+    model: nn.Module,
     beta_1: float,
     beta_T: float,
     train_T: int,
     cache_config,
-    sampling_T: int = None,
+    sampling_T: Optional[int] = None,
     method: str = "rhoAB",
-    order: int = 0,  # 0 = DDIM, 1+ = multistep DEIS
+    order: int = 2,
     schedule: str = "linear",
-    use_precomputed: bool = True,
   ):
     super().__init__()
+
     self.model = model
     self.train_T = train_T
-    self.sampling_T = sampling_T or train_T
-    self.cache_config = cache_config
-    self.method = method
-    assert method in ("rhoAB", "tAB"), "method must be 'rhoAB' or 'tAB'"
+    self.sampling_T = sampling_T if sampling_T is not None else train_T
+    self.method = method.lower()
     self.order = order
-    assert self.order >= 0, "order must be >= 0"
+    self.schedule = schedule
+    self.cache_config = cache_config
 
-    # Compute noise schedule
-    betas = torch.linspace(beta_1, beta_T, self.train_T).float()
+    if self.method not in ['tab', 'rhoab']:
+      raise ValueError(f"method must be 'tAB' or 'rhoAB', got {method}")
+
+    # Create beta schedule - ALWAYS use the training schedule (typically linear)
+    # The 'schedule' parameter only affects how we select timesteps during sampling,
+    # NOT the underlying beta schedule the model was trained on
+    betas = torch.linspace(beta_1, beta_T, train_T, dtype=torch.float32)
+
+    # Compute training alphas
     alphas = 1.0 - betas
-    alphas_bar_train = torch.cumprod(alphas, dim=0)
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
 
-    # Get sampling schedule (decreasing order for denoising)
-    sampling_idx, alphas_bar_t = make_sampling_schedule(
-      train_T, self.sampling_T, schedule, alphas_bar_train
+    # Store training schedule as buffers
+    self.register_buffer('betas', betas)
+    self.register_buffer('alphas', alphas)
+    self.register_buffer('alphas_cumprod', alphas_cumprod)
+
+    # Precompute sampling schedule
+    sampling_indices, sampling_alphas_bar = make_sampling_schedule(
+      train_T, self.sampling_T, schedule, alphas_cumprod
     )
-    self.sampling_indices = sampling_idx.tolist()
 
-    # Precompute DDIM coefficients
-    self.register_buffer("alphas_bar", alphas_bar_t)
+    # Store sampling timesteps as buffer
+    self.register_buffer('timesteps', sampling_indices)
+    self.register_buffer('sampling_alphas_bar', sampling_alphas_bar)
 
-    # For next step alpha_bar (shift by one)
-    alphas_bar_prev = torch.cat([alphas_bar_t[1:], torch.zeros(1, device=alphas_bar_t.device)])
+    # Precompute derived quantities for sampling
+    sqrt_alpha_t = torch.sqrt(sampling_alphas_bar)
+    sqrt_one_minus_alpha_t = torch.sqrt(1 - sampling_alphas_bar)
+    lambda_t = torch.log(sqrt_alpha_t) - torch.log(sqrt_one_minus_alpha_t)
 
-    sqrt_alphas_bar = torch.sqrt(alphas_bar_t)
-    sqrt_one_minus_alphas_bar = torch.sqrt(1.0 - alphas_bar_t)
-    sqrt_alphas_bar_prev = torch.sqrt(torch.clamp(alphas_bar_prev, min=0.0))
-    dir_coeff = torch.sqrt(torch.clamp(1.0 - alphas_bar_prev, min=0.0))
+    self.register_buffer('sqrt_alpha_t', sqrt_alpha_t)
+    self.register_buffer('sqrt_one_minus_alpha_t', sqrt_one_minus_alpha_t)
+    self.register_buffer('lambda_t', lambda_t)
 
-    self.register_buffer("sqrt_alphas_bar", sqrt_alphas_bar)
-    self.register_buffer("sqrt_one_minus_alphas_bar", sqrt_one_minus_alphas_bar)
-    self.register_buffer("sqrt_alphas_bar_prev", sqrt_alphas_bar_prev)
-    self.register_buffer("dir_coeff", dir_coeff)
+    # Precompute coefficients for all pairs of timesteps
+    self._precompute_coefficients()
 
-    # Compute integration grid for extrapolation
-    if self.method == "rhoAB":
-      grid = torch.log(alphas_bar_t / torch.clamp(1.0 - alphas_bar_t, min=1e-8))
+    # Cache for model outputs (for multistep methods)
+    self.model_outputs = []
+
+  def _precompute_coefficients(self):
+    """Precompute multistep coefficients for all timestep pairs."""
+    T = len(self.timesteps)
+
+    # Storage for precomputed coefficients
+    # coef_matrix[i, j, k] = coefficient k for stepping from timestep i to i+1
+    # where j indicates which past output (0=current, 1=previous, etc.)
+    max_order = min(self.order, 3)  # Support up to order 3
+    self.coef_matrix = torch.zeros(T, max_order + 1, dtype=torch.float32)
+
+    for i in range(T - 1):
+      lambda_curr = self.lambda_t[i].item()
+      lambda_next = self.lambda_t[i + 1].item()
+      h = lambda_next - lambda_curr
+
+      # Order 0/1 (DDIM-like)
+      self.coef_matrix[i, 0] = 1.0
+
+      # Order 2 (need one previous output)
+      if i >= 1:
+        lambda_prev = self.lambda_t[i - 1].item()
+        h_0 = lambda_curr - lambda_prev
+        if abs(h) > 1e-8:
+          r0 = h_0 / h
+          self.coef_matrix[i, 0] = 1.0 + 1.0 / (2.0 * r0)
+          self.coef_matrix[i, 1] = -1.0 / (2.0 * r0)
+
+      # Order 3 (need two previous outputs)
+      if i >= 2 and self.order >= 3:
+        lambda_prev = self.lambda_t[i - 1].item()
+        lambda_prev_prev = self.lambda_t[i - 2].item()
+        h_0 = lambda_curr - lambda_prev
+        h_1 = lambda_prev - lambda_prev_prev
+        if abs(h) > 1e-8:
+          r0 = h_0 / h
+          r1 = h_1 / h
+          self.coef_matrix[i, 0] = 1.0 + r0 / 2.0 + r0 * r0 / (2.0 * r1 * (r0 + r1))
+          self.coef_matrix[i, 1] = -r0 / (2.0 * r1)
+          self.coef_matrix[i, 2] = -r0 * r0 / (2.0 * r1 * (r0 + r1))
+
+    self.register_buffer('coef_matrix_buf', self.coef_matrix)
+
+  def step(
+    self,
+    model_output: torch.Tensor,
+    step_idx: int,
+    sample: torch.Tensor
+  ) -> torch.Tensor:
+    """
+    Predict the sample at the next timestep.
+
+    Args:
+      model_output: Direct output from learned diffusion model (epsilon prediction)
+      step_idx: Index in the sampling schedule (0 to sampling_T-1)
+      sample: Current instance of sample being created
+
+    Returns:
+      Predicted sample at next timestep
+    """
+    # Convert model output to DEIS representation
+    if self.method == 'rhoab':
+      # For rhoAB: scale by -sqrt_one_minus_alpha_t
+      deis_output = -self.sqrt_one_minus_alpha_t[step_idx] * model_output
     else:  # tAB
-      grid = sampling_idx / float(max(1, self.train_T - 1))
+      # For tAB: scale by -sqrt_one_minus_alpha_t
+      deis_output = -self.sqrt_one_minus_alpha_t[step_idx] * model_output
 
-    self.register_buffer("grid", grid)
+    # Determine which coefficients to use based on available history
+    num_prev = len(self.model_outputs)
+    eff_order = min(self.order, num_prev + 1, 3)
 
-    # Precompute Lagrange weights for extrapolation
-    if use_precomputed and self.order > 0:
-      precomp = []
-      for i in range(len(grid)):
-        if i + 1 >= len(grid):
-          precomp.append(None)
-          continue
+    # Combine with previous outputs using precomputed coefficients
+    combined_output = self.coef_matrix_buf[step_idx, 0] * deis_output
 
-        # Use up to (order+1) points: current i and previous i-1, i-2, ...
-        max_history = min(self.order + 1, i + 1)
-        history_indices = list(range(i, i - max_history, -1))
-        history_grid = grid[history_indices]
-        target_grid = float(grid[i + 1])
+    for i in range(min(num_prev, eff_order - 1)):
+      combined_output += self.coef_matrix_buf[step_idx, i + 1] * self.model_outputs[i]
 
-        weights = lagrange_weights(history_grid, target_grid)
-        precomp.append((history_indices, weights))
+    # Exponential integrator update
+    alpha_curr = self.sqrt_alpha_t[step_idx]
+    sigma_curr = self.sqrt_one_minus_alpha_t[step_idx]
+    lambda_curr = self.lambda_t[step_idx]
 
-      self._precomputed_weights = precomp
+    if step_idx < len(self.timesteps) - 1:
+      # Not the final step
+      alpha_next = self.sqrt_alpha_t[step_idx + 1]
+      sigma_next = self.sqrt_one_minus_alpha_t[step_idx + 1]
+      lambda_next = self.lambda_t[step_idx + 1]
     else:
-      self._precomputed_weights = None
+      # Final step: go to t=0 (clean image)
+      alpha_next = torch.tensor(1.0, device=sample.device, dtype=sample.dtype)
+      sigma_next = torch.tensor(0.0, device=sample.device, dtype=sample.dtype)
+      lambda_next = torch.tensor(float('inf'), device=sample.device, dtype=sample.dtype)
 
-  def forward(self, x_T, condition):
+    h = lambda_next - lambda_curr
+
+    if self.method == 'rhoab':
+      # Compute φ₁(h) = (exp(h) - 1) / h
+      if h.abs() > 1e-6 and not torch.isinf(h):
+        phi_1 = torch.expm1(h) / h
+      else:
+        phi_1 = torch.tensor(1.0, device=sample.device, dtype=sample.dtype)
+
+      # Update formula
+      next_sample = (alpha_next / alpha_curr) * sample + (sigma_next * phi_1) * combined_output
+    else:  # tAB
+      next_sample = (alpha_next / alpha_curr) * sample + \
+             (sigma_next - sigma_curr * alpha_next / alpha_curr) * combined_output / sigma_curr
+
+
+    # Cache for multistep
+    self.model_outputs.insert(0, deis_output)
+    if len(self.model_outputs) > self.order:
+      self.model_outputs.pop()
+
+    return next_sample
+
+  @torch.no_grad()
+  def forward(self, x_T: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+    """
+    Full sampling process from noise to clean sample.
+
+    Args:
+      x_T: Initial noise tensor [B, C, H, W]
+      condition: Conditioning information (required) [B, D]
+
+    Returns:
+      Denoised sample x_0 [B, C, H, W]
+    """
+    self.model_outputs = []
     x = x_T
-
-    # Buffer for storing recent epsilon predictions
-    eps_buffer = deque(maxlen=self.order + 1 if self.order > 0 else 1)
     cache = DeepCache(self.cache_config)
 
-    for i in range(len(self.sampling_indices)):
-      t = self.sampling_indices[i]
-      cache.set_current_step(i)
-
-      # Predict noise
+    for step_idx, t in enumerate(self.timesteps):
+      cache.set_current_step(step_idx)
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
-      eps = self.model(x, condition, t_vec, cache)
-      eps_buffer.append(eps)
-
-      # Last step - no update needed
-      if i + 1 >= len(self.sampling_indices):
-        break
-
-      # Determine epsilon to use for update
-      if self.order == 0:
-        # Order 0: DDIM, use current epsilon
-        eps_for_update = eps
-      else:
-        # Higher order: extrapolate using polynomial
-        if self._precomputed_weights is not None and self._precomputed_weights[i] is not None:
-          history_indices, weights = self._precomputed_weights[i]
-          weights = weights.to(x.device)
-
-          # Gather epsilon predictions
-          eps_list = []
-          for hist_idx in history_indices:
-            buffer_idx = hist_idx - i  # 0, -1, -2, ... (relative to current i)
-            eps_list.append(eps_buffer[buffer_idx])
-
-          # Apply Lagrange weights
-          stacked = torch.stack(eps_list, dim=0)
-          w_shape = (weights.shape[0],) + (1,) * (stacked.ndim - 1)
-          w_reshaped = weights.view(w_shape)
-          eps_for_update = torch.sum(w_reshaped * stacked, dim=0)
-        else:
-          eps_for_update = eps
-
-      # DDIM update: predict x0, then compute x_{t-1}
-      sqrt_alpha_bar = self.sqrt_alphas_bar[i]
-      sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_bar[i]
-      sqrt_alpha_bar_prev = self.sqrt_alphas_bar_prev[i]
-      dir_coeff = self.dir_coeff[i]
-
-      # Predict x0 from current x_t and eps
-      x0_pred = (x - sqrt_one_minus_alpha_bar * eps_for_update) / sqrt_alpha_bar
-
-      # Compute x_{t-1} (DDIM deterministic update)
-      x = sqrt_alpha_bar_prev * x0_pred + dir_coeff * eps_for_update
+      model_output = self.model(x, condition, t_vec, cache)
+      x = self.step(model_output, step_idx, x)
 
     return x
