@@ -357,7 +357,7 @@ class DEISSampler(nn.Module):
 
     def ind_fn(t, b, c):
       # Integrate[(log(t) - log(c)) / (log(b) - log(c)), {t}]
-      return t * (-np.log(c) + np.log(t) - 1) / (np.log(b) - np.log(c))
+      return t * (-torch.log(c) + torch.log(t) - 1) / (torch.log(b) - torch.log(c))
 
     coef1 = ind_fn(rho_t, rho_s0, rho_s1) - ind_fn(rho_s0, rho_s0, rho_s1)
     coef2 = ind_fn(rho_t, rho_s1, rho_s0) - ind_fn(rho_s0, rho_s1, rho_s0)
@@ -394,14 +394,14 @@ class DEISSampler(nn.Module):
     def ind_fn(t, b, c, d):
       # Integrate[(log(t) - log(c))(log(t) - log(d)) / (log(b) - log(c))(log(b) - log(d)), {t}]
       numerator = t * (
-        np.log(c) * (np.log(d) - np.log(t) + 1)
-        - np.log(d) * np.log(t)
-        + np.log(d)
-        + np.log(t) ** 2
-        - 2 * np.log(t)
+        torch.log(c) * (torch.log(d) - torch.log(t) + 1)
+        - torch.log(d) * torch.log(t)
+        + torch.log(d)
+        + torch.log(t) ** 2
+        - 2 * torch.log(t)
         + 2
       )
-      denominator = (np.log(b) - np.log(c)) * (np.log(b) - np.log(d))
+      denominator = (torch.log(b) - torch.log(c)) * (torch.log(b) - torch.log(d))
       return numerator / denominator
 
     coef1 = ind_fn(rho_t, rho_s0, rho_s1, rho_s2) - ind_fn(rho_s0, rho_s0, rho_s1, rho_s2)
@@ -422,10 +422,6 @@ class DEISSampler(nn.Module):
 
     # x0_pred = (x - sigma_t * eps) / alpha_t
     # eps = (x - alpha_t * x0_pred) / sigma_t
-
-    eps = (x - alpha_t * (x - sigma_t * eps) / alpha_t) / sigma_t
-
-    sigma_t * eps * alpha_t + alpha_t * (x - sigma_t * eps) = x
 
     for i in range(self.order - 1):
       model_outputs[i] = model_outputs[i + 1]
