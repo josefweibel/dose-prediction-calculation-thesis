@@ -372,6 +372,10 @@ class DEISSampler(nn.Module):
 
     Coefficients are computed by integrating Lagrange polynomial basis functions
     in log-rho space, following the HuggingFace Diffusers DEIS implementation.
+
+    Key insight: timesteps decrease [999, ..., 0] but rho = σ/α INCREASES during
+    denoising (from low to high). The Lagrange integrals compute ∫_{rho_s}^{rho_t}
+    where rho_s < rho_t, stepping from higher noise to lower noise.
     """
     T = len(self.timesteps)
 
@@ -383,37 +387,41 @@ class DEISSampler(nn.Module):
 
     for i in range(T - 1):
       # Get rho values for current and next timesteps
-      rho_curr = self.rho_t[i].item()
-      rho_next = self.rho_t[i + 1].item()
+      # timesteps: [t_0=999, t_1=888, ..., t_N=0]  (DECREASING)
+      # rho:       [rho_0,   rho_1,   ..., rho_N]  (INCREASING, since rho = σ/α)
+      # At step i: we're at timestep[i] and moving to timestep[i+1]
+      rho_s = self.rho_t[i].item()      # Current timestep (where we are now)
+      rho_t = self.rho_t[i + 1].item()  # Next timestep (where we're stepping to)
 
       # Order 1: First-order (DDIM-like) - uses only current output
       # Coefficient is implicitly 1, handled separately in step()
 
       # Order 2: Second-order multistep (needs one previous output)
       if i >= 1 and self.order >= 2:
-        rho_prev = self.rho_t[i - 1].item()
+        rho_s_prev = self.rho_t[i - 1].item()  # Previous timestep
 
         # Compute coefficients using integrated Lagrange polynomials
-        coef_curr = self._compute_ind_fn_2(rho_next, rho_curr, rho_prev) - \
-                    self._compute_ind_fn_2(rho_curr, rho_curr, rho_prev)
-        coef_prev = self._compute_ind_fn_2(rho_next, rho_prev, rho_curr) - \
-                    self._compute_ind_fn_2(rho_curr, rho_prev, rho_curr)
+        # Integration is from rho_s to rho_t (current to next)
+        coef_curr = self._compute_ind_fn_2(rho_t, rho_s, rho_s_prev) - \
+                    self._compute_ind_fn_2(rho_s, rho_s, rho_s_prev)
+        coef_prev = self._compute_ind_fn_2(rho_t, rho_s_prev, rho_s) - \
+                    self._compute_ind_fn_2(rho_s, rho_s_prev, rho_s)
 
         self.coef_matrix[i, 0] = coef_curr
         self.coef_matrix[i, 1] = coef_prev
 
       # Order 3: Third-order multistep (needs two previous outputs)
       if i >= 2 and self.order >= 3:
-        rho_prev = self.rho_t[i - 1].item()
-        rho_prev_prev = self.rho_t[i - 2].item()
+        rho_s_prev = self.rho_t[i - 1].item()
+        rho_s_prev_prev = self.rho_t[i - 2].item()
 
         # Compute coefficients using integrated Lagrange polynomials
-        coef_curr = self._compute_ind_fn_3(rho_next, rho_curr, rho_prev, rho_prev_prev) - \
-                    self._compute_ind_fn_3(rho_curr, rho_curr, rho_prev, rho_prev_prev)
-        coef_prev = self._compute_ind_fn_3(rho_next, rho_prev, rho_curr, rho_prev_prev) - \
-                    self._compute_ind_fn_3(rho_curr, rho_prev, rho_curr, rho_prev_prev)
-        coef_prev_prev = self._compute_ind_fn_3(rho_next, rho_prev_prev, rho_curr, rho_prev) - \
-                         self._compute_ind_fn_3(rho_curr, rho_prev_prev, rho_curr, rho_prev)
+        coef_curr = self._compute_ind_fn_3(rho_t, rho_s, rho_s_prev, rho_s_prev_prev) - \
+                    self._compute_ind_fn_3(rho_s, rho_s, rho_s_prev, rho_s_prev_prev)
+        coef_prev = self._compute_ind_fn_3(rho_t, rho_s_prev, rho_s, rho_s_prev_prev) - \
+                    self._compute_ind_fn_3(rho_s, rho_s_prev, rho_s, rho_s_prev_prev)
+        coef_prev_prev = self._compute_ind_fn_3(rho_t, rho_s_prev_prev, rho_s, rho_s_prev) - \
+                         self._compute_ind_fn_3(rho_s, rho_s_prev_prev, rho_s, rho_s_prev)
 
         self.coef_matrix[i, 0] = coef_curr
         self.coef_matrix[i, 1] = coef_prev
