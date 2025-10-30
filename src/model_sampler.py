@@ -282,6 +282,8 @@ class DEISSampler(nn.Module):
     self.schedule = schedule
     self.cache_config = cache_config
 
+    # Note: Following HuggingFace Diffusers, only 'rhoab' (log-rho) is properly supported
+    # The 'tab' method is kept for API compatibility but uses the same implementation
     if self.method not in ['tab', 'rhoab']:
       raise ValueError(f"method must be 'tAB' or 'rhoAB', got {method}")
 
@@ -309,13 +311,20 @@ class DEISSampler(nn.Module):
     self.register_buffer('sampling_alphas_bar', sampling_alphas_bar)
 
     # Precompute derived quantities for sampling
-    sqrt_alpha_t = torch.sqrt(sampling_alphas_bar)
-    sqrt_one_minus_alpha_t = torch.sqrt(1 - sampling_alphas_bar)
-    lambda_t = torch.log(sqrt_alpha_t) - torch.log(sqrt_one_minus_alpha_t)
+    # Store actual alpha and sigma (not square roots) as DEIS requires
+    alpha_t = torch.sqrt(sampling_alphas_bar)  # α_t = sqrt(ᾱ_t)
+    sigma_t = torch.sqrt(1 - sampling_alphas_bar)  # σ_t = sqrt(1 - ᾱ_t)
 
-    self.register_buffer('sqrt_alpha_t', sqrt_alpha_t)
-    self.register_buffer('sqrt_one_minus_alpha_t', sqrt_one_minus_alpha_t)
+    # Log-SNR: λ = log(α/σ)
+    lambda_t = torch.log(alpha_t) - torch.log(sigma_t)
+
+    # Also compute rho = σ/α for coefficient calculation
+    rho_t = sigma_t / alpha_t
+
+    self.register_buffer('alpha_t', alpha_t)
+    self.register_buffer('sigma_t', sigma_t)
     self.register_buffer('lambda_t', lambda_t)
+    self.register_buffer('rho_t', rho_t)
 
     # Precompute coefficients for all pairs of timesteps
     self._precompute_coefficients()
@@ -323,45 +332,92 @@ class DEISSampler(nn.Module):
     # Cache for model outputs (for multistep methods)
     self.model_outputs = []
 
+  def _compute_ind_fn_2(self, rho_t, rho_b, rho_c):
+    """
+    Compute the integral of Lagrange basis polynomial for second-order DEIS.
+
+    Integrates: ∫ (log(ρ) - log(ρ_c)) / (log(ρ_b) - log(ρ_c)) dρ
+
+    Result: ρ * (-log(ρ_c) + log(ρ) - 1) / (log(ρ_b) - log(ρ_c))
+    """
+    numerator = rho_t * (-torch.log(torch.tensor(rho_c)) + torch.log(torch.tensor(rho_t)) - 1)
+    denominator = torch.log(torch.tensor(rho_b)) - torch.log(torch.tensor(rho_c))
+    return (numerator / denominator).item()
+
+  def _compute_ind_fn_3(self, rho_t, rho_b, rho_c, rho_d):
+    """
+    Compute the integral of Lagrange basis polynomial for third-order DEIS.
+
+    Integrates the quadratic Lagrange basis over log-rho space.
+    """
+    log_b = torch.log(torch.tensor(rho_b))
+    log_c = torch.log(torch.tensor(rho_c))
+    log_d = torch.log(torch.tensor(rho_d))
+    log_t = torch.log(torch.tensor(rho_t))
+
+    numerator = rho_t * (
+      log_c * (log_d - log_t + 1)
+      - log_d * log_t
+      + log_d
+      + log_t ** 2
+      - 2 * log_t
+      + 2
+    )
+    denominator = (log_b - log_c) * (log_b - log_d)
+    return (numerator / denominator).item()
+
   def _precompute_coefficients(self):
-    """Precompute multistep coefficients for all timestep pairs."""
+    """
+    Precompute multistep coefficients for all timestep pairs.
+
+    Coefficients are computed by integrating Lagrange polynomial basis functions
+    in log-rho space, following the HuggingFace Diffusers DEIS implementation.
+    """
     T = len(self.timesteps)
 
     # Storage for precomputed coefficients
-    # coef_matrix[i, j, k] = coefficient k for stepping from timestep i to i+1
-    # where j indicates which past output (0=current, 1=previous, etc.)
+    # For step i: coef_matrix[i, j] = coefficient for j-th most recent output
+    # j=0 is current, j=1 is previous, j=2 is two steps ago
     max_order = min(self.order, 3)  # Support up to order 3
-    self.coef_matrix = torch.zeros(T, max_order + 1, dtype=torch.float32)
+    self.coef_matrix = torch.zeros(T, max_order, dtype=torch.float32)
 
     for i in range(T - 1):
-      lambda_curr = self.lambda_t[i].item()
-      lambda_next = self.lambda_t[i + 1].item()
-      h = lambda_next - lambda_curr
+      # Get rho values for current and next timesteps
+      rho_curr = self.rho_t[i].item()
+      rho_next = self.rho_t[i + 1].item()
 
-      # Order 0/1 (DDIM-like)
-      self.coef_matrix[i, 0] = 1.0
+      # Order 1: First-order (DDIM-like) - uses only current output
+      # Coefficient is implicitly 1, handled separately in step()
 
-      # Order 2 (need one previous output)
-      if i >= 1:
-        lambda_prev = self.lambda_t[i - 1].item()
-        h_0 = lambda_curr - lambda_prev
-        if abs(h) > 1e-8:
-          r0 = h_0 / h
-          self.coef_matrix[i, 0] = 1.0 + 1.0 / (2.0 * r0)
-          self.coef_matrix[i, 1] = -1.0 / (2.0 * r0)
+      # Order 2: Second-order multistep (needs one previous output)
+      if i >= 1 and self.order >= 2:
+        rho_prev = self.rho_t[i - 1].item()
 
-      # Order 3 (need two previous outputs)
+        # Compute coefficients using integrated Lagrange polynomials
+        coef_curr = self._compute_ind_fn_2(rho_next, rho_curr, rho_prev) - \
+                    self._compute_ind_fn_2(rho_curr, rho_curr, rho_prev)
+        coef_prev = self._compute_ind_fn_2(rho_next, rho_prev, rho_curr) - \
+                    self._compute_ind_fn_2(rho_curr, rho_prev, rho_curr)
+
+        self.coef_matrix[i, 0] = coef_curr
+        self.coef_matrix[i, 1] = coef_prev
+
+      # Order 3: Third-order multistep (needs two previous outputs)
       if i >= 2 and self.order >= 3:
-        lambda_prev = self.lambda_t[i - 1].item()
-        lambda_prev_prev = self.lambda_t[i - 2].item()
-        h_0 = lambda_curr - lambda_prev
-        h_1 = lambda_prev - lambda_prev_prev
-        if abs(h) > 1e-8:
-          r0 = h_0 / h
-          r1 = h_1 / h
-          self.coef_matrix[i, 0] = 1.0 + r0 / 2.0 + r0 * r0 / (2.0 * r1 * (r0 + r1))
-          self.coef_matrix[i, 1] = -r0 / (2.0 * r1)
-          self.coef_matrix[i, 2] = -r0 * r0 / (2.0 * r1 * (r0 + r1))
+        rho_prev = self.rho_t[i - 1].item()
+        rho_prev_prev = self.rho_t[i - 2].item()
+
+        # Compute coefficients using integrated Lagrange polynomials
+        coef_curr = self._compute_ind_fn_3(rho_next, rho_curr, rho_prev, rho_prev_prev) - \
+                    self._compute_ind_fn_3(rho_curr, rho_curr, rho_prev, rho_prev_prev)
+        coef_prev = self._compute_ind_fn_3(rho_next, rho_prev, rho_curr, rho_prev_prev) - \
+                    self._compute_ind_fn_3(rho_curr, rho_prev, rho_curr, rho_prev_prev)
+        coef_prev_prev = self._compute_ind_fn_3(rho_next, rho_prev_prev, rho_curr, rho_prev) - \
+                         self._compute_ind_fn_3(rho_curr, rho_prev_prev, rho_curr, rho_prev)
+
+        self.coef_matrix[i, 0] = coef_curr
+        self.coef_matrix[i, 1] = coef_prev
+        self.coef_matrix[i, 2] = coef_prev_prev
 
     self.register_buffer('coef_matrix_buf', self.coef_matrix)
 
@@ -372,7 +428,7 @@ class DEISSampler(nn.Module):
     sample: torch.Tensor
   ) -> torch.Tensor:
     """
-    Predict the sample at the next timestep.
+    Predict the sample at the next timestep using DEIS multistep method.
 
     Args:
       model_output: Direct output from learned diffusion model (epsilon prediction)
@@ -382,60 +438,61 @@ class DEISSampler(nn.Module):
     Returns:
       Predicted sample at next timestep
     """
-    # Convert model output to DEIS representation
-    if self.method == 'rhoab':
-      # For rhoAB: scale by -sqrt_one_minus_alpha_t
-      deis_output = -self.sqrt_one_minus_alpha_t[step_idx] * model_output
-    else:  # tAB
-      # For tAB: scale by -sqrt_one_minus_alpha_t
-      deis_output = -self.sqrt_one_minus_alpha_t[step_idx] * model_output
+    # Get current timestep parameters
+    alpha_curr = self.alpha_t[step_idx]
+    sigma_curr = self.sigma_t[step_idx]
 
-    # Determine which coefficients to use based on available history
+    # Convert epsilon prediction to DEIS representation
+    # First: epsilon -> x0 prediction
+    x0_pred = (sample - sigma_curr * model_output) / alpha_curr
+
+    # Second: x0 -> DEIS model output (noise component)
+    # model_output_deis = (x - α*x0) / σ
+    deis_output = (sample - alpha_curr * x0_pred) / sigma_curr
+
+    # Determine effective order based on available history
     num_prev = len(self.model_outputs)
     eff_order = min(self.order, num_prev + 1, 3)
 
-    # Combine with previous outputs using precomputed coefficients
-    combined_output = self.coef_matrix_buf[step_idx, 0] * deis_output
-
-    for i in range(min(num_prev, eff_order - 1)):
-      combined_output += self.coef_matrix_buf[step_idx, i + 1] * self.model_outputs[i]
-
-    # Exponential integrator update
-    alpha_curr = self.sqrt_alpha_t[step_idx]
-    sigma_curr = self.sqrt_one_minus_alpha_t[step_idx]
-    lambda_curr = self.lambda_t[step_idx]
-
+    # Get next timestep parameters
     if step_idx < len(self.timesteps) - 1:
-      # Not the final step
-      alpha_next = self.sqrt_alpha_t[step_idx + 1]
-      sigma_next = self.sqrt_one_minus_alpha_t[step_idx + 1]
-      lambda_next = self.lambda_t[step_idx + 1]
+      alpha_next = self.alpha_t[step_idx + 1]
+      sigma_next = self.sigma_t[step_idx + 1]
     else:
       # Final step: go to t=0 (clean image)
       alpha_next = torch.tensor(1.0, device=sample.device, dtype=sample.dtype)
       sigma_next = torch.tensor(0.0, device=sample.device, dtype=sample.dtype)
-      lambda_next = torch.tensor(float('inf'), device=sample.device, dtype=sample.dtype)
 
-    h = lambda_next - lambda_curr
-
-    if self.method == 'rhoab':
-      # Compute φ₁(h) = (exp(h) - 1) / h
-      if h.abs() > 1e-6 and not torch.isinf(h):
-        phi_1 = torch.expm1(h) / h
+    # Apply DEIS update based on order
+    if eff_order == 1 or num_prev == 0:
+      # First-order update (DDIM-like with exponential integrator)
+      lambda_curr = self.lambda_t[step_idx]
+      if step_idx < len(self.timesteps) - 1:
+        lambda_next = self.lambda_t[step_idx + 1]
+        h = lambda_next - lambda_curr
+        # x_next = (α_next/α_curr) * x - σ_next * (exp(h) - 1) * model_output
+        next_sample = (alpha_next / alpha_curr) * sample - \
+                      (sigma_next * (torch.exp(h) - 1.0)) * deis_output
       else:
-        phi_1 = torch.tensor(1.0, device=sample.device, dtype=sample.dtype)
+        # Final step
+        next_sample = alpha_next * x0_pred
 
-      # Update formula
-      next_sample = (alpha_next / alpha_curr) * sample + (sigma_next * phi_1) * combined_output
-    else:  # tAB
-      next_sample = (alpha_next / alpha_curr) * sample + \
-             (sigma_next - sigma_curr * alpha_next / alpha_curr) * combined_output / sigma_curr
+    else:
+      # Multistep update (order 2 or 3)
+      # Combine current and previous outputs using precomputed coefficients
+      combined_coef = self.coef_matrix_buf[step_idx, 0] * deis_output
 
+      for i in range(min(num_prev, eff_order - 1)):
+        # Access from end of list (most recent first)
+        combined_coef += self.coef_matrix_buf[step_idx, i + 1] * self.model_outputs[-(i+1)]
 
-    # Cache for multistep
-    self.model_outputs.insert(0, deis_output)
+      # DEIS multistep formula: x_next = α_next * (x/α_curr + combined_coef)
+      next_sample = alpha_next * (sample / alpha_curr + combined_coef)
+
+    # Store model output for future steps (FIFO: append to end)
+    self.model_outputs.append(deis_output)
     if len(self.model_outputs) > self.order:
-      self.model_outputs.pop()
+      self.model_outputs.pop(0)  # Remove oldest
 
     return next_sample
 
