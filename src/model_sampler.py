@@ -304,7 +304,8 @@ class DEISSampler(nn.Module):
     self.register_buffer('timesteps', sampling_indices)
 
     sigmas = ((1 - alphas_bar_sampling) / alphas_bar_sampling) ** 0.5
-    sigmas = torch.cat([sigmas, torch.zeros(1)]).float()
+    sigma_last = ((1 - alphas_cumprod[0]) / alphas_cumprod[0]) ** 0.5
+    sigmas = torch.cat([sigmas, torch.tensor([sigma_last])]).float()
     self.register_buffer('sigmas', sigmas)
 
   def __sigma_to_alpha_sigma_t(self, sigma):
