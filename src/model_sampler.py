@@ -430,10 +430,11 @@ class DEISSampler(nn.Module):
     lower_order_final = (step_idx == len(self.timesteps) - 1) and len(self.timesteps) < 15
     lower_order_second = (step_idx == len(self.timesteps) - 2) and len(self.timesteps) < 15
 
-    if self.order == 1 or len(model_outputs) == 1 or lower_order_final:
+    n_cached = sum([1 for m in model_outputs if m is not None])
+    if self.order == 1 or n_cached == 1 or lower_order_final:
       # First-order update (DDIM-like with exponential integrator)
       return self.__deis_first_order_update(x, step_idx, model_outputs)
-    elif self.order == 2 or len(model_outputs) == 2 or lower_order_second:
+    elif self.order == 2 or n_cached == 2 or lower_order_second:
       return self.__deis_second_order_update(x, step_idx, model_outputs)
     else:
       return self.__deis_third_order_update(x, step_idx, model_outputs)
