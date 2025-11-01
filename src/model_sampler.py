@@ -25,7 +25,7 @@ def build_sampler(model_config, sampling_config, model):
       k=sampling_config['cache'].get('k', None),
     )
   else:
-    cache_config = CacheConfig(sampling_steps=sampling_config['T'], layers=[], warmup=0)
+    cache_config = CacheConfig(sampling_steps=sampling_config['T'], mode='uniform', layers=[], intervals={}, warmup=0)
 
   if sampling_config['sampler'] == 'ddpm':
     return GaussianDiffusionSampler(

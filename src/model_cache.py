@@ -11,7 +11,7 @@ class CacheConfig:
   layers: List[str]  # list of layer names to cache
   mode: Literal["uniform", "nonuniform"] = "uniform"  # caching strategy mode
 
-  intervals: Optional[Dict[str, int]] = {} # e.g. {"enc4": 4, "enc3": 2}
+  intervals: Optional[Dict[str, int]] = None # e.g. {"enc4": 4, "enc3": 2}
 
   # Non-uniform 1:N parameters (required when mode="nonuniform")
   c: Optional[float] = None  # center timestep around which sampling is concentrated
