@@ -15,6 +15,7 @@ def build_sampler(model_config, sampling_config, model):
     }
 
     cache_config = CacheConfig(
+      sampling_steps=sampling_config['T'],
       intervals=intervals,
       warmup=sampling_config['cache']['warmup_steps'],
     )
