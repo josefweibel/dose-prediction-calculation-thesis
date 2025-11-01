@@ -16,11 +16,16 @@ def build_sampler(model_config, sampling_config, model):
 
     cache_config = CacheConfig(
       sampling_steps=sampling_config['T'],
+      warmup=sampling_config['cache'].get('warmup_steps', 0),
+      mode=sampling_config['cache']['mode'],
+      layers=sampling_config['cache']['layers'],
       intervals=intervals,
-      warmup=sampling_config['cache']['warmup_steps'],
+      c=sampling_config['cache'].get('c', None),
+      p=sampling_config['cache'].get('p', None),
+      k=sampling_config['cache'].get('k', None),
     )
   else:
-    cache_config = CacheConfig(intervals={}, warmup=0)
+    cache_config = CacheConfig(sampling_steps=sampling_config['T'], intervals={}, warmup=0)
 
   if sampling_config['sampler'] == 'ddpm':
     return GaussianDiffusionSampler(
