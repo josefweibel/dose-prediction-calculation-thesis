@@ -7,8 +7,8 @@ import numpy as np
 @dataclass
 class CacheConfig:
   sampling_steps: int
-  warmup: int = 0  # number of initial steps with no cache (optional)
   layers: List[str]  # list of layer names to cache
+  warmup: int = 0  # number of initial steps with no cache (optional)
   mode: Literal["uniform", "nonuniform"] = "uniform"  # caching strategy mode
 
   intervals: Optional[Dict[str, int]] = None # e.g. {"enc4": 4, "enc3": 2}
