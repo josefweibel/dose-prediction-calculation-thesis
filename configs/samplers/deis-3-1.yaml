@@ -1,7 +1,7 @@
 sampler: deis
-T: 1000
+T: 1
 schedule: linear
-order: 0
+order: 3
 
 data_cache_size: inf
 num_workers: 4
