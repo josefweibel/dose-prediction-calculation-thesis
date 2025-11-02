@@ -1,0 +1,12 @@
+sampler: ddpm
+T: 10
+schedule: linear
+
+data_cache_size: inf
+num_workers: 4
+prefetch_factor: 4
+prefetch_on_gpu: false
+
+seed: 3
+batch_size_per_gpu: 32
+precision: null
