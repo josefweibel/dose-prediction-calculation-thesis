@@ -424,7 +424,6 @@ class SampleResults(BaseResults):
 
     return ax
 
-
 class ModelComparison:
   def __init__(self, results_list: List[ModelResults], result_labels=None):
     self.results_list = results_list
@@ -519,3 +518,71 @@ class ModelComparison:
     ax.legend()
 
     return ax
+
+  def plot_quality_over_time(self, metric, ax=None):
+    # scatter plot with mean values per model
+    if ax is None:
+      fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+    for result, label in zip(self.results_list, self.result_labels):
+      df = result.volume_metrics
+      x = df['duration'].mean() / 60
+      y = df[metric].mean()
+      ax.scatter(x, y, label=label, s=100, alpha=0.6)
+
+    dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
+    ax.set_title(f'Mean {METRIC_ABBRS.get(metric, metric)} vs Mean Inference Time Across Models \n{dir_symbol} is better')
+    ax.set_xlabel('Mean Inference Time (minutes)')
+    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    ax.legend()
+
+    return ax
+
+  def plot_quality_over_T(self, metric, ax=None):
+    if ax is None:
+      fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+    data = {}
+    for result, result_label in zip(self.results_list, self.result_labels):
+      df = result.volume_metrics
+      T = int(result.sampling_name.split('-')[-1])
+      x = T
+      y = df[metric].mean()
+      y_std = df[metric].std()
+      label = result_label.replace(f' T={T}', '')
+      data[label] = data.get(label, []) + [(x, y, y_std)]
+
+    for label, points in data.items():
+      points.sort(key=lambda p: p[0])
+      ax.plot(
+        [p[0] for p in points],
+        [p[1] for p in points],
+        marker='o',
+        label=label,
+      )
+      ax.fill_between(
+        [p[0] for p in points],
+        [p[1] - p[2] for p in points],
+        [p[1] + p[2] for p in points],
+        alpha=0.2,
+      )
+
+    dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
+    ax.set_title(f'Mean (±std) {METRIC_ABBRS.get(metric, metric)} vs Sampling T Across Models \n{dir_symbol} is better')
+    ax.set_xlabel('Sampling T')
+    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    ax.legend()
+
+    return ax
+
+def combine_model_comparisons(results: List[ModelComparison], prefixes: List[str]=None) -> ModelComparison:
+  combined_results = []
+  combined_labels = []
+
+  for i, comparison in enumerate(results):
+    prefix = prefixes[i] + ' ' if prefixes is not None else ''
+    for result, label in zip(comparison.results_list, comparison.result_labels):
+      combined_results.append(result)
+      combined_labels.append(prefix + label)
+
+  return ModelComparison(combined_results, combined_labels)
