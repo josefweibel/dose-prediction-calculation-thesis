@@ -67,7 +67,7 @@ class MetricsRecalculator:
         metric.reset()
 
       with torch.no_grad():
-        pred = np.load(self.samples_path / f'{file_name.replace(".npz", "")}-{slice_idx}.npy')
+        pred = np.load(self.samples_path / file_name.replace(".npz", ".npy"))[..., slice_idx]
         pred = torch.Tensor(pred).unsqueeze(0).to(self.device)
 
         for name, metric in self.metrics.items():

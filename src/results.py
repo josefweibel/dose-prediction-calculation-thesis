@@ -328,13 +328,7 @@ class SampleResults(BaseResults):
 
 
   def load_pred_volume(self):
-    original_idx = {i: slice_index for i, (file, slice_index) in enumerate(self.dataset.index_map) if file.stem == self.sample}
-    vol_pred_dose = np.zeros((176, 160, len(original_idx)))
-
-    for slice_index in original_idx.values():
-      vol_pred_dose[:, :, slice_index] = np.load(self.base_path / f'{self.sample}-{slice_index}.npy')[0]
-
-    return vol_pred_dose
+    return np.load(self.base_path / f'{self.sample}.npy')[0]
 
 
   def plot_volume_dvh(self, ax=None):
@@ -379,7 +373,8 @@ class SampleResults(BaseResults):
       idx = [i for i, s_idx in original_idx.items() if s_idx == slice_index][0]
       structure, original_dose, _, _ = self.dataset[idx]
       original_dose = self.dataset.denormalize_target(original_dose)[0].numpy()
-      pred_dose = np.load(self.base_path / f'{self.sample}-{slice_index}.npy')[0]
+      pred_dose_vol = self.load_pred_volume()
+      pred_dose = pred_dose_vol[:, :, slice_index]
     elif axis == "axial" or axis == "coronal":
       structure_vol, original_dose_vol = self.load_orig_volume()
       pred_dose_vol = self.load_pred_volume()

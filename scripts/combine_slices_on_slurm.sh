@@ -46,7 +46,7 @@ sbatch <<EOF
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-combine-%j.log
-#SBATCH --job-name=c-${MODEL_NAME}
+#SBATCH --job-name=c-${MODEL_NAME}-${SAMPLING_NAME}
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
@@ -60,7 +60,7 @@ srun bash -c '
     --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
     --pwd /work \
     ${HOME_PATH}/images/dose-prediction-thesis.sif \
-    bash -c "PYTHONPATH=/work/src python scripts/combine_slices.py --model ${MODEL_NAME} --sampling ${SAMPLING_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH}"
+    bash -c "PYTHONPATH=/work/src python scripts/combine_slices.py --model ${MODEL_NAME} --sampling ${SAMPLING_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH} --delete-slices"
 '
 
 echo "job ${MODEL_NAME} ${SAMPLING_NAME} combine slices completed"
