@@ -1,0 +1,32 @@
+sampler: ddpm
+T: 1000
+schedule: linear
+
+data_cache_size: inf
+num_workers: 4
+prefetch_factor: 4
+prefetch_on_gpu: false
+
+seed: 1
+batch_size_per_gpu: 32
+precision: null
+
+cache:
+  mode: uniform
+  warmup_steps: 0
+  layers:
+    - head_struc
+    - enc1_struc
+    - enc2_struc
+    - enc3_struc
+    - enc4_struc
+    - enc3
+    - enc4
+  intervals:
+    head_struc: inf
+    enc1_struc: inf
+    enc2_struc: inf
+    enc3_struc: inf
+    enc4_struc: inf
+    enc3: 5
+    enc4: 5
