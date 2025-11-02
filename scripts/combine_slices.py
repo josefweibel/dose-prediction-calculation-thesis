@@ -16,13 +16,26 @@ def combine_slices_to_volumes(model_name, sampling_name, data_split, epoch, dele
     model_name: Name of the model
     sampling_name: Name of the sampling configuration
     data_split: Data split (train/val/test)
-    epoch: Epoch number
+    epoch: Epoch number or "latest"
     delete_slices: Whether to delete individual slice files after combining
   """
 
   # Construct the path to samples
   base_path = Path(__file__).parents[1]
-  samples_path = base_path / 'samples' / model_name / sampling_name / f'{data_split}_{epoch}'
+
+  # Handle "latest" epoch
+  if epoch == "latest":
+    sampling_base = base_path / 'samples' / model_name / sampling_name
+    epoch_dirs = sorted(sampling_base.glob(f'{data_split}_*'))
+    if not epoch_dirs:
+      print(f'Error: No epoch directories found in {sampling_base}')
+      sys.exit(1)
+
+    samples_path = epoch_dirs[-1]  # Get the last one (highest epoch number)
+    epoch = int(samples_path.name.split('_')[-1])
+    print(f'Using latest epoch: {epoch}')
+  else:
+    samples_path = base_path / 'samples' / model_name / sampling_name / f'{data_split}_{epoch}'
 
   if not samples_path.exists():
     print(f'Error: Samples path does not exist: {samples_path}')
@@ -116,11 +129,19 @@ def combine_slices_to_volumes(model_name, sampling_name, data_split, epoch, dele
 
 
 if __name__ == '__main__':
+  def parse_epoch(value):
+    if value == "latest":
+      return value
+    try:
+      return int(value)
+    except ValueError:
+      raise argparse.ArgumentTypeError("epoch must be an integer or 'latest'")
+
   parser = argparse.ArgumentParser(description='Combine individual slice files into volume files')
   parser.add_argument('--model', type=str, required=True, help='Name of the model configuration file (without .yaml extension)')
   parser.add_argument('--sampling', type=str, required=True, help='Name of the sampling configuration file (without .yaml extension)')
   parser.add_argument('--data-split', type=str, choices=['train', 'val', 'test'], default='test', help='Data split to use for sampling.')
-  parser.add_argument('--epoch', type=int, required=True, help='Epoch number to use.')
+  parser.add_argument('--epoch', type=parse_epoch, default=None, help='Epoch number to use or "latest".')
   parser.add_argument('--delete-slices', action='store_true', help='Delete individual slice files after combining into volumes.')
   args = parser.parse_args()
 

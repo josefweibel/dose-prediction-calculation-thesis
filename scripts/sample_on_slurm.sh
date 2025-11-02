@@ -27,7 +27,8 @@ if [ ! -f "${HOME_PATH}/images/dose-prediction-thesis.sif" ]; then
   echo "[$(date +"%Y-%m-%dT%H:%M:%S")] image dose-prediction-thesis pulled"
 fi
 
-sbatch <<EOF
+# Submit the sampling job and capture the job ID
+SAMPLE_JOB_OUTPUT=$(sbatch <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim
@@ -100,3 +101,48 @@ echo "job ${CONFIG_NAME} completed"
 
 
 EOF
+)
+
+# Extract the job ID from the sbatch output
+SAMPLE_JOB_ID=$(echo "$SAMPLE_JOB_OUTPUT" | awk '{print $4}')
+
+# Submit combine slices job that depends on sampling job completion
+COMBINE_JOB_OUTPUT=$(sbatch --dependency=afterok:$SAMPLE_JOB_ID <<EOF
+#!/bin/bash
+#SBATCH -p epyc2
+#SBATCH -q job_cpu
+#SBATCH --time 0:30:00
+#SBATCH --mem 64G
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-combine-%j.log
+#SBATCH --job-name=c-${MODEL_NAME}-${CONFIG_NAME}
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=joseph.weibel@students.unibe.ch
+
+echo "SLURM_JOB_ID=\$SLURM_JOB_ID"
+echo "TMPDIR=\$TMPDIR"
+echo "HOSTNAME=\$HOSTNAME"
+echo "Dependency on sampling job: $SAMPLE_JOB_ID"
+echo
+
+srun bash -c '
+  singularity exec \
+    --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
+    --pwd /work \
+    ${HOME_PATH}/images/dose-prediction-thesis.sif \
+    bash -c "PYTHONPATH=/work/src python scripts/combine_slices.py --model ${MODEL_NAME} --sampling ${CONFIG_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH} --delete-slices"
+'
+
+echo "job ${MODEL_NAME} ${CONFIG_NAME} combine slices completed"
+
+EOF
+)
+
+COMBINE_JOB_ID=$(echo "$COMBINE_JOB_OUTPUT" | awk '{print $4}')
+
+echo "Submitted combine slices job with ID: $COMBINE_JOB_ID (depends on $SAMPLE_JOB_ID)"
+echo ""
+echo "Job pipeline:"
+echo "  1. Sampling job: $SAMPLE_JOB_ID"
+echo "  2. Combine slices job: $COMBINE_JOB_ID (runs after sampling completes)"
