@@ -56,7 +56,7 @@ class DeepCache:
       if layer in self.cfg.intervals:
         layer_cached_steps = self.__compute_uniform_cached_steps(layer)
       else:
-        layer_cached_steps = self.__compute_nonuniform_cached_steps()
+        layer_cached_steps = self.__compute_nonuniform_cached_steps(layer)
 
       cached_steps[layer] = layer_cached_steps
 

@@ -12,7 +12,7 @@ batch_size_per_gpu: 32
 precision: null
 
 cache:
-  warmup_steps: 0
+  warmup_steps: 1
   layers:
     - head_struc
     - enc1_struc
