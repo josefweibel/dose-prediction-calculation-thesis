@@ -9,14 +9,13 @@ class CacheConfig:
   sampling_steps: int
   layers: List[str]  # list of layer names to cache
   warmup: int = 0  # number of initial steps with no cache (optional)
-  mode: Literal["uniform", "nonuniform"] = "uniform"  # caching strategy mode
 
   intervals: Optional[Dict[str, int]] = None # e.g. {"enc4": 4, "enc3": 2}
 
   # Non-uniform 1:N parameters (required when mode="nonuniform")
-  c: Optional[float] = None  # center timestep around which sampling is concentrated
-  p: Optional[float] = None  # power value controlling the distribution curve
-  k: Optional[int] = None    # number of cache updates (⌈T/N⌉)
+  c: Optional[Dict[str, float]] = None  # center timestep around which sampling is concentrated per layer
+  p: Optional[Dict[str, float]] = None  # power value controlling the distribution curve per layer
+  k: Optional[Dict[str, float]] = None  # number of cache updates (⌈T/N⌉) per layer
 
 
 class DeepCache:
@@ -54,10 +53,10 @@ class DeepCache:
     cached_steps = {}
 
     for layer in self.cfg.layers:
-      if self.cfg.mode == "nonuniform":
-        layer_cached_steps = self.__compute_nonuniform_cached_steps()
-      else:  # uniform mode (default)
+      if layer in self.cfg.intervals:
         layer_cached_steps = self.__compute_uniform_cached_steps(layer)
+      else:
+        layer_cached_steps = self.__compute_nonuniform_cached_steps()
 
       cached_steps[layer] = layer_cached_steps
 
@@ -86,7 +85,7 @@ class DeepCache:
 
     return layer_cached_steps
 
-  def __compute_nonuniform_cached_steps(self) -> list:
+  def __compute_nonuniform_cached_steps(self, layer: str) -> list:
     """Compute cached steps using non-uniform 1:N strategy.
 
     The non-uniform strategy concentrates full inference around timestep c,
@@ -94,16 +93,17 @@ class DeepCache:
 
     Args:
       interval: N value for 1:N inference (cache reuse ratio)
+      layer: layer name
 
     Returns:
       List of step indices where cache should be used
     """
-    if self.cfg.c is None or self.cfg.p is None or self.cfg.k is None:
+    if layer not in self.cfg.c or layer not in self.cfg.p or layer not in self.cfg.k:
         raise ValueError("Non-uniform mode requires c, p, and k parameters to be set")
 
-    c = self.cfg.c
-    p = self.cfg.p
-    k = self.cfg.k
+    c = self.cfg.c[layer]
+    p = self.cfg.p[layer]
+    k = self.cfg.k[layer]
     T = self.cfg.sampling_steps
 
     # Generate non-uniform update indices using power-law transformation

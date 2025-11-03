@@ -12,7 +12,6 @@ batch_size_per_gpu: 32
 precision: null
 
 cache:
-  mode: uniform
   warmup_steps: 0
   layers:
     - head_struc
