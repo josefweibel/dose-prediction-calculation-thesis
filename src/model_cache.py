@@ -99,7 +99,7 @@ class DeepCache:
       List of step indices where cache should be used
     """
     if layer not in self.cfg.c or layer not in self.cfg.p or layer not in self.cfg.k:
-        raise ValueError("Non-uniform mode requires c, p, and k parameters to be set")
+      raise ValueError("Non-uniform mode requires c, p, and k parameters to be set")
 
     c = self.cfg.c[layer]
     p = self.cfg.p[layer]
@@ -110,9 +110,5 @@ class DeepCache:
     l_k = np.linspace((-c) ** (1/p), (T - c) ** (1/p), k)
     update_indices = (l_k ** p) + c
 
-    # Keep only valid indices (within range and after warmup)
-    update_indices = np.unique(update_indices)
-    update_indices = update_indices[(update_indices >= self.cfg.warmup) & (update_indices < T)]
-
-    # Cache is used on all steps NOT in update_indices
-    return [step for step in range(T) if step not in update_indices]
+    # Cache is used on all steps NOT in update_indices (excluding warmup)
+    return [step for step in range(self.cfg.warmup, T) if step not in update_indices]
