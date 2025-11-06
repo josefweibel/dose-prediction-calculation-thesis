@@ -10,7 +10,7 @@ JOB_ID=$(sbatch --parsable <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim
-#SBATCH --gres=gpu:1
+#SBATCH --gpus-per-node=rtx4090:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=04:00:00
