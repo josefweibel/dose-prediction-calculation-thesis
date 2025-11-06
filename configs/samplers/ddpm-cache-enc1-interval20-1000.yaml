@@ -23,6 +23,9 @@ cache:
     - enc2
     - enc3
     - enc4
+    - dec4
+    - dec3
+    - dec2
   intervals:
     head_struc: inf
     enc1_struc: inf
@@ -33,3 +36,6 @@ cache:
     enc2: 20
     enc3: 20
     enc4: 20
+    dec4: 20
+    dec3: 20
+    dec2: 20

@@ -198,32 +198,37 @@ class MambaUnet(nn.Module):
     out_dec = enc_features[-1]
 
     for i in range(self.num_layers - 1):
-      dec_idx = i
-      enc_idx = self.num_layers - 2 - i
+      cache_key = f'dec{self.num_layers - i}'
+      if cache.should_use(cache_key):
+        out_dec = cache.get(cache_key)
+      else:
+        dec_idx = i
+        enc_idx = self.num_layers - 2 - i
 
-      # Upsample
-      out_dec = self.upsamplers[dec_idx](out_dec)
+        # Upsample
+        out_dec = self.upsamplers[dec_idx](out_dec)
 
-      # Match spatial dimensions if needed
-      if out_dec.shape[2:] != enc_features[enc_idx].shape[2:]:
-        out_dec = torch.nn.functional.interpolate(
-          out_dec,
-          size=enc_features[enc_idx].shape[2:],
-          mode='bilinear',
-          align_corners=False
-        )
+        # Match spatial dimensions if needed
+        if out_dec.shape[2:] != enc_features[enc_idx].shape[2:]:
+          out_dec = torch.nn.functional.interpolate(
+            out_dec,
+            size=enc_features[enc_idx].shape[2:],
+            mode='bilinear',
+            align_corners=False
+          )
 
-      # Skip connection
-      out_dec = torch.cat([out_dec, enc_features[enc_idx]], 1)
+        # Skip connection
+        out_dec = torch.cat([out_dec, enc_features[enc_idx]], 1)
 
-      # Reduce channels
-      out_dec = self.reduce_channels[dec_idx](out_dec)
+        # Reduce channels
+        out_dec = self.reduce_channels[dec_idx](out_dec)
 
-      # Decoder block
-      out_dec = self.decoders[dec_idx](out_dec, return_features=True)
+        # Decoder block
+        out_dec = self.decoders[dec_idx](out_dec, return_features=True)
 
-      # Add time embedding
-      out_dec = out_dec + t_dec[self.num_layers - 1 - i]
+        # Add time embedding
+        out_dec = out_dec + t_dec[self.num_layers - 1 - i]
+        cache.set(cache_key, out_dec)
 
     # Final decoder (no upsampling before)
     final_dec_idx = self.num_layers - 1
