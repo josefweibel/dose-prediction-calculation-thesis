@@ -143,7 +143,7 @@ class MambaUnet(nn.Module):
       # Upsampler
       self.upsamplers.append(Upsample(embed_dim))
 
-      if i < num_layers - 1:
+      if i > 0:
         # Channel reduction after concatenation
         self.reduce_channels.append(nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=1, bias=bias))
 
@@ -223,7 +223,7 @@ class MambaUnet(nn.Module):
       out_dec = self.decoders[dec_idx](out_dec, return_features=True)
 
       # Add time embedding
-      out_dec = out_dec + t_dec[enc_idx]
+      out_dec = out_dec + t_dec[self.num_layers - 1 - i]
 
     # Final decoder (no upsampling before)
     final_dec_idx = self.num_layers - 1
