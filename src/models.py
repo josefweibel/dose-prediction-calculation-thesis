@@ -96,7 +96,7 @@ class MambaUnet(nn.Module):
     for i in range(num_layers):
       embed_dim = base_embed_dim * (2 ** i)
       self.t_proj_enc.append(TimeEmbeddingProjection(tdim, embed_dim))
-      self.t_proj_dec.append(TimeEmbeddingProjection(tdim, embed_dim))
+      self.t_proj_dec.append(TimeEmbeddingProjection(tdim, max(embed_dim // 2, base_embed_dim)))
 
     # Input heads
     self.head = nn.Conv2d(in_channels, base_channels, kernel_size=3, stride=1, padding=1)
@@ -107,9 +107,8 @@ class MambaUnet(nn.Module):
     self.encoders_struc = nn.ModuleList()
 
     for i in range(num_layers):
-      in_ch = base_channels if i == 0 else base_embed_dim * (2 ** (i - 1))
       embed_dim = base_embed_dim * (2 ** i)
-      channels = base_channels * (2 ** i) if i > 0 else base_channels
+      channels = base_channels * (2 ** i)
       curr_img_size = tuple(x // (2 ** i) for x in img_size)
 
       self.encoders.append(
@@ -118,7 +117,7 @@ class MambaUnet(nn.Module):
           patch_size=2,
           embed_dim=embed_dim,
           depth=depths[i],
-          channels=in_ch,
+          channels=channels,
           final_pool_type='all'
         )
       )
@@ -128,7 +127,7 @@ class MambaUnet(nn.Module):
           patch_size=2,
           embed_dim=embed_dim,
           depth=depths[i],
-          channels=in_ch,
+          channels=channels,
           final_pool_type='all'
         )
       )
@@ -141,25 +140,24 @@ class MambaUnet(nn.Module):
     for i in range(num_layers - 1, -1, -1):
       embed_dim = base_embed_dim * (2 ** i)
 
+      # Upsampler
+      self.upsamplers.append(Upsample(embed_dim))
+
       if i < num_layers - 1:
-        # Upsampler
-        self.upsamplers.append(Upsample(embed_dim * 2))
         # Channel reduction after concatenation
-        self.reduce_channels.append(nn.Conv2d(embed_dim * 2, embed_dim, kernel_size=1, bias=bias))
+        self.reduce_channels.append(nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=1, bias=bias))
 
       # Decoder
       curr_img_size = tuple(x // (2 ** i) for x in img_size)
-      patch_size = 2 if i == num_layers - 1 else 1
-
-      dec_depth = depths[i] if i < num_layers - 1 else depths[i]
+      dec_depth = 6 if i > 1 else 4
 
       self.decoders.append(
         VisionMamba(
           img_size=curr_img_size,
-          patch_size=patch_size,
-          embed_dim=embed_dim,
+          patch_size=1,
+          embed_dim=max(embed_dim // 2, base_embed_dim),
           depth=dec_depth,
-          channels=embed_dim,
+          channels=max(embed_dim // 2, base_embed_dim),
           final_pool_type='all'
         )
       )
@@ -206,6 +204,15 @@ class MambaUnet(nn.Module):
       # Upsample
       out_dec = self.upsamplers[dec_idx](out_dec)
 
+      # Match spatial dimensions if needed
+      if out_dec.shape[2:] != enc_features[enc_idx].shape[2:]:
+        out_dec = torch.nn.functional.interpolate(
+          out_dec,
+          size=enc_features[enc_idx].shape[2:],
+          mode='bilinear',
+          align_corners=False
+        )
+
       # Skip connection
       out_dec = torch.cat([out_dec, enc_features[enc_idx]], 1)
 
@@ -220,6 +227,17 @@ class MambaUnet(nn.Module):
 
     # Final decoder (no upsampling before)
     final_dec_idx = self.num_layers - 1
+    out_dec = self.upsamplers[final_dec_idx](out_dec)
+
+    # Match spatial dimensions if needed
+    if out_dec.shape[2:] != x.shape[2:]:
+      out_dec = torch.nn.functional.interpolate(
+        out_dec,
+        size=x.shape[2:],
+        mode='bilinear',
+        align_corners=False
+      )
+
     out_dec = torch.cat([out_dec, x], 1)
     out_dec = self.decoders[final_dec_idx](out_dec, return_features=True)
     out_dec = out_dec + t_dec[0]
