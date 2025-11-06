@@ -149,7 +149,8 @@ class Trainer:
 
     self.net_model = MambaUnet(
       img_size=self.config['data']['img_size'],
-      in_struc_channels=train_dataset.n_structures
+      in_struc_channels=train_dataset.n_structures,
+      num_layers=self.model_config.get('model', {}).get('num_layers', 4),
     ).to(self.device)
     self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 

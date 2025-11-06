@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Optional
+from typing import Optional, List
 
 from models_mamba import VisionMamba
 from model_cache import DeepCache
@@ -10,13 +10,14 @@ from model_cache import DeepCache
 class TimeEmbedding(nn.Module):
   def __init__(self, embed_dim, scale=30.0):
     super().__init__()
-    # Randomly sample weights druing initialization. These weights are fixed
+    # Randomly sample weights during initialization. These weights are fixed
     # during optimization and are not trainable.
     self.W = nn.Parameter(torch.randn(embed_dim // 2) * scale, requires_grad=False)
 
   def forward(self, x):
     x_proj = x[:, None] * self.W[None, :].to(x.device) * 2 * np.pi
     return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+
 
 class TimeEmbeddingProjection(nn.Module):
   def __init__(self, in_size, out_size):
@@ -28,9 +29,11 @@ class TimeEmbeddingProjection(nn.Module):
     x = self.act(x)
     return self.proj(x)
 
+
 class Swish(nn.Module):
   def forward(self, x):
     return x * torch.sigmoid(x)
+
 
 class Upsample(nn.Module):
   def __init__(self, n_feat):
@@ -46,6 +49,7 @@ class Upsample(nn.Module):
   def forward(self, x):
     return self.body(x)
 
+
 class MambaUnet(nn.Module):
   def __init__(
     self,
@@ -54,109 +58,170 @@ class MambaUnet(nn.Module):
     in_struc_channels=5,
     out_channels=1,
     bias=False,
+    num_layers=4,
+    base_channels=24,
+    base_embed_dim=48,
+    depths: Optional[List[int]] = None,
   ):
+    """
+    Args:
+      img_size: Input image size (H, W)
+      in_channels: Number of input channels
+      in_struc_channels: Number of structure input channels
+      out_channels: Number of output channels
+      bias: Whether to use bias in convolutions
+      num_layers: Number of encoder/decoder layers (default: 4)
+      base_channels: Base number of channels (default: 24)
+      base_embed_dim: Base embedding dimension (default: 48)
+      depths: List of depths for each layer. If None, uses default pattern
+    """
     super(MambaUnet, self).__init__()
 
-    tdim = 24 * 4
+    self.num_layers = num_layers
+
+    # Default depths pattern if not provided
+    if depths is None:
+      depths = [4] + [6] * (num_layers - 2) + [8] if num_layers > 1 else [4]
+
+    assert len(depths) == num_layers, f"depths length ({len(depths)}) must match num_layers ({num_layers})"
+
+    # Time embedding
+    tdim = base_channels * 4
     self.time_embedding = TimeEmbedding(tdim)
 
-    self.t_proj_enc1 = TimeEmbeddingProjection(tdim, 48)
-    self.t_proj_enc2 = TimeEmbeddingProjection(tdim, 96)
-    self.t_proj_enc3 = TimeEmbeddingProjection(tdim, 192)
-    self.t_proj_enc4 = TimeEmbeddingProjection(tdim, 384)
+    # Create time projections for each encoder and decoder layer
+    self.t_proj_enc = nn.ModuleList()
+    self.t_proj_dec = nn.ModuleList()
 
-    self.t_proj_dec4 = TimeEmbeddingProjection(tdim, 192)
-    self.t_proj_dec3 = TimeEmbeddingProjection(tdim, 96)
-    self.t_proj_dec2 = TimeEmbeddingProjection(tdim, 48)
-    self.t_proj_dec1 = TimeEmbeddingProjection(tdim, 48)
+    for i in range(num_layers):
+      embed_dim = base_embed_dim * (2 ** i)
+      self.t_proj_enc.append(TimeEmbeddingProjection(tdim, embed_dim))
+      self.t_proj_dec.append(TimeEmbeddingProjection(tdim, embed_dim))
 
-    self.head = nn.Conv2d(in_channels, 24, kernel_size=3, stride=1, padding=1)
-    self.head_struc = nn.Conv2d(in_struc_channels, 24, kernel_size=3, stride=1, padding=1)
+    # Input heads
+    self.head = nn.Conv2d(in_channels, base_channels, kernel_size=3, stride=1, padding=1)
+    self.head_struc = nn.Conv2d(in_struc_channels, base_channels, kernel_size=3, stride=1, padding=1)
 
-    self.enc1 = VisionMamba(img_size=img_size, patch_size=2, embed_dim=48, depth=4, channels=24, final_pool_type='all')
-    self.enc1_struc = VisionMamba(img_size=img_size, patch_size=2, embed_dim=48, depth=4, channels=24, final_pool_type='all')
+    # Create encoder layers
+    self.encoders = nn.ModuleList()
+    self.encoders_struc = nn.ModuleList()
 
-    self.enc2 = VisionMamba(img_size=tuple(x // 2 for x in img_size), patch_size=2, embed_dim=96, depth=6, channels=48, final_pool_type='all')
-    self.enc2_struc = VisionMamba(img_size=tuple(x // 2 for x in img_size), patch_size=2, embed_dim=96, depth=6, channels=48, final_pool_type='all')
+    for i in range(num_layers):
+      in_ch = base_channels if i == 0 else base_embed_dim * (2 ** (i - 1))
+      embed_dim = base_embed_dim * (2 ** i)
+      channels = base_channels * (2 ** i) if i > 0 else base_channels
+      curr_img_size = tuple(x // (2 ** i) for x in img_size)
 
-    self.enc3 = VisionMamba(img_size=tuple(x // 4 for x in img_size), patch_size=2, embed_dim=192, depth=6, channels=96, final_pool_type='all')
-    self.enc3_struc = VisionMamba(img_size=tuple(x // 4 for x in img_size), patch_size=2, embed_dim=192, depth=6, channels=96, final_pool_type='all')
+      self.encoders.append(
+        VisionMamba(
+          img_size=curr_img_size,
+          patch_size=2,
+          embed_dim=embed_dim,
+          depth=depths[i],
+          channels=in_ch,
+          final_pool_type='all'
+        )
+      )
+      self.encoders_struc.append(
+        VisionMamba(
+          img_size=curr_img_size,
+          patch_size=2,
+          embed_dim=embed_dim,
+          depth=depths[i],
+          channels=in_ch,
+          final_pool_type='all'
+        )
+      )
 
-    self.enc4 = VisionMamba(img_size=tuple(x // 8 for x in img_size), patch_size=2, embed_dim=384, depth=8, channels=192, final_pool_type='all')
-    self.enc4_struc = VisionMamba(img_size=tuple(x // 8 for x in img_size), patch_size=2, embed_dim=384, depth=8, channels=192, final_pool_type='all')
+    # Create decoder layers
+    self.upsamplers = nn.ModuleList()
+    self.reduce_channels = nn.ModuleList()
+    self.decoders = nn.ModuleList()
 
-    self.up4 = Upsample(384)
-    self.reduce_channels4 = nn.Conv2d(384, 192, kernel_size=1, bias=bias)
-    self.dec4 = VisionMamba(img_size=tuple(x // 8 for x in img_size), patch_size=1, embed_dim=192, depth=6, channels=192, final_pool_type='all')
+    for i in range(num_layers - 1, -1, -1):
+      embed_dim = base_embed_dim * (2 ** i)
 
-    self.up3 = Upsample(192)
-    self.reduce_channels3 = nn.Conv2d(192, 96, kernel_size=1, bias=bias)
-    self.dec3 = VisionMamba(img_size=tuple(x // 4 for x in img_size), patch_size=1, embed_dim=96, depth=6, channels=96, final_pool_type='all')
+      if i < num_layers - 1:
+        # Upsampler
+        self.upsamplers.append(Upsample(embed_dim * 2))
+        # Channel reduction after concatenation
+        self.reduce_channels.append(nn.Conv2d(embed_dim * 2, embed_dim, kernel_size=1, bias=bias))
 
-    self.up2 = Upsample(96)
-    self.reduce_channels2 = nn.Conv2d(96, 48, kernel_size=1, bias=bias)
-    self.dec2 = VisionMamba(img_size=tuple(x // 2 for x in img_size), patch_size=1, embed_dim=48, depth=4, channels=48, final_pool_type='all')
+      # Decoder
+      curr_img_size = tuple(x // (2 ** i) for x in img_size)
+      patch_size = 2 if i == num_layers - 1 else 1
 
-    self.up1 = Upsample(48)
-    self.dec1 = VisionMamba(img_size=img_size, patch_size=1, embed_dim=48, depth=4, channels=48, final_pool_type='all')
+      dec_depth = depths[i] if i < num_layers - 1 else depths[i]
 
-    self.out = nn.Conv2d(48, out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
+      self.decoders.append(
+        VisionMamba(
+          img_size=curr_img_size,
+          patch_size=patch_size,
+          embed_dim=embed_dim,
+          depth=dec_depth,
+          channels=embed_dim,
+          final_pool_type='all'
+        )
+      )
 
+    # Output head
+    self.out = nn.Conv2d(base_embed_dim, out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
-  def forward(self, x, structure, t, cache: Optional[DeepCache]=None):
+  def forward(self, x, structure, t, cache: Optional[DeepCache] = None):
+    # Time embedding
     t_emb = self.time_embedding(t)
 
-    t_for_enc1 = self.t_proj_enc1(t_emb)[:, :, None, None]
-    t_for_enc2 = self.t_proj_enc2(t_emb)[:, :, None, None]
-    t_for_enc3 = self.t_proj_enc3(t_emb)[:, :, None, None]
-    t_for_enc4 = self.t_proj_enc4(t_emb)[:, :, None, None]
-    t_for_dec4 = self.t_proj_dec4(t_emb)[:, :, None, None]
-    t_for_dec3 = self.t_proj_dec3(t_emb)[:, :, None, None]
-    t_for_dec2 = self.t_proj_dec2(t_emb)[:, :, None, None]
-    t_for_dec1 = self.t_proj_dec1(t_emb)[:, :, None, None]
+    # Generate time projections
+    t_enc = [proj(t_emb)[:, :, None, None] for proj in self.t_proj_enc]
+    t_dec = [proj(t_emb)[:, :, None, None] for proj in self.t_proj_dec]
 
+    # Process structure through encoder
     structure = cache.get_or_compute('head_struc', lambda: self.head_struc(structure))
-    out_enc1_struc = cache.get_or_compute('enc1_struc', lambda: self.enc1_struc(structure, return_features=True))
-    out_enc2_struc = cache.get_or_compute('enc2_struc', lambda: self.enc2_struc(out_enc1_struc, return_features=True))
-    out_enc3_struc = cache.get_or_compute('enc3_struc', lambda: self.enc3_struc(out_enc2_struc, return_features=True))
-    out_enc4_struc = cache.get_or_compute('enc4_struc', lambda: self.enc4_struc(out_enc3_struc, return_features=True))
 
+    enc_struc_features = []
+    out_struc = structure
+    for i, enc_struc in enumerate(self.encoders_struc):
+      cache_key = f'enc{i+1}_struc'
+      out_struc = cache.get_or_compute(cache_key, lambda enc=enc_struc, inp=out_struc: enc(inp, return_features=True))
+      enc_struc_features.append(out_struc)
+
+    # Process input through encoder
     x = self.head(x)
 
-    out_enc1 = cache.get_or_compute('enc1', lambda: self.enc1(x, return_features=True))
-    out_enc1 = out_enc1 + out_enc1_struc + t_for_enc1
+    enc_features = []
+    out = x
+    for i, encoder in enumerate(self.encoders):
+      cache_key = f'enc{i+1}'
+      out = cache.get_or_compute(cache_key, lambda enc=encoder, inp=out: enc(inp, return_features=True))
+      out = out + enc_struc_features[i] + t_enc[i]
+      enc_features.append(out)
 
-    out_enc2 = cache.get_or_compute('enc2', lambda: self.enc2(out_enc1, return_features=True))
-    out_enc2 = out_enc2 + out_enc2_struc + t_for_enc2
+    # Decoder path
+    out_dec = enc_features[-1]
 
-    out_enc3 = cache.get_or_compute('enc3', lambda: self.enc3(out_enc2, return_features=True))
-    out_enc3 = out_enc3 + out_enc3_struc + t_for_enc3
+    for i in range(self.num_layers - 1):
+      dec_idx = i
+      enc_idx = self.num_layers - 2 - i
 
-    out_enc4 = cache.get_or_compute('enc4', lambda: self.enc4(out_enc3, return_features=True))
-    out_enc4 = out_enc4 + out_enc4_struc + t_for_enc4
+      # Upsample
+      out_dec = self.upsamplers[dec_idx](out_dec)
 
-    in_dec4 = self.up4(out_enc4)
-    in_dec4 = torch.cat([in_dec4, out_enc3], 1)
-    in_dec4 = self.reduce_channels4(in_dec4)
-    out_dec4 = self.dec4(in_dec4, return_features=True)
-    out_dec4 = out_dec4 + t_for_dec4
+      # Skip connection
+      out_dec = torch.cat([out_dec, enc_features[enc_idx]], 1)
 
-    in_dec3 = self.up3(out_dec4)
-    in_dec3 = torch.cat([in_dec3, out_enc2], 1)
-    in_dec3 = self.reduce_channels3(in_dec3)
-    out_dec3 = self.dec3(in_dec3, return_features=True)
-    out_dec3 = out_dec3 + t_for_dec3
+      # Reduce channels
+      out_dec = self.reduce_channels[dec_idx](out_dec)
 
-    in_dec2 = self.up2(out_dec3)
-    in_dec2 = torch.cat([in_dec2, out_enc1], 1)
-    in_dec2 = self.reduce_channels2(in_dec2)
-    out_dec2 = self.dec2(in_dec2, return_features=True)
-    out_dec2 = out_dec2 + t_for_dec2
+      # Decoder block
+      out_dec = self.decoders[dec_idx](out_dec, return_features=True)
 
-    in_dec1 = self.up1(out_dec2)
-    in_dec1 = torch.cat([in_dec1, x], 1)
-    out_dec1 = self.dec1(in_dec1, return_features=True)
-    out_dec1 = out_dec1 + t_for_dec1
+      # Add time embedding
+      out_dec = out_dec + t_dec[enc_idx]
 
-    return self.out(out_dec1)
+    # Final decoder (no upsampling before)
+    final_dec_idx = self.num_layers - 1
+    out_dec = torch.cat([out_dec, x], 1)
+    out_dec = self.decoders[final_dec_idx](out_dec, return_features=True)
+    out_dec = out_dec + t_dec[0]
 
+    return self.out(out_dec)
