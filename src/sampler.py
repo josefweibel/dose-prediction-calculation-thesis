@@ -6,7 +6,7 @@ import numpy as np
 from config import read_model_config
 from data import GDPHMMSlicesDataset, SharedLRUCache, SharedCache
 from evaluator import Evaluator
-from models import MambaUnet
+from models import MambaUnet, remap_state_dict
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
@@ -84,7 +84,11 @@ class Sampler:
       checkpoint = load_checkpoint(model_name, epoch)
 
     self.epoch = checkpoint['epoch']
-    self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+
+    model_state_dict = checkpoint['ema_model_state_dict']
+    if "t_proj_enc.0.proj.weight" in model_state_dict:
+      model_state_dict = remap_state_dict(model_state_dict)
+    self.ema_model.load_state_dict(model_state_dict)
 
     self.evaluator = Evaluator(
       self.dataloader,

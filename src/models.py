@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import Optional, List
+import re
 
 from models_mamba import VisionMamba
 from model_cache import DeepCache
@@ -248,3 +249,65 @@ class MambaUnet(nn.Module):
     out_dec = out_dec + t_dec[0]
 
     return self.out(out_dec)
+
+
+def map_old_to_new_key(old_key: str) -> str:
+  mapping_rules = [
+    # time projections
+    (r"^t_proj_enc1", "t_proj_enc.0"),
+    (r"^t_proj_enc2", "t_proj_enc.1"),
+    (r"^t_proj_enc3", "t_proj_enc.2"),
+    (r"^t_proj_enc4", "t_proj_enc.3"),
+    (r"^t_proj_dec4", "t_proj_dec.0"),
+    (r"^t_proj_dec3", "t_proj_dec.1"),
+    (r"^t_proj_dec2", "t_proj_dec.2"),
+    (r"^t_proj_dec1", "t_proj_dec.3"),
+
+    # encoders
+    (r"^enc1_struc", "encoders_struc.0"),
+    (r"^enc2_struc", "encoders_struc.1"),
+    (r"^enc3_struc", "encoders_struc.2"),
+    (r"^enc4_struc", "encoders_struc.3"),
+    (r"^enc1", "encoders.0"),
+    (r"^enc2", "encoders.1"),
+    (r"^enc3", "encoders.2"),
+    (r"^enc4", "encoders.3"),
+
+    # upsample & reduce
+    (r"^up4", "upsamplers.0"),
+    (r"^up3", "upsamplers.1"),
+    (r"^up2", "upsamplers.2"),
+    (r"^up1", "upsamplers.3"),
+    (r"^reduce_channels4", "reduce_channels.0"),
+    (r"^reduce_channels3", "reduce_channels.1"),
+    (r"^reduce_channels2", "reduce_channels.2"),
+
+    # decoders
+    (r"^dec4", "decoders.0"),
+    (r"^dec3", "decoders.1"),
+    (r"^dec2", "decoders.2"),
+    (r"^dec1", "decoders.3"),
+  ]
+
+  new_key = old_key
+  for pattern, replacement in mapping_rules:
+    new_key = re.sub(pattern, replacement, new_key)
+  return new_key
+
+
+def remap_state_dict(old_state_dict):
+  new_state_dict = {}
+  unmatched = []
+
+  for k, v in old_state_dict.items():
+    new_k = map_old_to_new_key(k)
+    if new_k == k:
+      unmatched.append(k)
+    new_state_dict[new_k] = v
+
+  if unmatched:
+    print("Warning: The following keys were not remapped:")
+    for key in unmatched:
+      print(f"  {key}")
+
+  return new_state_dict
