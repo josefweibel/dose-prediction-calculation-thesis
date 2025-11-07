@@ -29,9 +29,9 @@ def build_sampler(model_config, sampling_config, model):
   if sampling_config['sampler'] == 'ddpm':
     return GaussianDiffusionSampler(
       model,
-      model_config['beta_1'],
-      model_config['beta_T'],
-      model_config['T'],
+      model_config['diffusion']['beta_1'],
+      model_config['diffusion']['beta_T'],
+      model_config['diffusion']['T'],
       cache_config,
       sampling_config['T'],
       schedule=sampling_config['schedule'],
@@ -39,9 +39,9 @@ def build_sampler(model_config, sampling_config, model):
   elif sampling_config['sampler'] == 'ddim':
     return DDIMSampler(
       model,
-      model_config['beta_1'],
-      model_config['beta_T'],
-      model_config['T'],
+      model_config['diffusion']['beta_1'],
+      model_config['diffusion']['beta_T'],
+      model_config['diffusion']['T'],
       cache_config,
       sampling_config['T'],
       eta=sampling_config['eta'],
@@ -50,9 +50,9 @@ def build_sampler(model_config, sampling_config, model):
   elif sampling_config['sampler'] == 'deis':
     return DEISSampler(
       model,
-      model_config['beta_1'],
-      model_config['beta_T'],
-      model_config['T'],
+      model_config['diffusion']['beta_1'],
+      model_config['diffusion']['beta_T'],
+      model_config['diffusion']['T'],
       cache_config,
       sampling_config['T'],
       order=sampling_config['order'],

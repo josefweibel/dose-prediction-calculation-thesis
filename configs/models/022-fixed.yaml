@@ -13,14 +13,15 @@ lr_scheduler:
   start_decay: 10000
   end_decay: 200000
 
+diffusion:
+  beta_1: 0.0001
+  beta_T: 0.02
+  T: 1000
+
 mixed_precision: false
 num_workers: 4
 prefetch_factor: 4
 prefetch_on_gpu: false
-
-beta_1: 0.0001
-beta_T: 0.02
-T: 1000
 
 grad_clip: 0.5
 ema_decay: 0.9999

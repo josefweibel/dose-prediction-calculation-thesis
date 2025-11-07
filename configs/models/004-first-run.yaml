@@ -9,14 +9,15 @@ batch_size: 32
 lr: 0.01
 epochs: 1500
 
+diffusion:
+  beta_1: 0.0001
+  beta_T: 0.02
+  T: 1000
+
 mixed_precision: false
 num_workers: 4
 prefetch_factor: 2
 prefetch_on_gpu: true
-
-beta_1: 0.0001
-beta_T: 0.02
-T: 100
 
 grad_clip: 1.0
 ema_decay: 0.9999

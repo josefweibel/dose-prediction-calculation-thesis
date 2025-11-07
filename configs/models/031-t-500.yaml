@@ -6,7 +6,7 @@ data:
   valid_limit: 512
 
 batch_size: 128
-epochs: 100 
+epochs: 100
 
 lr_scheduler:
   start_lr: 0.0001
@@ -14,14 +14,15 @@ lr_scheduler:
   start_decay: 20000
   end_decay: 50000
 
+diffusion:
+  beta_1: 0.0001
+  beta_T: 0.02
+  T: 500
+
 mixed_precision: false
 num_workers: 4
-prefetch_factor: 4 
+prefetch_factor: 4
 prefetch_on_gpu: false
-
-beta_1: 0.0001
-beta_T: 0.02
-T: 500
 
 grad_clip: 0.5
 ema_decay: 0.9999

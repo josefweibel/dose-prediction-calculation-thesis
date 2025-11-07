@@ -1,7 +1,7 @@
 data:
   dataset_name: gdphmm-hn-vmat
   img_size: [176, 160]
-  train_cache_size: 2048 
+  train_cache_size: 2048
   valid_cache_size: 512
 
 batch_size: 128
@@ -13,19 +13,20 @@ lr_scheduler:
   start_decay: 10000
   end_decay: 200000
 
+diffusion:
+  beta_1: 0.0001
+  beta_T: 0.02
+  T: 1000
+
 mixed_precision: false
 num_workers: 4
-prefetch_factor: 4 
+prefetch_factor: 4
 prefetch_on_gpu: false
-
-beta_1: 0.0001
-beta_T: 0.02
-T: 1000
 
 grad_clip: 1.0
 ema_decay: 0.9999
 
-eval_interval: 5 
+eval_interval: 5
 checkpoint_interval: 10
 
 validation_sampler: ddpm-1000

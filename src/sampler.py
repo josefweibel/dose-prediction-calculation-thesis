@@ -75,7 +75,7 @@ class Sampler:
     self.ema_model = MambaUnet(
       img_size=self.model_config['data']['img_size'],
       in_struc_channels=self.dataset.n_structures,
-      num_layers=self.model_config.get('model', {}).get('num_layers', 4),
+      num_layers=self.model_config['diffusion'].get('arch', {}).get('num_layers', 4),
     ).to(self.device)
 
     if epoch is None or epoch == 'latest':

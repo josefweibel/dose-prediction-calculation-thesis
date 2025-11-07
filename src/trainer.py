@@ -150,15 +150,15 @@ class Trainer:
     self.net_model = MambaUnet(
       img_size=self.config['data']['img_size'],
       in_struc_channels=train_dataset.n_structures,
-      num_layers=self.config.get('model', {}).get('num_layers', 4),
+      num_layers=self.config['diffusion'].get('arch', {}).get('num_layers', 4),
     ).to(self.device)
     self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
     self.model = DiffusionModelTrainerModule(
       denoising_model=self.net_model,
-      beta_1=self.config['beta_1'],
-      beta_T=self.config['beta_T'],
-      T=self.config['T']
+      beta_1=self.config['diffusion']['beta_1'],
+      beta_T=self.config['diffusion']['beta_T'],
+      T=self.config['diffusion']['T']
     ).to(self.device)
 
     if self.is_distributed:
