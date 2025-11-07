@@ -305,9 +305,9 @@ def remap_state_dict(old_state_dict):
       unmatched.append(k)
     new_state_dict[new_k] = v
 
-  if unmatched:
-    print("Warning: The following keys were not remapped:")
-    for key in unmatched:
-      print(f"  {key}")
+  # if unmatched:
+  #   print("Warning: The following keys were not remapped:")
+  #   for key in unmatched:
+  #     print(f"  {key}")
 
   return new_state_dict

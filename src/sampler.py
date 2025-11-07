@@ -86,7 +86,7 @@ class Sampler:
     self.epoch = checkpoint['epoch']
 
     model_state_dict = checkpoint['ema_model_state_dict']
-    if "t_proj_enc.0.proj.weight" in model_state_dict:
+    if "t_proj_enc1.proj.weight" in model_state_dict:
       model_state_dict = remap_state_dict(model_state_dict)
     self.ema_model.load_state_dict(model_state_dict)
 
