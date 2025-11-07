@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
 from tqdm import tqdm
 import copy
 import wandb
@@ -18,7 +18,7 @@ from evaluator import Evaluator
 from config import read_sampling_config
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
-
+from mednext import build_mednext_model
 
 def extract(v, t, x_shape):
   """
@@ -56,6 +56,21 @@ class DiffusionModelTrainerModule(nn.Module):
     noise_pred = self.model(x_t, condition, t, self.cache)
 
     return F.mse_loss(noise_pred, noise, reduction='none').mean()
+
+
+class MedNeXtUnetTrainerModule(nn.Module):
+  def __init__(self, model, scaling_factor):
+    super().__init__()
+
+    self.model = model
+    self.scaling_factor = scaling_factor
+
+  def forward(self, x, condition):
+    output = self.model(condition)
+    output = F.sigmoid(output)
+    output = self.scaling_factor * output
+    return F.l1_loss(output, x, reduction='mean').mean()
+
 
 class Trainer:
   def __init__(self, model_config, n_epochs=None, rank=None, world_size=None, local_rank=None):
@@ -147,19 +162,29 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    self.net_model = MambaUnet(
-      img_size=self.config['data']['img_size'],
-      in_struc_channels=train_dataset.n_structures,
-      num_layers=self.config['diffusion'].get('arch', {}).get('num_layers', 4),
-    ).to(self.device)
-    self.ema_model = copy.deepcopy(self.net_model).to(self.device)
+    if 'diffusion' in self.config:
+      self.net_model = MambaUnet(
+        img_size=self.config['data']['img_size'],
+        in_struc_channels=train_dataset.n_structures,
+        num_layers=self.config['diffusion'].get('arch', {}).get('num_layers', 4),
+      ).to(self.device)
 
-    self.model = DiffusionModelTrainerModule(
-      denoising_model=self.net_model,
-      beta_1=self.config['diffusion']['beta_1'],
-      beta_T=self.config['diffusion']['beta_T'],
-      T=self.config['diffusion']['T']
-    ).to(self.device)
+      self.model = DiffusionModelTrainerModule(
+        denoising_model=self.net_model,
+        beta_1=self.config['diffusion']['beta_1'],
+        beta_T=self.config['diffusion']['beta_T'],
+        T=self.config['diffusion']['T']
+      ).to(self.device)
+    elif 'mednext' in self.config:
+      self.net_model = build_mednext_model(self.config, train_dataset.n_structures).to(self.device)
+      self.model = MedNeXtUnetTrainerModule(
+        self.net_model,
+        self.config['mednext']['scaling_factor']
+      ).to(self.device)
+    else:
+      raise ValueError('Unknown model type in config')
+
+    self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
     if self.is_distributed:
       self.model = DDP(
@@ -329,7 +354,7 @@ class Trainer:
       )
 
   def __setup_optimizer(self):
-    if 'lr_scheduler' in self.config:
+    if 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', '') == 'linear_decay':
       start_decay = self.config['lr_scheduler']['start_decay']
       end_decay = self.config['lr_scheduler']['end_decay']
       end_lr = self.config['lr_scheduler']['end_lr']
@@ -345,6 +370,13 @@ class Trainer:
 
       self.optim = torch.optim.AdamW(self.model.parameters(), lr=start_lr)
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=linear_lr_schedule)
+    elif 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', '') == 'cosine_annealing':
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr_scheduler']['lr'])
+      self.lr_scheduler = CosineAnnealingLR(
+        self.optim,
+        T_max=len(self.train_dataloader) * self.config['epochs'],
+        last_epoch=self.config['epochs']
+      )
     else:
       self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr'])
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=lambda step: 1.0)

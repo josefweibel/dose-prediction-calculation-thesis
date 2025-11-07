@@ -58,6 +58,8 @@ def build_sampler(model_config, sampling_config, model):
       order=sampling_config['order'],
       schedule=sampling_config['schedule'],
     )
+  elif sampling_config['sampler'] == 'unet':
+    return UnetSampler(model)
   else:
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
 
@@ -111,7 +113,7 @@ def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train):
   else:
     raise ValueError(f"Unknown schedule: {schedule}")
 
-  print(f"Sampling indices (n={len(indices)}): {indices}")
+  # print(f"Sampling indices (n={len(indices)}): {indices}")
   return indices, alphas_bar
 
 class GaussianDiffusionSampler(nn.Module):
@@ -456,3 +458,24 @@ class DEISSampler(nn.Module):
 
     return x
 
+class UnetSampler(nn.Module):
+  def __init__(
+    self,
+    model: nn.Module,
+  ):
+    super().__init__()
+    self.model = model
+
+  @torch.no_grad()
+  def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+    """
+    Directly use the UNet model for prediction without diffusion.
+
+    Args:
+      x: Input tensor [B, C, H, W]
+      condition: Conditioning information (required) [B, D]
+
+    Returns:
+      Predicted sample [B, C, H, W]
+    """
+    return self.model(condition)
