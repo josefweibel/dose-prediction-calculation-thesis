@@ -15,7 +15,6 @@ lr_scheduler:
 mednext:
   kernel_size: 3
   deep_supervision: false
-  scaling_factor: 7.5
 
 mixed_precision: false
 num_workers: 4

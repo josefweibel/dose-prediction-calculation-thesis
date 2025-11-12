@@ -55,21 +55,19 @@ class DiffusionModelTrainerModule(nn.Module):
 
     noise_pred = self.model(x_t, condition, t, self.cache)
 
-    return F.mse_loss(noise_pred, noise, reduction='none').mean()
+    return F.mse_loss(noise_pred, noise, reduction='mean')
 
 
 class MedNeXtUnetTrainerModule(nn.Module):
-  def __init__(self, model, scaling_factor):
+  def __init__(self, model):
     super().__init__()
 
     self.model = model
-    self.scaling_factor = scaling_factor
 
   def forward(self, x, condition):
     output = self.model(condition)
-    output = F.sigmoid(output)
-    output = self.scaling_factor * output
-    return F.l1_loss(output, x, reduction='mean').mean()
+    output = F.relu(output)
+    return F.l1_loss(output, x, reduction='mean')
 
 
 class Trainer:
@@ -177,10 +175,7 @@ class Trainer:
       ).to(self.device)
     elif 'mednext' in self.config:
       self.net_model = build_mednext_model(self.config, train_dataset.n_structures).to(self.device)
-      self.model = MedNeXtUnetTrainerModule(
-        self.net_model,
-        self.config['mednext']['scaling_factor']
-      ).to(self.device)
+      self.model = MedNeXtUnetTrainerModule(self.net_model).to(self.device)
     else:
       raise ValueError('Unknown model type in config')
 
