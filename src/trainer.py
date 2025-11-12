@@ -349,7 +349,7 @@ class Trainer:
       )
 
   def __setup_optimizer(self):
-    if 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', '') == 'linear_decay':
+    if 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', 'linear_decay') == 'linear_decay':
       start_decay = self.config['lr_scheduler']['start_decay']
       end_decay = self.config['lr_scheduler']['end_decay']
       end_lr = self.config['lr_scheduler']['end_lr']
@@ -370,7 +370,6 @@ class Trainer:
       self.lr_scheduler = CosineAnnealingLR(
         self.optim,
         T_max=len(self.train_dataloader) * self.config['epochs'],
-        last_epoch=self.config['epochs']
       )
     else:
       self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr'])

@@ -258,10 +258,10 @@ def map_old_to_new_key(old_key: str) -> str:
     (r"^t_proj_enc2", "t_proj_enc.1"),
     (r"^t_proj_enc3", "t_proj_enc.2"),
     (r"^t_proj_enc4", "t_proj_enc.3"),
-    (r"^t_proj_dec4", "t_proj_dec.0"),
-    (r"^t_proj_dec3", "t_proj_dec.1"),
-    (r"^t_proj_dec2", "t_proj_dec.2"),
-    (r"^t_proj_dec1", "t_proj_dec.3"),
+    (r"^t_proj_dec4", "t_proj_dec.3"),
+    (r"^t_proj_dec3", "t_proj_dec.2"),
+    (r"^t_proj_dec2", "t_proj_dec.1"),
+    (r"^t_proj_dec1", "t_proj_dec.0"),
 
     # encoders
     (r"^enc1_struc", "encoders_struc.0"),

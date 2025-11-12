@@ -8,7 +8,9 @@ from model_cache import DeepCache, CacheConfig
 
 
 def build_sampler(model_config, sampling_config, model):
-  if 'cache' in sampling_config:
+  if sampling_config['sampler'] == 'unet':
+    cache_config = None
+  elif 'cache' in sampling_config:
     intervals = {
       key: np.inf if val == 'inf' else val
       for key, val in sampling_config['cache']['intervals'].items()
