@@ -109,7 +109,13 @@ class GDPHMMSlicesDataset(Dataset):
     file, slice_idx = self.index_map[idx]
 
     dose_vol, dose_shm = self.cache.get(file.name + ':dose')
-    if dose_vol is None:
+    ptv_vol, ptv_shm = self.cache.get(file.name + ':ptv')
+    ct_vol, ct_shm = self.cache.get(file.name + ':ct')
+    oar_vol, oar_shm = self.cache.get(file.name + ':oar')
+    body_vol, body_shm = self.cache.get(file.name + ':body')
+
+    # If any volume is missing, load all from disk and cache them
+    if dose_vol is None or ptv_vol is None or ct_vol is None or oar_vol is None or body_vol is None:
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
 
       dose_vol = (vol['dose'] * vol['dose_scale'] * vol['Body']).astype(np.float32)
@@ -128,11 +134,6 @@ class GDPHMMSlicesDataset(Dataset):
       self.cache.put(file.name + ':ct', ct_vol)
       self.cache.put(file.name + ':oar', oar_vol)
       self.cache.put(file.name + ':body', body_vol)
-    else:
-      ptv_vol, ptv_shm = self.cache.get(file.name + ':ptv')
-      ct_vol, ct_shm = self.cache.get(file.name + ':ct')
-      oar_vol, oar_shm = self.cache.get(file.name + ':oar')
-      body_vol, body_shm = self.cache.get(file.name + ':body')
 
     sample = {
       'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
@@ -148,12 +149,9 @@ class GDPHMMSlicesDataset(Dataset):
       }
     }
 
-    if dose_shm:
-      dose_shm.close()
-      ptv_shm.close()
-      ct_shm.close()
-      oar_shm.close()
-      body_shm.close()
+    for shm in [dose_shm, ptv_shm, ct_shm, oar_shm, body_shm]:
+      if shm is not None:
+        shm.close()
 
     structure = torch.cat([sample['ct'], sample['ptv'], sample['oar']], dim=0)
 
