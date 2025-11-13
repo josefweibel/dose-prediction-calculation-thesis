@@ -4,7 +4,7 @@ from multiprocessing import Manager
 import numpy as np
 
 from config import read_model_config
-from data import GDPHMMSlicesDataset, SharedLRUCache, SharedCache
+from data import GDPHMMSlicesDataset, build_cache
 from evaluator import Evaluator
 from models import MambaUnet, remap_state_dict
 from utils.mp import detect_device, PrefetchLoader
@@ -36,10 +36,7 @@ class Sampler:
     self.device = detect_device(local_rank)
 
     self.manager = Manager()
-    if self.sampling_config['data_cache_size'] == 'inf':
-      shared_cache = SharedCache(self.manager)
-    else:
-      shared_cache = SharedLRUCache(self.sampling_config['data_cache_size'], self.manager)
+    shared_cache = build_cache(self.sampling_config, self.manager, 'cache')
 
     self.dataset = GDPHMMSlicesDataset(
       dataset_name=self.model_config['data']['dataset_name'],

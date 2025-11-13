@@ -8,7 +8,7 @@ from evaluator import build_metrics
 from results import SAMPLES_PATH
 from utils.mp import detect_device
 from config import read_model_config, read_sampling_config
-from data import GDPHMMSlicesDataset, SharedLRUCache, SharedCache
+from data import GDPHMMSlicesDataset, build_cache
 from metrics import BodyMaskedMetric, HomogeneityIndex, ChallengeMAE
 
 
@@ -26,10 +26,7 @@ class MetricsRecalculator:
     self.epoch = epoch
 
     self.manager = Manager()
-    if self.sampling_config['data_cache_size'] == 'inf':
-      shared_cache = SharedCache(self.manager)
-    else:
-      shared_cache = SharedLRUCache(self.sampling_config['data_cache_size'], self.manager)
+    shared_cache = build_cache(self.sampling_config, self.manager, 'cache')
 
     self.dataset = GDPHMMSlicesDataset(
       dataset_name=self.model_config['data']['dataset_name'],

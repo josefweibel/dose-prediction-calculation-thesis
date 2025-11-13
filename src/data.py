@@ -209,6 +209,16 @@ class PadToFixedSize:
     return f"{self.__class__.__name__}(target_size={self.target_size}, fill={self.fill}, padding_mode={self.padding_mode})"
 
 
+def build_cache(config, manager, split):
+  if config[f'{split}_cache_size'] == 'inf':
+    return SharedCache(manager)
+  elif config[f'{split}_cache_size'].endswith('B'):
+    size_bytes = int(config[f'{split}_cache_size'][:-1])
+    return SharedLRUCacheBytes(size_bytes, manager)
+  else:
+    return SharedLRUCache(config[f'{split}_cache_size'], manager)
+
+
 class SharedLRUCache:
   """
   Process-safe LRU cache backed by shared memory for heavy numpy arrays.
@@ -395,3 +405,119 @@ class SharedCache:
       self.data.clear()
       self.nbytes = 0
 
+class SharedLRUCacheBytes:
+  """
+  Process-safe LRU cache backed by shared memory, evicting by total bytes used.
+  Stores key → (SharedMemory.name, shape, dtype, nbytes).
+  Evicts least recently used entries until total size <= max_bytes.
+  """
+
+  def __init__(self, max_bytes, manager):
+    """
+    Args:
+        max_bytes (int): Maximum total cache size in bytes.
+        manager (multiprocessing.Manager): Shared manager for interprocess dict/list.
+    """
+    self.data = manager.dict()   # key -> (shm_name, shape, dtype, nbytes)
+    self.order = manager.list()  # track LRU keys
+    self.lock = Lock()
+    self.max_bytes = max_bytes
+    self.nbytes = 0
+
+  def get(self, key):
+    """Return (np.ndarray view, SharedMemory handle) or (None, None) if not cached."""
+    with self.lock:
+      if key not in self.data:
+        return None, None
+
+      shm_name, shape, dtype, _ = self.data[key]
+
+      # Update LRU order (move key to the end)
+      try:
+        self.order.remove(key)
+      except ValueError:
+        pass
+      self.order.append(key)
+
+    # Attach outside the lock to reduce contention
+    shm = shared_memory.SharedMemory(name=shm_name)
+    arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+    return arr, shm
+
+  def put(self, key, value: np.ndarray):
+    """
+    Store a numpy array in shared memory with LRU eviction by bytes.
+
+    Args:
+        key (str): cache key
+        value (np.ndarray): array to cache
+    """
+    assert isinstance(value, np.ndarray), "SharedLRUCacheBytes only supports numpy arrays"
+    v_nbytes = value.nbytes
+
+    with self.lock:
+      # Remove existing entry if present
+      if key in self.data:
+        shm_name, _, _, old_nbytes = self.data[key]
+        self._unlink_shared(shm_name)
+        try:
+          self.order.remove(key)
+        except ValueError:
+          pass
+        self.nbytes -= old_nbytes
+        del self.data[key]
+
+      # Evict until there is enough space
+      while self.nbytes + v_nbytes > self.max_bytes and len(self.order) > 0:
+        oldest = self.order.pop(0)
+        shm_name, _, _, old_nbytes = self.data.pop(oldest)
+        self._unlink_shared(shm_name)
+        self.nbytes -= old_nbytes
+
+      # If this one array is larger than the max cache size, skip caching
+      if v_nbytes > self.max_bytes:
+        return
+
+      # Allocate new shared memory
+      shm = shared_memory.SharedMemory(create=True, size=v_nbytes)
+      buf = np.ndarray(value.shape, dtype=value.dtype, buffer=shm.buf)
+      buf[:] = value[:]
+
+      self.data[key] = (shm.name, value.shape, value.dtype, v_nbytes)
+      self.order.append(key)
+      self.nbytes += v_nbytes
+
+      shm.close()  # keep alive in shared mem but close local handle
+
+  def _unlink_shared(self, shm_name):
+    """Helper to safely close and unlink a shared memory block."""
+    try:
+      shm = shared_memory.SharedMemory(name=shm_name)
+      shm.close()
+      shm.unlink()
+    except FileNotFoundError:
+      pass
+    except FileExistsError:
+      pass
+
+  def __contains__(self, key):
+    with self.lock:
+      return key in self.data
+
+  def __len__(self):
+    with self.lock:
+      return len(self.data)
+
+  def keys(self):
+    with self.lock:
+      return list(self.data.keys())
+
+  def clear(self):
+    """Remove and unlink all shared memory blocks."""
+    with self.lock:
+      for k, (shm_name, _, _, _) in list(self.data.items()):
+        self._unlink_shared(shm_name)
+
+      self.data.clear()
+      self.order[:] = []
+      self.nbytes = 0

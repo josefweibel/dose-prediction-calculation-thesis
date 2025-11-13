@@ -11,7 +11,7 @@ import copy
 import wandb
 from multiprocessing import Manager
 
-from data import GDPHMMSlicesDataset, SharedCache, SharedLRUCache
+from data import GDPHMMSlicesDataset, build_cache
 from models import MambaUnet
 from model_cache import DeepCache, CacheConfig
 from evaluator import Evaluator
@@ -83,11 +83,7 @@ class Trainer:
     self.device = detect_device(local_rank)
 
     self.manager = Manager()
-
-    if self.config['data']['train_cache_size'] == 'inf':
-      shared_train_cache = SharedCache(self.manager)
-    else:
-      shared_train_cache = SharedLRUCache(self.config['data']['train_cache_size'], self.manager)
+    shared_train_cache = build_cache(self.config['data'], self.manager, 'train')
 
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
@@ -103,10 +99,7 @@ class Trainer:
     if self.config['data'].get('val_on_train', False):
       val_dataset = train_dataset
     else:
-      if self.config['data']['valid_cache_size'] == 'inf':
-        shared_valid_cache = SharedCache(self.manager)
-      else:
-        shared_valid_cache = SharedLRUCache(self.config['data']['valid_cache_size'], self.manager)
+      shared_valid_cache = build_cache(self.config['data'], self.manager, 'valid')
 
       val_dataset = GDPHMMSlicesDataset(
         dataset_name=self.config['data']['dataset_name'],
