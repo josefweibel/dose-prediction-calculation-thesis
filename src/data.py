@@ -172,16 +172,17 @@ class GDPHMMSlicesDataset(Dataset):
     return self.cache.clear()
 
   def pack_for_cache(ct_vol, dose_vol, ptv_vol, oar_vol, body_vol):
-    ct_pack = ct_vol.astype(np.int16)
-    dose_pack = (dose_vol * 65535).astype(np.uint16)
-    ptv_pack = (ptv_vol * 65535).astype(np.uint16)
+    ct_pack = np.clip(ct_vol, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX).astype(np.float16)
+    dose_norm = (dose_vol - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
+    dose_pack = np.clip(dose_norm * 65535, 0, 65535).astype(np.uint16)
+    ptv_pack = np.clip(ptv_vol * 65535, 0, 65535).astype(np.uint16)
     oar_pack = oar_vol.astype(np.uint8)
     body_pack = body_vol.astype(np.uint8)
     return ct_pack, dose_pack, ptv_pack, oar_pack, body_pack
 
   def unpack_from_cache(ct_pack, dose_pack, ptv_pack, oar_pack, body_pack):
     ct_vol = ct_pack.astype(np.float32)
-    dose_vol = dose_pack.astype(np.float32) / 65535.0
+    dose_vol = (dose_pack.astype(np.float32) / 65535.0) * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
     ptv_vol = ptv_pack.astype(np.float32) / 65535.0
     oar_vol = oar_pack.astype(np.uint8)
     body_vol = body_pack.astype(np.uint8)
