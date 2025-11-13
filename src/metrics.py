@@ -141,18 +141,18 @@ class ChallengeMAE(Metric):
     Update the metric with new predictions and targets.
 
     Args:
-      preds: predicted doses, shape (batch_size, H, W, D)
-      target: reference doses, shape (batch_size, H, W, D)
-      ptv_high_mask: PTV_High structure mask, shape (batch_size, H, W, D)
-      body_mask: Body structure mask, shape (batch_size, H, W, D)
+      preds: predicted doses, shape (batch_size, 1, H, W)
+      target: reference doses, shape (batch_size, 1, H, W)
+      ptv_high_mask: PTV_High structure mask, shape (batch_size, H, W)
+      body_mask: Body structure mask, shape (batch_size, H, W)
     """
     batch_size = preds.shape[0]
 
     for i in range(batch_size):
-      pred = preds[i]
-      ref_dose = target[i]
-      ptv_mask = ptv_high_mask[i].to(torch.bool)
-      body = body_mask[i].to(torch.bool)
+      pred = preds[i, 0]  # Remove channel dimension: (H, W)
+      ref_dose = target[i, 0]  # Remove channel dimension: (H, W)
+      ptv_mask = ptv_high_mask[i].to(torch.bool)  # (H, W)
+      body = body_mask[i].to(torch.bool)  # (H, W)
 
       # Step 1: D97 normalization
       # Extract dose values within PTV_High
