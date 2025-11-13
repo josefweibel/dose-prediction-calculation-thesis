@@ -9,7 +9,7 @@ from results import SAMPLES_PATH
 from utils.mp import detect_device
 from config import read_model_config, read_sampling_config
 from data import GDPHMMSlicesDataset, SharedLRUCache, SharedCache
-from metrics import BodyMaskedMetric, HomogeneityIndex
+from metrics import BodyMaskedMetric, HomogeneityIndex, ChallengeMAE
 
 
 class MetricsRecalculator:
@@ -75,6 +75,8 @@ class MetricsRecalculator:
             metric.update(pred, target, body)
           elif isinstance(metric, HomogeneityIndex):
             metric.update(pred, target, structure[:, 1])
+          elif isinstance(metric, ChallengeMAE):
+            metric.update(pred, target, structure[:, 1], body[0])
           else:
             metric.update(pred, target)
 
