@@ -118,22 +118,30 @@ class GDPHMMSlicesDataset(Dataset):
     if dose_vol is None or ptv_vol is None or ct_vol is None or oar_vol is None or body_vol is None:
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
 
-      dose_vol = (vol['dose'] * vol['dose_scale'] * vol['Body']).astype(np.float32)
+      dose_vol = (vol['dose'] * vol['dose_scale'] * vol['Body'])
       oar_vol = np.stack(
         [vol[name].astype(np.uint8) if name in vol else np.zeros_like(vol['dose'].astype(np.uint8)) for name in GDPHMM_OAR],
         axis=0
-      ).astype(np.uint8)
+      )
       ptv_vol = np.maximum.reduce(
         [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
-      ).astype(np.float32)
-      ct_vol = vol['img'].astype(np.float32)
-      body_vol = vol['Body'].astype(np.uint8)
+      )
+      ct_vol = vol['img']
+      body_vol = vol['Body']
 
-      self.cache.put(file.name + ':dose', dose_vol)
-      self.cache.put(file.name + ':ptv', ptv_vol)
-      self.cache.put(file.name + ':ct', ct_vol)
-      self.cache.put(file.name + ':oar', oar_vol)
-      self.cache.put(file.name + ':body', body_vol)
+      ct_cache, dose_cache, ptv_cache, oar_cache, body_cache = self.pack_for_cache(
+        ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
+      )
+
+      self.cache.put(file.name + ':dose', dose_cache)
+      self.cache.put(file.name + ':ptv', ptv_cache)
+      self.cache.put(file.name + ':ct', ct_cache)
+      self.cache.put(file.name + ':oar', oar_cache)
+      self.cache.put(file.name + ':body', body_cache)
+    else:
+      ct_vol, dose_vol, ptv_vol, oar_vol, body_vol = self.unpack_from_cache(
+        ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
+      )
 
     sample = {
       'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
@@ -162,6 +170,22 @@ class GDPHMMSlicesDataset(Dataset):
 
   def finish(self):
     return self.cache.clear()
+
+  def pack_for_cache(ct_vol, dose_vol, ptv_vol, oar_vol, body_vol):
+    ct_pack = ct_vol.astype(np.int16)
+    dose_pack = (dose_vol * 65535).astype(np.uint16)
+    ptv_pack = (ptv_vol * 65535).astype(np.uint16)
+    oar_pack = oar_vol.astype(np.uint8)
+    body_pack = body_vol.astype(np.uint8)
+    return ct_pack, dose_pack, ptv_pack, oar_pack, body_pack
+
+  def unpack_from_cache(ct_pack, dose_pack, ptv_pack, oar_pack, body_pack):
+    ct_vol = ct_pack.astype(np.float32)
+    dose_vol = dose_pack.astype(np.float32) / 65535.0
+    ptv_vol = ptv_pack.astype(np.float32) / 65535.0
+    oar_vol = oar_pack.astype(np.uint8)
+    body_vol = body_pack.astype(np.uint8)
+    return ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
 
 class PadToFixedSize:
   def __init__(self, target_size, fill=0, padding_mode='constant'):
