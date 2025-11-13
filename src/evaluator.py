@@ -9,9 +9,9 @@ from pathlib import Path
 import pandas as pd
 import contextlib
 
-from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric
+from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE
 from model_sampler import build_sampler
-from data import GDPHMM_OAR 
+from data import GDPHMM_OAR
 
 
 def build_metrics(dataset, device):
@@ -35,28 +35,11 @@ def build_metrics(dataset, device):
     'rmse_body': BodyMaskedMetric(MeanSquaredError(squared=False, sync_on_compute=False), sync_on_compute=False),
     'psnr_body': BodyMaskedMetric(PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False), sync_on_compute=False),
     'dose_score_body': BodyMaskedMetric(DoseScore(sync_on_compute=False), sync_on_compute=False),
+
+    'mae_challenge': ChallengeMAE(sync_on_compute=False),
   }
 
   return {k: v.to(device) for k, v in metrics.items()}
-
-
-def evaluate(metrics, pred, target, structure, body):
-  sample_row = {
-    'file_name': info['file_name'][i],
-    'slice_index': info['index'][i].item(),
-    'duration': duration / target.shape[0]
-  }
-
-  for name, metric in metrics.items():
-    metric.reset()
-
-    if isinstance(metric, BodyMaskedMetric):
-      metric.update(pred, target, body)
-    elif isinstance(metric, HomogeneityIndex):
-      metric.update(pred, target, structure[:, 1])
-    else:
-      metric.update(pred, target)
-
 
 
 class Evaluator:
@@ -117,6 +100,8 @@ class Evaluator:
               metric.update(sample_pred, sample_target, body[i:i+1])
             elif isinstance(metric, HomogeneityIndex):
               metric.update(sample_pred, sample_target, structure[i:i+1, 1])
+            elif isinstance(metric, ChallengeMAE):
+              metric.update(sample_pred, sample_target, structure[i:i+1, 1], body[i:i+1])
             else:
               metric.update(sample_pred, sample_target)
 

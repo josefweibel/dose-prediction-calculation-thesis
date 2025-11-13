@@ -1,6 +1,6 @@
 import torch
 from torchmetrics import Metric
-import numpy as np
+
 
 class DoseScore(Metric):
   def __init__(self, *args, **kwargs):
@@ -114,3 +114,79 @@ class BodyMaskedMetric(Metric):
 
   def compute(self):
     return self.base_metric.compute()
+
+
+class ChallengeMAE(Metric):
+  """
+  MAE metric following the exact implementation from:
+  https://github.com/RiqiangGao/GDP-HMM_AAPMChallenge/blob/main/evaluation.ipynb
+
+  Key features:
+  1. D97 normalization: normalizes dose using the 3rd percentile (D97) of the PTV_High structure
+  2. 5 Gy isodose masking: only computes MAE in regions where either reference or prediction > 5 Gy
+  3. Body masking: only considers voxels within the body contour
+  """
+  def __init__(self, prescribed_dose: float = 70.0, *args, **kwargs):
+    """
+    Args:
+      prescribed_dose: The prescribed dose to the PTV_High structure (default: 70 Gy)
+    """
+    super().__init__(*args, **kwargs)
+    self.prescribed_dose = prescribed_dose
+    self.add_state("total_error", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, ptv_high_mask: torch.Tensor, body_mask: torch.Tensor):
+    """
+    Update the metric with new predictions and targets.
+
+    Args:
+      preds: predicted doses, shape (batch_size, H, W, D)
+      target: reference doses, shape (batch_size, H, W, D)
+      ptv_high_mask: PTV_High structure mask, shape (batch_size, H, W, D)
+      body_mask: Body structure mask, shape (batch_size, H, W, D)
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred = preds[i]
+      ref_dose = target[i]
+      ptv_mask = ptv_high_mask[i].to(torch.bool)
+      body = body_mask[i].to(torch.bool)
+
+      # Step 1: D97 normalization
+      # Extract dose values within PTV_High
+      ptv_doses = ref_dose[ptv_mask]
+
+      if ptv_doses.numel() == 0:
+        continue
+
+      # Compute D97 (3rd percentile of dose within PTV_High)
+      d97 = torch.quantile(ptv_doses, 1 - 0.97)
+
+      # Compute normalization scale: prescribed_dose / D97
+      norm_scale = self.prescribed_dose / (d97 + 1e-5)
+
+      # Apply normalization to both reference and prediction
+      ref_dose_normalized = ref_dose * norm_scale
+      pred_normalized = pred * norm_scale
+
+      # Step 2: Create 5 Gy isodose mask
+      # Mask includes regions where either reference or prediction exceeds 5 Gy, within body
+      isodose_5gy_mask = ((ref_dose_normalized > 5) | (pred_normalized > 5)) & body
+
+      # Step 3: Compute MAE within the masked region
+      if isodose_5gy_mask.sum() == 0:
+        continue
+
+      diff = torch.abs(ref_dose_normalized - pred_normalized)
+      mae = diff[isodose_5gy_mask].mean()
+
+      self.total_error += mae
+      self.count += 1
+
+  def compute(self):
+    """Compute the average MAE across all samples."""
+    if self.count == 0:
+      return torch.tensor(0.0)
+    return self.total_error / self.count
