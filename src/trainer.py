@@ -160,24 +160,24 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    if 'diffusion' in self.config:
+    if 'mednext' in self.config:
+      self.net_model = build_mednext_model(self.config, train_dataset.n_structures).to(self.device)
+    else:
       self.net_model = MambaUnet(
         img_size=self.config['data']['img_size'],
         in_struc_channels=train_dataset.n_structures,
         num_layers=self.config['diffusion'].get('arch', {}).get('num_layers', 4),
       ).to(self.device)
 
+    if 'diffusion' in self.config:
       self.model = DiffusionModelTrainerModule(
         denoising_model=self.net_model,
         beta_1=self.config['diffusion']['beta_1'],
         beta_T=self.config['diffusion']['beta_T'],
         T=self.config['diffusion']['T']
       ).to(self.device)
-    elif 'mednext' in self.config:
-      self.net_model = build_mednext_model(self.config, train_dataset.n_structures).to(self.device)
-      self.model = MedNeXtUnetTrainerModule(self.net_model).to(self.device)
     else:
-      raise ValueError('Unknown model type in config')
+      self.model = MedNeXtUnetTrainerModule(self.net_model).to(self.device)
 
     self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
