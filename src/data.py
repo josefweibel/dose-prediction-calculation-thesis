@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms as T
 from PIL import Image
 import pandas as pd
-from multiprocessing import shared_memory, Lock
+from multiprocessing import shared_memory
 
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
 
@@ -254,7 +254,7 @@ class SharedLRUCache:
   def __init__(self, max_size, manager):
     self.data = manager.dict()   # key -> (shm_name, shape, dtypei, nbytes)
     self.order = manager.list()  # track LRU
-    self.lock = Lock()
+    self.lock = manager.Lock()
     self.max_size = max_size
     self.nbytes = manager.Value('L', 0)  # shared counter (unsigned long)
 
@@ -359,7 +359,7 @@ class SharedCache:
 
   def __init__(self, manager):
     self.data = manager.dict()   # key -> (shm_name, shape, dtype, nbytes)
-    self.lock = Lock()
+    self.lock = manager.Lock()
     self.nbytes = manager.Value('L', 0)  # shared counter (unsigned long)
 
   def get(self, key):
@@ -445,7 +445,7 @@ class SharedLRUCacheBytes:
     """
     self.data = manager.dict()   # key -> (shm_name, shape, dtype, nbytes)
     self.order = manager.list()  # track LRU keys
-    self.lock = Lock()
+    self.lock = manager.Lock()
     self.max_bytes = max_bytes
     self.nbytes = manager.Value('L', 0)  # shared counter (unsigned long)
 
