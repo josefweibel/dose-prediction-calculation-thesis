@@ -171,7 +171,7 @@ class GDPHMMSlicesDataset(Dataset):
   def finish(self):
     return self.cache.clear()
 
-  def pack_for_cache(ct_vol, dose_vol, ptv_vol, oar_vol, body_vol):
+  def pack_for_cache(self, ct_vol, dose_vol, ptv_vol, oar_vol, body_vol):
     ct_pack = np.clip(ct_vol, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX).astype(np.float16)
     dose_norm = (dose_vol - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
     dose_pack = np.clip(dose_norm * 65535, 0, 65535).astype(np.uint16)
@@ -180,7 +180,7 @@ class GDPHMMSlicesDataset(Dataset):
     body_pack = body_vol.astype(np.uint8)
     return ct_pack, dose_pack, ptv_pack, oar_pack, body_pack
 
-  def unpack_from_cache(ct_pack, dose_pack, ptv_pack, oar_pack, body_pack):
+  def unpack_from_cache(self, ct_pack, dose_pack, ptv_pack, oar_pack, body_pack):
     ct_vol = ct_pack.astype(np.float32)
     dose_vol = (dose_pack.astype(np.float32) / 65535.0) * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
     ptv_vol = ptv_pack.astype(np.float32) / 65535.0
@@ -237,7 +237,7 @@ class PadToFixedSize:
 def build_cache(config, manager, split):
   if config[f'{split}_cache_size'] == 'inf':
     return SharedCache(manager)
-  elif config[f'{split}_cache_size'].endswith('B'):
+  elif isinstance(config[f'{split}_cache_size'], str) and config[f'{split}_cache_size'].endswith('B'):
     size_bytes = int(config[f'{split}_cache_size'][:-1])
     return SharedLRUCacheBytes(size_bytes, manager)
   else:

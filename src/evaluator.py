@@ -101,7 +101,7 @@ class Evaluator:
             elif isinstance(metric, HomogeneityIndex):
               metric.update(sample_pred, sample_target, structure[i:i+1, 1])
             elif isinstance(metric, ChallengeMAE):
-              metric.update(sample_pred, sample_target, structure[i:i+1, 1], body[i:i+1])
+              metric.update(sample_pred, sample_target, structure[i:i+1, 1], body[i:i+1][0])
             else:
               metric.update(sample_pred, sample_target)
 
