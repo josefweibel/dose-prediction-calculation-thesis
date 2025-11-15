@@ -71,7 +71,7 @@ class MedNeXtUnetTrainerModule(nn.Module):
 
 
 class Trainer:
-  def __init__(self, model_config, n_epochs=None, rank=None, world_size=None, local_rank=None):
+  def __init__(self, model_config, n_epochs=None, rank=None, world_size=None, local_rank=None, manager=None):
     self.name = model_config["name"]
     self.config = model_config
     self.rank = rank
@@ -82,7 +82,7 @@ class Trainer:
 
     self.device = detect_device(local_rank)
 
-    self.manager = Manager()
+    self.manager = manager if manager is not None else Manager()
     shared_train_cache = build_cache(self.config['data'], self.manager, 'train')
 
     train_dataset = GDPHMMSlicesDataset(

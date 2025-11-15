@@ -11,6 +11,7 @@ import atexit
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from multiprocessing import Manager
 
 from config import read_model_config
 from trainer import Trainer
@@ -32,6 +33,9 @@ if __name__ == '__main__':
   print()
 
   mp.set_start_method('spawn', force=True)
+
+  # Create shared manager before spawning processes
+  manager = Manager()
 
   if args.distributed:
     rank = int(os.environ["SLURM_PROCID"])
@@ -56,7 +60,7 @@ if __name__ == '__main__':
     dist.barrier()
 
     try:
-      trainer = Trainer(config, n_epochs=args.epochs, rank=rank, world_size=world_size, local_rank=local_rank)
+      trainer = Trainer(config, n_epochs=args.epochs, rank=rank, world_size=world_size, local_rank=local_rank, manager=manager)
 
       def cleanup():
         print('cleanup of trainer tried')
@@ -82,7 +86,7 @@ if __name__ == '__main__':
     print(f'Training with a single process')
     print()
 
-    trainer = Trainer(config, n_epochs=args.epochs)
+    trainer = Trainer(config, n_epochs=args.epochs, manager=manager)
 
     def cleanup():
       print('cleanup of trainer tried')
