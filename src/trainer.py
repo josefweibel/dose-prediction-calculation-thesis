@@ -9,7 +9,6 @@ from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
 from tqdm import tqdm
 import copy
 import wandb
-from multiprocessing import Manager
 
 from data import GDPHMMSlicesDataset, build_cache
 from models import MambaUnet
@@ -71,7 +70,7 @@ class MedNeXtUnetTrainerModule(nn.Module):
 
 
 class Trainer:
-  def __init__(self, model_config, n_epochs=None, rank=None, world_size=None, local_rank=None, manager=None):
+  def __init__(self, model_config, cache, n_epochs=None, rank=None, world_size=None, local_rank=None):
     self.name = model_config["name"]
     self.config = model_config
     self.rank = rank
@@ -82,16 +81,13 @@ class Trainer:
 
     self.device = detect_device(local_rank)
 
-    self.manager = manager if manager is not None else Manager()
-    shared_train_cache = build_cache(self.config['data'], self.manager, 'train')
-
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
       split='train',
       img_size=self.config['data']['img_size'],
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
       skip=self.config['data']['train_skip'] if 'train_skip' in self.config['data'] else 0,
-      cache=shared_train_cache,
+      cache=cache,
     )
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
@@ -99,15 +95,13 @@ class Trainer:
     if self.config['data'].get('val_on_train', False):
       val_dataset = train_dataset
     else:
-      shared_valid_cache = build_cache(self.config['data'], self.manager, 'valid')
-
       val_dataset = GDPHMMSlicesDataset(
         dataset_name=self.config['data']['dataset_name'],
         split='valid',
         img_size=self.config['data']['img_size'],
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
         skip=self.config['data']['valid_skip'] if 'valid_skip' in self.config['data'] else 0,
-        cache=shared_valid_cache,
+        cache=cache,
       )
     if self.is_main_process:
       print('Validation dataset size', len(val_dataset))
