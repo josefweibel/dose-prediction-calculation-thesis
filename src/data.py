@@ -256,7 +256,7 @@ class SharedLRUCache:
     self.order = manager.list()  # track LRU
     self.lock = Lock()
     self.max_size = max_size
-    self.nbytes = 0
+    self.nbytes = manager.Value('L', 0)  # shared counter (unsigned long)
 
   def get(self, key):
     with self.lock:
@@ -297,7 +297,7 @@ class SharedLRUCache:
         except FileNotFoundError:
           pass
         self.order.remove(key)
-        self.nbytes -= nbytes
+        self.nbytes.value -= nbytes
 
       elif len(self.data) > 0 and len(self.data) >= self.max_size:
         # evict oldest
@@ -310,7 +310,7 @@ class SharedLRUCache:
         except FileNotFoundError:
           pass
 
-        self.nbytes -= nbytes
+        self.nbytes.value -= nbytes
 
       # allocate new shared block
       shm = shared_memory.SharedMemory(create=True, size=value.nbytes)
@@ -320,7 +320,7 @@ class SharedLRUCache:
       nbytes = value.nbytes
       self.data[key] = (shm.name, value.shape, value.dtype, nbytes)
       self.order.append(key)
-      self.nbytes += nbytes
+      self.nbytes.value += nbytes
 
       shm.close()  # keep the block alive, but close handle here
 
@@ -360,7 +360,7 @@ class SharedCache:
   def __init__(self, manager):
     self.data = manager.dict()   # key -> (shm_name, shape, dtype, nbytes)
     self.lock = Lock()
-    self.nbytes = 0
+    self.nbytes = manager.Value('L', 0)  # shared counter (unsigned long)
 
   def get(self, key):
     with self.lock:
@@ -392,7 +392,7 @@ class SharedCache:
           shm.unlink()
         except FileNotFoundError:
           pass
-        self.nbytes -= nbytes
+        self.nbytes.value -= nbytes
 
       # allocate new block
       shm = shared_memory.SharedMemory(create=True, size=value.nbytes)
@@ -401,7 +401,7 @@ class SharedCache:
 
       nbytes = value.nbytes
       self.data[key] = (shm.name, value.shape, value.dtype, nbytes)
-      self.nbytes += nbytes
+      self.nbytes.value += nbytes
 
       shm.close()  # keep alive in shared mem
 
@@ -428,7 +428,7 @@ class SharedCache:
           pass
 
       self.data.clear()
-      self.nbytes = 0
+      self.nbytes.value = 0
 
 class SharedLRUCacheBytes:
   """
@@ -447,7 +447,7 @@ class SharedLRUCacheBytes:
     self.order = manager.list()  # track LRU keys
     self.lock = Lock()
     self.max_bytes = max_bytes
-    self.nbytes = 0
+    self.nbytes = manager.Value('L', 0)  # shared counter (unsigned long)
 
   def get(self, key):
     """Return (np.ndarray view, SharedMemory handle) or (None, None) if not cached."""
@@ -489,15 +489,15 @@ class SharedLRUCacheBytes:
           self.order.remove(key)
         except ValueError:
           pass
-        self.nbytes -= old_nbytes
+        self.nbytes.value -= old_nbytes
         del self.data[key]
 
       # Evict until there is enough space
-      while self.nbytes + v_nbytes > self.max_bytes and len(self.order) > 0:
+      while self.nbytes.value + v_nbytes > self.max_bytes and len(self.order) > 0:
         oldest = self.order.pop(0)
         shm_name, _, _, old_nbytes = self.data.pop(oldest)
         self._unlink_shared(shm_name)
-        self.nbytes -= old_nbytes
+        self.nbytes.value -= old_nbytes
 
       # If this one array is larger than the max cache size, skip caching
       if v_nbytes > self.max_bytes:
@@ -510,7 +510,7 @@ class SharedLRUCacheBytes:
 
       self.data[key] = (shm.name, value.shape, value.dtype, v_nbytes)
       self.order.append(key)
-      self.nbytes += v_nbytes
+      self.nbytes.value += v_nbytes
 
       shm.close()  # keep alive in shared mem but close local handle
 
@@ -545,4 +545,4 @@ class SharedLRUCacheBytes:
 
       self.data.clear()
       self.order[:] = []
-      self.nbytes = 0
+      self.nbytes.value = 0
