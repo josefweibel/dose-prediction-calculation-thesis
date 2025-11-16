@@ -6,6 +6,7 @@ from torchvision import transforms as T
 from PIL import Image
 import pandas as pd
 from multiprocessing import shared_memory
+import time
 
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
 
@@ -449,70 +450,132 @@ class SharedLRUCacheBytes:
     self.max_bytes = max_bytes
     self.nbytes = manager.Value('L', 0)  # shared counter (unsigned long)
 
-  def get(self, key):
-    """Return (np.ndarray view, SharedMemory handle) or (None, None) if not cached."""
-    with self.lock:
-      if key not in self.data:
+  def get(self, key, wait=True, timeout=5.0, poll_interval=0.01):
+    """
+    Return (np.ndarray view, SharedMemory handle) or (None, None).
+
+    If the entry is PENDING and wait==True, this will wait up to `timeout`
+    seconds (with small sleeps) for the creator to finish and replace the
+    PENDING token with the real metadata. If timeout expires, returns (None, None).
+    """
+    start = time.time()
+
+    while True:
+      # Read metadata snapshot
+      meta = self.data.get(key, None)
+      if meta is None:
         return None, None
 
-      shm_name, shape, dtype, _ = self.data[key]
+      if meta[0] == self.PENDING[0]:
+        # somebody reserved it but not completed yet
+        if not wait:
+          return None, None
+        elapsed = time.time() - start
+        if elapsed >= timeout:
+          return None, None
+        time.sleep(poll_interval)
+        # retry
+        continue
 
-      # Update LRU order (move key to the end)
+      # meta is real metadata tuple (shm_name, shape, dtype, nbytes)
+      shm_name, shape, dtype, _ = meta
+
+      # Update LRU ordering (best-effort). We use a lock because order is a manager list.
       try:
-        self.order.remove(key)
-      except ValueError:
+        with self.lock:
+          # move to end
+          try:
+            self.order.remove(key)
+          except ValueError:
+            pass
+          self.order.append(key)
+      except Exception:
+        # if lock fails, ignore LRU update (non-fatal)
         pass
-      self.order.append(key)
 
-    # Attach outside the lock to reduce contention
-    shm = shared_memory.SharedMemory(name=shm_name)
-    arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-    return arr, shm
+      # Attach outside of critical section
+      try:
+        shm = shared_memory.SharedMemory(name=shm_name)
+        arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+        return arr, shm
+      except FileNotFoundError:
+        # race: creator unlinked before we attached; treat as miss and retry
+        return None, None
 
-  def put(self, key, value: np.ndarray):
+  def put(self, key, value: np.ndarray, wait_timeout=5.0):
     """
-    Store a numpy array in shared memory with LRU eviction by bytes.
+    Atomically create the SharedMemory only once per key using a manager-reservation
+    token. If another process created it first, this returns without duplicating memory.
 
-    Args:
-        key (str): cache key
-        value (np.ndarray): array to cache
+    This function will:
+      - set a PENDING token if key not present
+      - if set PENDING successfully, create shm and store metadata
+      - if someone else already created it, attach and return
     """
+
     assert isinstance(value, np.ndarray), "SharedLRUCacheBytes only supports numpy arrays"
-    v_nbytes = value.nbytes
+    v_nbytes = int(value.nbytes)
 
-    with self.lock:
-      # Remove existing entry if present
-      if key in self.data:
-        shm_name, _, _, old_nbytes = self.data[key]
-        self._unlink_shared(shm_name)
-        try:
-          self.order.remove(key)
-        except ValueError:
-          pass
-        self.nbytes.value -= old_nbytes
-        del self.data[key]
+    # quick reject if too big for cache at all
+    if v_nbytes > self.max_bytes:
+      return
 
-      # Evict until there is enough space
-      while self.nbytes.value + v_nbytes > self.max_bytes and len(self.order) > 0:
-        oldest = self.order.pop(0)
-        shm_name, _, _, old_nbytes = self.data.pop(oldest)
-        self._unlink_shared(shm_name)
-        self.nbytes.value -= old_nbytes
+    # Attempt to atomically reserve the key using setdefault semantics.
+    # Only the process that succeeds in inserting the PENDING tuple proceeds to create SHM.
+    prev = self.data.setdefault(key, self.PENDING)
+    if prev != self.PENDING:
+      # Someone else is creating it (prev == PENDING)
+      # or it's already done (prev != PENDING)
+      # In both cases: **skip immediately**
+      return
 
-      # If this one array is larger than the max cache size, skip caching
-      if v_nbytes > self.max_bytes:
-        return
+    # If we get here we either inserted PENDING ourselves (we are creator)
+    # or we recycled after a race and now hold the pending slot.
+    try:
+      # Evict under the lock to maintain nbytes and order consistency
+      with self.lock:
+        # evict until space
+        while self.nbytes.value + v_nbytes > self.max_bytes and len(self.order) > 0:
+          oldest = self.order.pop(0)
+          meta = self.data.pop(oldest, None)
+          if meta and meta[0] != self.PENDING[0]:
+            shm_name, _, _, old_nbytes = meta
+            try:
+              shm_old = shared_memory.SharedMemory(name=shm_name)
+              shm_old.close()
+              shm_old.unlink()
+            except FileNotFoundError:
+              pass
+            self.nbytes.value -= int(old_nbytes)
 
-      # Allocate new shared memory
-      shm = shared_memory.SharedMemory(create=True, size=v_nbytes)
-      buf = np.ndarray(value.shape, dtype=value.dtype, buffer=shm.buf)
-      buf[:] = value[:]
+        # re-check: maybe someone else wrote this key while we were evicting
+        cur = self.data.get(key)
+        if cur is not None and cur[0] != self.PENDING[0]:
+          # somebody else created it; clean up our PENDING if still present
+          return
 
-      self.data[key] = (shm.name, value.shape, value.dtype, v_nbytes)
-      self.order.append(key)
-      self.nbytes.value += v_nbytes
+        # create shared memory block and copy data
+        shm = shared_memory.SharedMemory(create=True, size=v_nbytes)
+        buf = np.ndarray(value.shape, dtype=value.dtype, buffer=shm.buf)
+        buf[:] = value[:]
 
-      shm.close()  # keep alive in shared mem but close local handle
+        # store metadata (overwrite PENDING)
+        self.data[key] = (shm.name, value.shape, value.dtype, v_nbytes)
+        self.order.append(key)
+        self.nbytes.value += v_nbytes
+
+        # close local handle; segment remains in /dev/shm and can be attached by others
+        shm.close()
+    except Exception:
+      # on any error remove the PENDING so others can try
+      with self.lock:
+        meta = self.data.get(key)
+        if meta and meta[0] == self.PENDING[0]:
+          try:
+            del self.data[key]
+          except Exception:
+            pass
+      raise
 
   def _unlink_shared(self, shm_name):
     """Helper to safely close and unlink a shared memory block."""
@@ -526,22 +589,21 @@ class SharedLRUCacheBytes:
       pass
 
   def __contains__(self, key):
-    with self.lock:
-      return key in self.data
+    return key in self.data
 
   def __len__(self):
-    with self.lock:
-      return len(self.data)
+    return len(self.data)
 
   def keys(self):
-    with self.lock:
-      return list(self.data.keys())
+    return list(self.data.keys())
 
   def clear(self):
     """Remove and unlink all shared memory blocks."""
     with self.lock:
-      for k, (shm_name, _, _, _) in list(self.data.items()):
-        self._unlink_shared(shm_name)
+      for k, meta in list(self.data.items()):
+        shm_name = meta[0]
+        if shm_name and shm_name != self.PENDING[0]:
+          self._unlink_shared(shm_name)
 
       self.data.clear()
       self.order[:] = []
