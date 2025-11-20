@@ -13,6 +13,7 @@ lr_scheduler:
   lr: 0.0001
 
 mednext:
+  id: medium
   kernel_size: 3
   deep_supervision: false
 
@@ -27,4 +28,4 @@ ema_decay: 0.9999
 eval_interval: 10
 checkpoint_interval: 10
 
-validation_sampler: unet 
+validation_sampler: unet
