@@ -12,14 +12,9 @@ lr_scheduler:
   type: cosine_annealing
   lr: 0.0001
 
-diffusion:
-  beta_1: 0.0001
-  beta_T: 0.02
-  T: 1000
-
-mednext:
-  kernel_size: 3
-  deep_supervision: false
+c3d:
+  use_2d: true
+  alpha: 0.5
 
 mixed_precision: false
 num_workers: 4
@@ -32,4 +27,4 @@ ema_decay: 0.9999
 eval_interval: 10
 checkpoint_interval: 10
 
-validation_sampler: ddpm-1000
+validation_sampler: unet

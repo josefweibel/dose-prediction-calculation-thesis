@@ -18,6 +18,7 @@ from config import read_sampling_config
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
 from mednext import build_mednext_model
+from c3d_model import C3D, C3D_2D, C3DLoss
 
 def extract(v, t, x_shape):
   """
@@ -67,6 +68,19 @@ class MedNeXtUnetTrainerModule(nn.Module):
     output = self.model(condition)
     output = F.relu(output)
     return F.l1_loss(output, x, reduction='mean')
+
+
+class C3DTrainerModule(nn.Module):
+  def __init__(self, model, alpha=0.5):
+    super().__init__()
+
+    self.model = model
+    self.loss_fn = C3DLoss(alpha=alpha)
+
+  def forward(self, x, condition):
+    # C3D model returns (output_a, output_b) during training
+    output_a, output_b = self.model(condition)
+    return self.loss_fn(output_a, output_b, x)
 
 
 class Trainer:
@@ -147,7 +161,21 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    if 'mednext' in self.config:
+    if 'c3d' in self.config:
+      # Check if we should use 2D or 3D version
+      use_2d = self.config['c3d'].get('use_2d', True)  # Default to 2D for compatibility
+
+      if use_2d:
+        self.net_model = C3D_2D(
+          in_channels=train_dataset.n_structures,
+          out_channels=1
+        ).to(self.device)
+      else:
+        self.net_model = C3D(
+          in_channels=train_dataset.n_structures,
+          out_channels=1
+        ).to(self.device)
+    elif 'mednext' in self.config:
       self.net_model = build_mednext_model(self.config, train_dataset.n_structures).to(self.device)
     else:
       self.net_model = MambaUnet(
@@ -163,6 +191,9 @@ class Trainer:
         beta_T=self.config['diffusion']['beta_T'],
         T=self.config['diffusion']['T']
       ).to(self.device)
+    elif 'c3d' in self.config:
+      alpha = self.config['c3d'].get('alpha', 0.5)
+      self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
     else:
       self.model = MedNeXtUnetTrainerModule(self.net_model).to(self.device)
 
