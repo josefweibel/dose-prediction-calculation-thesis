@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import contextlib
 
-from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE
+from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE, VarianceOfLaplacian
 from model_sampler import build_sampler
 from data import GDPHMM_OAR
 
@@ -37,6 +37,14 @@ def build_metrics(dataset, device):
     'dose_score_body': BodyMaskedMetric(DoseScore(sync_on_compute=False), sync_on_compute=False),
 
     'mae_challenge': ChallengeMAE(sync_on_compute=False),
+
+    'var_laplacian_pred': VarianceOfLaplacian(mode='pred', sync_on_compute=False),
+    'var_laplacian_target': VarianceOfLaplacian(mode='target', sync_on_compute=False),
+    'var_laplacian_diff': VarianceOfLaplacian(mode='diff', sync_on_compute=False),
+    'var_laplacian_pred_body': BodyMaskedMetric(VarianceOfLaplacian(mode='pred', sync_on_compute=False), sync_on_compute=False),
+    'var_laplacian_target_body': BodyMaskedMetric(VarianceOfLaplacian(mode='target', sync_on_compute=False), sync_on_compute=False),
+    'var_laplacian_diff_body': BodyMaskedMetric(VarianceOfLaplacian(mode='diff', sync_on_compute=False), sync_on_compute=False),
+
   }
 
   return {k: v.to(device) for k, v in metrics.items()}

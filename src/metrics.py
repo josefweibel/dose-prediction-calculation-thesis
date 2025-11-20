@@ -190,3 +190,92 @@ class ChallengeMAE(Metric):
     if self.count == 0:
       return torch.tensor(0.0)
     return self.total_error / self.count
+
+
+class VarianceOfLaplacian(Metric):
+  """
+  Variance of Laplacian metric for measuring image sharpness/blurriness.
+
+  Higher values indicate sharper images, while lower values indicate blurrier images.
+  This metric applies a Laplacian filter to the image and computes the variance
+  of the resulting filtered image.
+  """
+  def __init__(self, mode: str = "preds", *args, **kwargs):
+    """
+    Args:
+      mode: Which image to compute variance for. Options:
+        - "preds": compute variance of Laplacian for predictions
+        - "target": compute variance of Laplacian for targets
+        - "diff": compute variance of Laplacian for the difference (preds - target)
+    """
+    super().__init__(*args, **kwargs)
+    if mode not in ["preds", "target", "diff"]:
+      raise ValueError(f"mode must be 'preds', 'target', or 'diff', got '{mode}'")
+    self.mode = mode
+
+    self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor):
+    """
+    Update the metric with new predictions and targets.
+
+    Args:
+      preds: predicted images, shape (batch_size, channels, H, W) or (batch_size, H, W)
+      target: target images, shape (batch_size, channels, H, W) or (batch_size, H, W)
+    """
+    # Handle both (B, C, H, W) and (B, H, W) shapes
+    if preds.dim() == 3:
+      preds = preds.unsqueeze(1)  # Add channel dimension
+    if target.dim() == 3:
+      target = target.unsqueeze(1)  # Add channel dimension
+
+    batch_size = preds.shape[0]
+
+    # Define 3x3 Laplacian kernel
+    # Standard Laplacian: [[0, 1, 0], [1, -4, 1], [0, 1, 0]]
+    laplacian_kernel = torch.tensor([[0, 1, 0],
+                                      [1, -4, 1],
+                                      [0, 1, 0]],
+                                     dtype=preds.dtype,
+                                     device=preds.device)
+    laplacian_kernel = laplacian_kernel.view(1, 1, 3, 3)
+
+    for i in range(batch_size):
+      pred_img = preds[i]  # (C, H, W)
+      target_img = target[i]  # (C, H, W)
+
+      # Select image based on mode
+      if self.mode == "preds":
+        img = pred_img
+      elif self.mode == "target":
+        img = target_img
+      else:  # mode == "diff"
+        img = pred_img - target_img
+
+      # Apply Laplacian to each channel and average
+      channel_vars = []
+      for c in range(img.shape[0]):
+        channel = img[c:c+1].unsqueeze(0)  # (1, 1, H, W)
+
+        # Apply convolution with Laplacian kernel
+        laplacian = torch.nn.functional.conv2d(
+          channel,
+          laplacian_kernel,
+          padding=1
+        )
+
+        # Compute variance of the Laplacian
+        var = torch.var(laplacian)
+        channel_vars.append(var)
+
+      # Average variance across channels
+      mean_var = torch.stack(channel_vars).mean()
+      self.total += mean_var
+      self.count += 1
+
+  def compute(self):
+    """Compute the average Variance of Laplacian across all samples."""
+    if self.count == 0:
+      return torch.tensor(0.0)
+    return self.total / self.count
