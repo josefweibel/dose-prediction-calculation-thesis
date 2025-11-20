@@ -88,15 +88,22 @@ class BaseResults:
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 5))
 
-    grouped = self.slice_metrics.groupby('slice_index')[metric]
-    means = grouped.mean()
-    stds = grouped.std()
+    # Plot one line per result in results_list
+    for result, label in zip(self.results_list, self.result_labels):
+      grouped = result.slice_metrics.groupby('slice_index')[metric]
+      means = grouped.mean()
+      stds = grouped.std()
 
-    ax.errorbar(means.index, means.values, yerr=stds.values, fmt='o', ecolor='red', capsize=3)
+      ax.errorbar(means.index, means.values, yerr=stds.values, fmt='o-', capsize=3, label=label, alpha=0.7)
+
     dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
-    ax.set_title(f'{METRIC_ABBRS.get(metric, metric)} vs Slice Index (Mean ± SD) for Model {self.model_name} \n{dir_symbol} is better')
+    ax.set_title(f'{METRIC_ABBRS.get(metric, metric)} vs Slice Index (Mean ± SD) \n{dir_symbol} is better')
     ax.set_xlabel('Slice Index')
     ax.set_ylabel(METRC_LABELS.get(metric, metric))
+
+    # Only show legend if there are multiple results
+    if len(self.results_list) > 1:
+      ax.legend()
 
     return ax
 
@@ -104,48 +111,60 @@ class BaseResults:
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
-    y_orig_all = []
-    y_pred_all = []
-    y_orig_means = []
-    y_pred_means = []
-
     bins = np.linspace(0, GDPHMM_DOSE_MAX, 200)
+    colors = cycle(plt.cm.tab10.colors)
 
-    for file_name in self.slice_metrics['file_name'].unique():
-      sample_results = self.for_sample(file_name.replace('.npz', ''))
+    # Pre-load all original volumes once (common across all models)
+    first_result = self.results_list[0]
+    orig_volumes_cache = {}  # file_name -> (structure, original_dose)
+
+    y_orig_all = []
+    y_orig_means = []
+    for file_name in first_result.slice_metrics['file_name'].unique():
+      sample_results = first_result.for_sample(file_name.replace('.npz', ''))
       structure, original_dose = sample_results.load_orig_volume()
-      pred_dose = sample_results.load_pred_volume()
+      orig_volumes_cache[file_name] = (structure, original_dose)
 
       mask = structure[structure_index]
       x, y_orig = compute_dvh(original_dose, mask, bins)
-      _, y_pred = compute_dvh(pred_dose, mask, bins)
       y_orig_all.append(y_orig)
-      y_pred_all.append(y_pred)
-
       y_orig_means.append(np.mean(original_dose[mask > 0]))
-      y_pred_means.append(np.mean(pred_dose[mask > 0]))
 
-    if len(y_orig_all) == 0 or len(y_pred_all) == 0:
-      print(f'No data found for index: {structure_index}')
-      return ax
+    if len(y_orig_all) > 0:
+      y_orig = np.mean(y_orig_all, axis=0)
+      ax.plot(x, y_orig, color='blue', linestyle='-', label='Original Dose', linewidth=2)
+      orig_mean = np.mean(y_orig_means)
+      ax.axvline(x=orig_mean, color='blue', linestyle='--', alpha=0.7)
 
-    y_orig = np.mean(y_orig_all, axis=0)
-    y_pred = np.mean(y_pred_all, axis=0)
+      if len(y_orig_means) > 1:
+        orig_min, orig_max = np.min(y_orig_means), np.max(y_orig_means)
+        ax.axvspan(orig_min, orig_max, color='blue', alpha=0.1)
 
-    ax.plot(x, y_orig, color='blue', linestyle='-', label='Original Dose')
-    ax.plot(x, y_pred, color='green', linestyle='-', label='Predicted Dose')
+    # Plot each model's prediction (reuse cached structures)
+    for result, label in zip(self.results_list, self.result_labels):
+      color = next(colors)
+      y_pred_all = []
+      y_pred_means = []
 
-    orig_mean = np.mean(y_orig_means)
-    pred_mean = np.mean(y_pred_means)
+      for file_name in result.slice_metrics['file_name'].unique():
+        sample_results = result.for_sample(file_name.replace('.npz', ''))
+        structure = orig_volumes_cache[file_name][0]  # Reuse cached structure
+        pred_dose = sample_results.load_pred_volume()
 
-    ax.axvline(x=orig_mean, color='blue', linestyle='--', label='Mean Original Dose')
-    ax.axvline(x=pred_mean, color='green', linestyle='--', label='Mean Predicted Dose')
+        mask = structure[structure_index]
+        _, y_pred = compute_dvh(pred_dose, mask, bins)
+        y_pred_all.append(y_pred)
+        y_pred_means.append(np.mean(pred_dose[mask > 0]))
 
-    if len(y_orig_means) > 1:
-      orig_min, orig_max = np.min(y_orig_means), np.max(y_orig_means)
-      pred_min, pred_max = np.min(y_pred_means), np.max(y_pred_means)
-      ax.axvspan(orig_min, orig_max, color='blue', alpha=0.1, label='Mean Original Dose Range')
-      ax.axvspan(pred_min, pred_max, color='green', alpha=0.1, label='Mean Predicted Dose Range')
+      if len(y_pred_all) > 0:
+        y_pred = np.mean(y_pred_all, axis=0)
+        ax.plot(x, y_pred, color=color, linestyle='-', label=label)
+        pred_mean = np.mean(y_pred_means)
+        ax.axvline(x=pred_mean, color=color, linestyle='--', alpha=0.5)
+
+        if len(y_pred_means) > 1:
+          pred_min, pred_max = np.min(y_pred_means), np.max(y_pred_means)
+          ax.axvspan(pred_min, pred_max, color=color, alpha=0.1)
 
     ax.set_xlabel('Dose (Gy)')
     ax.set_ylabel('Volume Fraction ≥ Dose')
@@ -283,6 +302,10 @@ class ModelResults(BaseResults):
       'slice_index': 'count'
     }).reset_index()
 
+    # For uniform interface with ModelComparison
+    self.results_list = [self]
+    self.result_labels = [f'{model_name} ({sampling_name})']
+
   def for_sample(self, sample):
     return SampleResults(self, sample)
 
@@ -305,6 +328,9 @@ class SampleResults(BaseResults):
 
     self.volume_metrics = model_results.volume_metrics[model_results.volume_metrics['file_name'] == f'{sample}.npz']
 
+    # For uniform interface with ModelComparison
+    self.results_list = [self]
+    self.result_labels = [f'{model_results.model_name} ({model_results.sampling_name})']
 
   def for_sample(self, sample):
     if sample != self.sample:
@@ -418,10 +444,40 @@ class SampleResults(BaseResults):
 
     return ax
 
-class ModelComparison:
+class ModelComparison(BaseResults):
   def __init__(self, results_list: List[ModelResults], result_labels=None):
+    if len(results_list) == 0:
+      raise ValueError('results_list must contain at least one ModelResults')
+
+    # Use the first result's attributes for BaseResults
+    first_result = results_list[0]
+    super().__init__(
+      model_name=first_result.model_name,
+      sampling_name=first_result.sampling_name,
+      epoch=first_result.epoch,
+      dataset_split=first_result.dataset_split,
+      dataset=first_result.dataset
+    )
+
     self.results_list = results_list
     self.result_labels = result_labels if result_labels is not None else [f'{r.model_name} ({r.sampling_name})' for r in results_list]
+
+    # Aggregate slice_metrics and volume_metrics from all results
+    self.slice_metrics = pd.concat([r.slice_metrics for r in results_list], ignore_index=True)
+    self.volume_metrics = pd.concat([r.volume_metrics for r in results_list], ignore_index=True)
+
+  def for_sample(self, sample):
+    # For ModelComparison, we need to handle this differently
+    # We could either:
+    # 1. Return the first result's sample (for compatibility with single-model code)
+    # 2. Raise an error
+    # 3. Return a comparison object with all models' samples
+    # For now, raise an error to make the intent clear
+    raise NotImplementedError(
+      'ModelComparison.for_sample() is not directly supported. '
+      'Use the comparison object directly for plotting across models, '
+      'or access individual results via results_list[i].for_sample(sample)'
+    )
 
   def plot_metric_distribution(self, metric, ax=None):
     if ax is None:
