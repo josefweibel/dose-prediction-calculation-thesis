@@ -176,7 +176,11 @@ class Trainer:
           out_channels=1
         ).to(self.device)
     elif 'mednext' in self.config:
-      self.net_model = build_mednext_model(self.config, train_dataset.n_structures).to(self.device)
+      self.net_model = build_mednext_model(
+        self.config,
+        train_dataset.n_structures,
+        for_diffusion='diffusion' in self.config,
+      ).to(self.device)
     else:
       self.net_model = MambaUnet(
         img_size=self.config['data']['img_size'],
