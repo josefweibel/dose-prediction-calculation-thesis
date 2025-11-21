@@ -38,13 +38,9 @@ def build_metrics(dataset, device):
 
     'mae_challenge': ChallengeMAE(sync_on_compute=False),
 
-    'var_laplacian_pred': VarianceOfLaplacian(mode='pred', sync_on_compute=False),
+    'var_laplacian_pred': VarianceOfLaplacian(mode='preds', sync_on_compute=False),
     'var_laplacian_target': VarianceOfLaplacian(mode='target', sync_on_compute=False),
     'var_laplacian_diff': VarianceOfLaplacian(mode='diff', sync_on_compute=False),
-    'var_laplacian_pred_body': BodyMaskedMetric(VarianceOfLaplacian(mode='pred', sync_on_compute=False), sync_on_compute=False),
-    'var_laplacian_target_body': BodyMaskedMetric(VarianceOfLaplacian(mode='target', sync_on_compute=False), sync_on_compute=False),
-    'var_laplacian_diff_body': BodyMaskedMetric(VarianceOfLaplacian(mode='diff', sync_on_compute=False), sync_on_compute=False),
-
   }
 
   return {k: v.to(device) for k, v in metrics.items()}

@@ -36,7 +36,7 @@ class Sampler:
     self.device = detect_device(local_rank)
 
     self.manager = Manager()
-    shared_cache = build_cache(self.sampling_config, self.manager, 'cache')
+    shared_cache = build_cache(self.sampling_config, self.manager, 'data')
 
     self.dataset = GDPHMMSlicesDataset(
       dataset_name=self.model_config['data']['dataset_name'],
