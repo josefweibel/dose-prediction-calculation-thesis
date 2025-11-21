@@ -10,15 +10,14 @@ from tqdm import tqdm
 import copy
 import wandb
 
-from data import GDPHMMSlicesDataset, build_cache
-from models import MambaUnet
+from data import GDPHMMSlicesDataset
 from model_cache import DeepCache, CacheConfig
 from evaluator import Evaluator
 from config import read_sampling_config
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
-from mednext import build_mednext_model
-from c3d_model import C3D, C3D_2D, C3DLoss
+from c3d_model import C3DLoss
+from models import build_model
 
 def extract(v, t, x_shape):
   """
@@ -161,32 +160,7 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    if 'c3d' in self.config:
-      # Check if we should use 2D or 3D version
-      use_2d = self.config['c3d'].get('use_2d', True)  # Default to 2D for compatibility
-
-      if use_2d:
-        self.net_model = C3D_2D(
-          in_channels=train_dataset.n_structures,
-          out_channels=1
-        ).to(self.device)
-      else:
-        self.net_model = C3D(
-          in_channels=train_dataset.n_structures,
-          out_channels=1
-        ).to(self.device)
-    elif 'mednext' in self.config:
-      self.net_model = build_mednext_model(
-        self.config,
-        train_dataset.n_structures,
-        for_diffusion='diffusion' in self.config,
-      ).to(self.device)
-    else:
-      self.net_model = MambaUnet(
-        img_size=self.config['data']['img_size'],
-        in_struc_channels=train_dataset.n_structures,
-        num_layers=self.config['diffusion'].get('arch', {}).get('num_layers', 4),
-      ).to(self.device)
+    self.net_model = build_model(self.config, train_dataset).to(self.device)
 
     if 'diffusion' in self.config:
       self.model = DiffusionModelTrainerModule(

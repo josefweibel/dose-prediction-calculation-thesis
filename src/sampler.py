@@ -6,11 +6,11 @@ import numpy as np
 from config import read_model_config
 from data import GDPHMMSlicesDataset, build_cache
 from evaluator import Evaluator
-from models import MambaUnet, remap_state_dict
+from mamba_model import MambaUnet, remap_state_dict
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
-from mednext import build_mednext_model
+from models import build_model
 
 
 class Sampler:
@@ -70,16 +70,7 @@ class Sampler:
     if self.sampling_config['prefetch_on_gpu'] and self.device.type == 'cuda':
       self.dataloader = PrefetchLoader(self.dataloader, self.device)
 
-    if 'diffusion' in self.model_config:
-      self.ema_model = MambaUnet(
-        img_size=self.model_config['data']['img_size'],
-        in_struc_channels=self.dataset.n_structures,
-        num_layers=self.model_config['diffusion'].get('arch', {}).get('num_layers', 4),
-      ).to(self.device)
-    elif 'mednext' in self.model_config:
-      self.ema_model = build_mednext_model(
-        self.model_config, self.dataset.n_structures
-      ).to(self.device)
+    self.ema_model = build_model(self.model_config, self.dataset).to(self.device)
 
     if epoch is None or epoch == 'latest':
       checkpoint = load_last_checkpoint(model_name)
