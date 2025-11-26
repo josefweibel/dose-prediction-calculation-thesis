@@ -115,6 +115,17 @@ class BodyMaskedMetric(Metric):
   def compute(self):
     return self.base_metric.compute()
 
+  def reset(self):
+    """Reset both this metric and the base metric."""
+    super().reset()
+    self.base_metric.reset()
+
+  def to(self, *args, **kwargs):
+    """Move both this metric and the base metric to the specified device/dtype."""
+    super().to(*args, **kwargs)
+    self.base_metric = self.base_metric.to(*args, **kwargs)
+    return self
+
 
 class ChallengeMAE(Metric):
   """
@@ -279,3 +290,84 @@ class VarianceOfLaplacian(Metric):
     if self.count == 0:
       return torch.tensor(0.0)
     return self.total / self.count
+
+
+class RegionMaskedMetric(Metric):
+  """
+  Wrapper metric that applies a base metric to specific anatomical regions (PTVs or OARs).
+
+  This metric takes a region mask and only evaluates the base metric on pixels within that region.
+  It automatically handles region indexing from the structure tensor and computes the metric
+  only on the masked pixels.
+
+  Example:
+    # Create a metric for MSE on PTV region
+    ptv_mse = RegionMaskedMetric(MeanSquaredError(), region_name='PTV', region_index=1)
+
+    # Create a metric for PSNR on Brainstem region
+    brainstem_psnr = RegionMaskedMetric(
+      PeakSignalNoiseRatio(data_range=1.0),
+      region_name='BrainStem_03',
+      region_index=13
+    )
+  """
+  def __init__(self, base_metric: Metric, region_name: str, region_index: int, *args, **kwargs):
+    """
+    Args:
+      base_metric: The underlying metric to compute (e.g., MeanSquaredError, PSNR, etc.)
+      region_name: Name of the region (e.g., 'PTV', 'BrainStem_03')
+      region_index: Index of the region in the structure tensor (0=CT, 1=PTV, 2+=OARs)
+    """
+    super().__init__(*args, **kwargs)
+    self.base_metric = base_metric
+    self.region_name = region_name
+    self.region_index = region_index
+    self.add_state("samples_processed", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, structure: torch.Tensor):
+    """
+    Update the metric with new predictions and targets, masked by the region.
+
+    Args:
+      preds: predicted doses, shape (batch_size, 1, H, W)
+      target: true doses, shape (batch_size, 1, H, W)
+      structure: structure tensor with all regions, shape (batch_size, n_channels, H, W)
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      # Extract the region mask for this sample
+      region_mask = structure[i, self.region_index].to(torch.bool)
+
+      # Skip if region is empty
+      if region_mask.sum() == 0:
+        continue
+
+      # Extract predictions and targets within the region
+      pred_region = preds[i][region_mask.unsqueeze(0)].flatten()
+      target_region = target[i][region_mask.unsqueeze(0)].flatten()
+
+      if pred_region.numel() == 0 or target_region.numel() == 0:
+        continue
+
+      # Update the base metric with the masked values
+      # Add batch dimension back for compatibility
+      self.base_metric.update(pred_region.unsqueeze(0), target_region.unsqueeze(0))
+      self.samples_processed += 1
+
+  def compute(self):
+    """Compute the metric value from the base metric."""
+    if self.samples_processed == 0:
+      return torch.tensor(float('nan'))
+    return self.base_metric.compute()
+
+  def reset(self):
+    """Reset both this metric and the base metric."""
+    super().reset()
+    self.base_metric.reset()
+
+  def to(self, *args, **kwargs):
+    """Move both this metric and the base metric to the specified device/dtype."""
+    super().to(*args, **kwargs)
+    self.base_metric = self.base_metric.to(*args, **kwargs)
+    return self

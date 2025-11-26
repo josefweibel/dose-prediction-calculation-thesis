@@ -9,12 +9,52 @@ from pathlib import Path
 import pandas as pd
 import contextlib
 
-from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE, VarianceOfLaplacian
+from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE, VarianceOfLaplacian, RegionMaskedMetric
 from model_sampler import build_sampler
 from data import GDPHMM_OAR
 
 
-def build_metrics(dataset, device):
+def compute_metrics(metrics, preds, target, structure, body):
+  """
+  Update all metrics with predictions and targets.
+
+  This function centralizes the logic for updating different metric types,
+  handling special cases like RegionMaskedMetric, BodyMaskedMetric, etc.
+
+  Args:
+    metrics: Dictionary of metric name to metric instance
+    preds: Predicted doses, shape (batch_size, 1, H, W)
+    target: True doses, shape (batch_size, 1, H, W)
+    structure: Structure tensor, shape (batch_size, n_channels, H, W)
+    body: Body mask, shape (batch_size, 1, H, W)
+
+  Returns:
+    Dictionary mapping metric names to computed values
+  """
+  results = {}
+
+  for metric_name, metric in metrics.items():
+    metric.reset()
+
+    if isinstance(metric, RegionMaskedMetric):
+      metric.update(preds, target, structure)
+    elif isinstance(metric, BodyMaskedMetric):
+      metric.update(preds, target, body)
+    elif isinstance(metric, HomogeneityIndex):
+      metric.update(preds, target, structure[:, 1])
+    elif isinstance(metric, ChallengeMAE):
+      metric.update(preds, target, structure[:, 1], body[0])
+    else:
+      metric.update(preds, target)
+
+    result = metric.compute()
+    # Handle NaN values (when region is not present in slice)
+    results[metric_name] = result.item() if not torch.isnan(result) else float('nan')
+
+  return results
+
+
+def build_metrics(dataset, device, include_region_metrics=True):
   dose_range = dataset.dose_range[1] - dataset.dose_range[0]
   ms_ssim_kwargs = dict(
     data_range=dose_range,
@@ -42,6 +82,27 @@ def build_metrics(dataset, device):
     'var_laplacian_target': VarianceOfLaplacian(mode='target', sync_on_compute=False),
     'var_laplacian_diff': VarianceOfLaplacian(mode='diff', sync_on_compute=False),
   }
+
+  if include_region_metrics:
+    regions = [('PTV', 1)] + [(oar_name, i + 2) for i, oar_name in enumerate(GDPHMM_OAR)]
+
+    region_metric_configs = [
+      ('mse', lambda: MeanSquaredError(sync_on_compute=False)),
+      ('rmse', lambda: MeanSquaredError(squared=False, sync_on_compute=False)),
+      ('psnr', lambda: PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False)),
+      ('dvh', lambda: DVHScore(sync_on_compute=False)),
+      ('dose_score', lambda: DoseScore(sync_on_compute=False)),
+    ]
+
+    for region_name, region_index in regions:
+      for metric_name, metric_factory in region_metric_configs:
+        region_metric = RegionMaskedMetric(
+          base_metric=metric_factory(),
+          region_name=region_name,
+          region_index=region_index,
+          sync_on_compute=False
+        )
+        metrics[f'{metric_name}/{region_name}'] = region_metric
 
   return {k: v.to(device) for k, v in metrics.items()}
 
@@ -99,19 +160,15 @@ class Evaluator:
             'duration': duration / target.shape[0]
           }
 
-          for metric_name, metric in self.metrics.items():
-            metric.reset()
-
-            if isinstance(metric, BodyMaskedMetric):
-              metric.update(sample_pred, sample_target, body[i:i+1])
-            elif isinstance(metric, HomogeneityIndex):
-              metric.update(sample_pred, sample_target, structure[i:i+1, 1])
-            elif isinstance(metric, ChallengeMAE):
-              metric.update(sample_pred, sample_target, structure[i:i+1, 1], body[i:i+1][0])
-            else:
-              metric.update(sample_pred, sample_target)
-
-            sample_row[metric_name] = metric.compute().item()
+          # Update all metrics and get results
+          metric_results = compute_metrics(
+            self.metrics,
+            sample_pred,
+            sample_target,
+            structure[i:i+1],
+            body[i:i+1]
+          )
+          sample_row.update(metric_results)
 
           sample_metrics.append(sample_row)
 

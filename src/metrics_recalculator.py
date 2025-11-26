@@ -4,12 +4,11 @@ from multiprocessing import Manager
 import torch
 from tqdm import tqdm
 
-from evaluator import build_metrics
+from evaluator import build_metrics, compute_metrics
 from results import SAMPLES_PATH
 from utils.mp import detect_device
 from config import read_model_config, read_sampling_config
 from data import GDPHMMSlicesDataset, build_cache
-from metrics import BodyMaskedMetric, HomogeneityIndex, ChallengeMAE
 
 
 class MetricsRecalculator:
@@ -60,24 +59,18 @@ class MetricsRecalculator:
         'duration': self.old_scores.loc[(self.old_scores['file_name'] == file_name) & (self.old_scores['slice_index'] == slice_idx), 'duration'].values[0],
       }
 
-      for metric in self.metrics.values():
-        metric.reset()
-
       with torch.no_grad():
         pred = np.load(self.samples_path / file_name.replace(".npz", ".npy"))[..., slice_idx]
         pred = torch.Tensor(pred).unsqueeze(0).to(self.device)
 
-        for name, metric in self.metrics.items():
-          if isinstance(metric, BodyMaskedMetric):
-            metric.update(pred, target, body)
-          elif isinstance(metric, HomogeneityIndex):
-            metric.update(pred, target, structure[:, 1])
-          elif isinstance(metric, ChallengeMAE):
-            metric.update(pred, target, structure[:, 1], body[0])
-          else:
-            metric.update(pred, target)
-
-          sample_row[name] = metric.compute().item()
+        metric_results = compute_metrics(
+          self.metrics,
+          pred,
+          target,
+          structure,
+          body
+        )
+        sample_row.update(metric_results)
 
       sample_metrics.append(sample_row)
 
