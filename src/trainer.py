@@ -104,7 +104,6 @@ class Trainer:
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
       skip=self.config['data']['train_skip'] if 'train_skip' in self.config['data'] else 0,
       cache=cache,
-      include_sdm=self.conditioning_selector.needs_sdm(),
       voxel_spacing=self.config['data'].get('voxel_spacing', None),
     )
     if self.is_main_process:
@@ -120,7 +119,6 @@ class Trainer:
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
         skip=self.config['data']['valid_skip'] if 'valid_skip' in self.config['data'] else 0,
         cache=cache,
-        include_sdm=self.conditioning_selector.needs_sdm(),
         voxel_spacing=self.config['data'].get('voxel_spacing', None),
       )
     if self.is_main_process:

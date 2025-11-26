@@ -46,7 +46,6 @@ class Sampler:
       split=data_split,
       img_size=self.model_config['data']['img_size'],
       cache=shared_cache,
-      include_sdm=self.conditioning_selector.needs_sdm(),
       voxel_spacing=self.model_config['data'].get('voxel_spacing', None),
     )
 

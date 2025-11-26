@@ -88,14 +88,12 @@ class GDPHMMSlicesDataset(Dataset):
     cache,
     limit=None,
     skip=0,
-    include_sdm=False,
     voxel_spacing=(1.0, 1.0, 1.0),
   ):
     self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
     self.cache = cache
-    self.include_sdm = include_sdm
     self.voxel_spacing = voxel_spacing
 
     dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
@@ -151,11 +149,12 @@ class GDPHMMSlicesDataset(Dataset):
     dose_vol, dose_shm = self.cache.get(file.name + ':dose')
     ptv_vol, ptv_shm = self.cache.get(file.name + ':ptv')
     ct_vol, ct_shm = self.cache.get(file.name + ':ct')
-    oar_vol, oar_shm = self.cache.get(file.name + ':oar')
+    oar_sdm, oar_sdm_shm = self.cache.get(file.name + ':oar_sdm')
+    ptv_sdm, ptv_sdm_shm = self.cache.get(file.name + ':ptv_sdm')
     body_vol, body_shm = self.cache.get(file.name + ':body')
 
     # If any volume is missing, load all from disk and cache them
-    if dose_vol is None or ptv_vol is None or ct_vol is None or oar_vol is None or body_vol is None:
+    if dose_vol is None or ptv_vol is None or ct_vol is None or oar_sdm is None or ptv_sdm is None or body_vol is None:
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
 
       dose_vol = (vol['dose'] * vol['dose_scale'] * vol['Body'])
@@ -168,20 +167,24 @@ class GDPHMMSlicesDataset(Dataset):
       )
       ct_vol = vol['img']
       body_vol = vol['Body']
+      oar_sdm, ptv_sdm = self.compute_sdms(oar_vol, ptv_vol)
 
-      ct_cache, dose_cache, ptv_cache, oar_cache, body_cache = self.pack_for_cache(
-        ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
+      ct_cache, dose_cache, ptv_cache, body_cache, oar_sdm_cache, ptv_sdm_cache = self.pack_for_cache(
+        ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm
       )
 
       self.cache.put(file.name + ':dose', dose_cache)
       self.cache.put(file.name + ':ptv', ptv_cache)
       self.cache.put(file.name + ':ct', ct_cache)
-      self.cache.put(file.name + ':oar', oar_cache)
+      self.cache.put(file.name + ':oar_sdm', oar_sdm_cache)
+      self.cache.put(file.name + ':ptv_sdm', ptv_sdm_cache)
       self.cache.put(file.name + ':body', body_cache)
     else:
-      ct_vol, dose_vol, ptv_vol, oar_vol, body_vol = self.unpack_from_cache(
-        ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
+      ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm = self.unpack_from_cache(
+        ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm
       )
+
+    oar_vol = (oar_sdm > 0).astype(np.uint8)
 
     sample = {
       'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
@@ -189,6 +192,8 @@ class GDPHMMSlicesDataset(Dataset):
       'ct': self.ct_transforms(ct_vol[:, :, slice_idx]),
       'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
       'body': self.oar_transforms(body_vol[:, :, slice_idx]),
+      'oar_sdm': self.sdm_transforms(oar_sdm[:, :, :, slice_idx]),
+      'ptv_sdm': self.sdm_transforms(ptv_sdm[:, :, slice_idx]),
       'info': {
         'file_path': str(file),
         'file_name': file.name,
@@ -197,33 +202,17 @@ class GDPHMMSlicesDataset(Dataset):
       }
     }
 
-    if self.include_sdm:
-      oar_sdm_vol = np.stack([
-        compute_sdm(oar_vol[i], self.voxel_spacing)
-        for i in range(oar_vol.shape[0])
-      ], axis=0)
-
-      # Compute SDM for PTV on full 3D volume
-      ptv_binary = (ptv_vol > 0).astype(np.uint8)
-      ptv_sdm_vol = compute_sdm(ptv_binary, self.voxel_spacing)
-
-      sample['oar_sdm'] = self.sdm_transforms(oar_sdm_vol[:, :, :, slice_idx])
-      sample['ptv_sdm'] = self.sdm_transforms(ptv_sdm_vol[:, :, slice_idx])
-
-    for shm in [dose_shm, ptv_shm, ct_shm, oar_shm, body_shm]:
+    for shm in [dose_shm, ptv_shm, ct_shm, oar_sdm_shm, ptv_sdm_shm, body_shm]:
       if shm is not None:
         shm.close()
 
-    if self.include_sdm:
-      structure = torch.cat([
-        sample['ct'],
-        sample['ptv'],
-        sample['oar'],
-        sample['ptv_sdm'],
-        sample['oar_sdm']
-      ], dim=0)
-    else:
-      structure = torch.cat([sample['ct'], sample['ptv'], sample['oar']], dim=0)
+    structure = torch.cat([
+      sample['ct'],
+      sample['ptv'],
+      sample['oar'],
+      sample['ptv_sdm'],
+      sample['oar_sdm']
+    ], dim=0)
 
     return structure, sample['dose'], sample['body'], sample['info']
 
@@ -233,22 +222,37 @@ class GDPHMMSlicesDataset(Dataset):
   def finish(self):
     return self.cache.clear()
 
-  def pack_for_cache(self, ct_vol, dose_vol, ptv_vol, oar_vol, body_vol):
+  def compute_sdms(self, oar_vol, ptv_vol):
+    oar_sdm = np.stack([
+      compute_sdm(oar_vol[i], self.voxel_spacing)
+      for i in range(oar_vol.shape[0])
+    ], axis=0)
+
+    ptv_binary = (ptv_vol > 0).astype(np.uint8)
+    ptv_sdm = compute_sdm(ptv_binary, self.voxel_spacing)
+
+    return oar_sdm, ptv_sdm
+
+  def pack_for_cache(self, ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm):
     ct_pack = np.clip(ct_vol, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX).astype(np.float16)
     dose_norm = (dose_vol - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
     dose_pack = np.clip(dose_norm * 65535, 0, 65535).astype(np.uint16)
     ptv_pack = np.clip(ptv_vol * 65535, 0, 65535).astype(np.uint16)
-    oar_pack = oar_vol.astype(np.uint8)
     body_pack = body_vol.astype(np.uint8)
-    return ct_pack, dose_pack, ptv_pack, oar_pack, body_pack
+    oar_sdm = oar_sdm.astype(np.float16)
+    ptv_sdm = ptv_sdm.astype(np.float16)
 
-  def unpack_from_cache(self, ct_pack, dose_pack, ptv_pack, oar_pack, body_pack):
+    return ct_pack, dose_pack, ptv_pack, body_pack, oar_sdm, ptv_sdm
+
+  def unpack_from_cache(self, ct_pack, dose_pack, ptv_pack, body_pack, oar_sdm, ptv_sdm):
     ct_vol = ct_pack.astype(np.float32)
     dose_vol = (dose_pack.astype(np.float32) / 65535.0) * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
     ptv_vol = ptv_pack.astype(np.float32) / 65535.0
-    oar_vol = oar_pack.astype(np.uint8)
     body_vol = body_pack.astype(np.uint8)
-    return ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
+    oar_sdm = oar_sdm.astype(np.float32)
+    ptv_sdm = ptv_sdm.astype(np.float32)
+
+    return ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm
 
 class PadToFixedSize:
   def __init__(self, target_size, fill=0, padding_mode='constant'):
