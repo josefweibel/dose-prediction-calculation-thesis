@@ -198,42 +198,22 @@ class GDPHMMSlicesDataset(Dataset):
     }
 
     if self.include_sdm:
-      oar_sdm_vol, oar_sdm_shm = self.cache.get(file.name + ':oar_sdm')
-      ptv_sdm_vol, ptv_sdm_shm = self.cache.get(file.name + ':ptv_sdm')
+      oar_sdm_vol = np.stack([
+        compute_sdm(oar_vol[i], self.voxel_spacing)
+        for i in range(oar_vol.shape[0])
+      ], axis=0)
 
-      if oar_sdm_vol is None or ptv_sdm_vol is None:
-        # Compute SDM for each OAR channel on full 3D volume
-        oar_sdm_vol = np.stack([
-          compute_sdm(oar_vol[i], self.voxel_spacing)
-          for i in range(oar_vol.shape[0])
-        ], axis=0)
-
-        # Compute SDM for PTV on full 3D volume
-        ptv_binary = (ptv_vol > 0).astype(np.uint8)
-        ptv_sdm_vol = compute_sdm(ptv_binary, self.voxel_spacing)
-
-        # Cache the computed SDMs
-        oar_sdm_cache, ptv_sdm_cache = self.pack_sdm_for_cache(oar_sdm_vol, ptv_sdm_vol)
-        self.cache.put(file.name + ':oar_sdm', oar_sdm_cache)
-        self.cache.put(file.name + ':ptv_sdm', ptv_sdm_cache)
-      else:
-        oar_sdm_vol, ptv_sdm_vol = self.unpack_sdm_from_cache(oar_sdm_vol, ptv_sdm_vol)
+      # Compute SDM for PTV on full 3D volume
+      ptv_binary = (ptv_vol > 0).astype(np.uint8)
+      ptv_sdm_vol = compute_sdm(ptv_binary, self.voxel_spacing)
 
       sample['oar_sdm'] = self.sdm_transforms(oar_sdm_vol[:, :, :, slice_idx])
       sample['ptv_sdm'] = self.sdm_transforms(ptv_sdm_vol[:, :, slice_idx])
-
-      # Close shared memory handles
-      if oar_sdm_shm is not None:
-        oar_sdm_shm.close()
-      if ptv_sdm_shm is not None:
-        ptv_sdm_shm.close()
 
     for shm in [dose_shm, ptv_shm, ct_shm, oar_shm, body_shm]:
       if shm is not None:
         shm.close()
 
-    # Build structure input - always return all available data
-    # The model/trainer will decide which channels to use based on config
     if self.include_sdm:
       structure = torch.cat([
         sample['ct'],
@@ -269,18 +249,6 @@ class GDPHMMSlicesDataset(Dataset):
     oar_vol = oar_pack.astype(np.uint8)
     body_vol = body_pack.astype(np.uint8)
     return ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
-
-  def pack_sdm_for_cache(self, oar_sdm_vol, ptv_sdm_vol):
-    """Pack SDM volumes for efficient caching using float16."""
-    oar_sdm_pack = oar_sdm_vol.astype(np.float16)
-    ptv_sdm_pack = ptv_sdm_vol.astype(np.float16)
-    return oar_sdm_pack, ptv_sdm_pack
-
-  def unpack_sdm_from_cache(self, oar_sdm_pack, ptv_sdm_pack):
-    """Unpack SDM volumes from cache."""
-    oar_sdm_vol = oar_sdm_pack.astype(np.float32)
-    ptv_sdm_vol = ptv_sdm_pack.astype(np.float32)
-    return oar_sdm_vol, ptv_sdm_vol
 
 class PadToFixedSize:
   def __init__(self, target_size, fill=0, padding_mode='constant'):
