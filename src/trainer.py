@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, StepLR
 from tqdm import tqdm
 import copy
 import wandb
@@ -18,6 +18,7 @@ from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
 from c3d_model import C3DLoss
 from models import build_model
+from conditioning import build_conditioning_selector
 
 def extract(v, t, x_shape):
   """
@@ -94,6 +95,8 @@ class Trainer:
 
     self.device = detect_device(local_rank)
 
+    self.conditioning_selector = build_conditioning_selector(self.config)
+
     train_dataset = GDPHMMSlicesDataset(
       dataset_name=self.config['data']['dataset_name'],
       split='train',
@@ -101,6 +104,8 @@ class Trainer:
       limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
       skip=self.config['data']['train_skip'] if 'train_skip' in self.config['data'] else 0,
       cache=cache,
+      include_sdm=self.conditioning_selector.needs_sdm(),
+      voxel_spacing=self.config['data'].get('voxel_spacing', None),
     )
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
@@ -115,6 +120,8 @@ class Trainer:
         limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
         skip=self.config['data']['valid_skip'] if 'valid_skip' in self.config['data'] else 0,
         cache=cache,
+        include_sdm=self.conditioning_selector.needs_sdm(),
+        voxel_spacing=self.config['data'].get('voxel_spacing', None),
       )
     if self.is_main_process:
       print('Validation dataset size', len(val_dataset))
@@ -160,7 +167,7 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    self.net_model = build_model(self.config, train_dataset).to(self.device)
+    self.net_model = build_model(self.config, self.conditioning_selector).to(self.device)
 
     if 'diffusion' in self.config:
       self.model = DiffusionModelTrainerModule(
@@ -223,6 +230,7 @@ class Trainer:
       model_config,
       read_sampling_config(self.config['validation_sampler']),
       self.device,
+      self.conditioning_selector,
       rank=self.rank,
       world_size=self.world_size,
     )
@@ -240,9 +248,10 @@ class Trainer:
         self.optim.zero_grad()
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
+        condition = self.conditioning_selector.select_channels(structure)
 
         with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
-          loss = self.model(target, structure)
+          loss = self.model(target, condition)
 
         current_lr = self.optim.param_groups[0]['lr']
 
@@ -366,6 +375,17 @@ class Trainer:
       self.lr_scheduler = CosineAnnealingLR(
         self.optim,
         T_max=len(self.train_dataloader) * self.config['epochs'],
+      )
+    elif 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', '') == 'step_decay':
+      initial_lr = self.config['lr_scheduler']['initial_lr']
+      step_size = self.config['lr_scheduler']['step_size']
+      gamma = self.config['lr_scheduler']['gamma']
+
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=initial_lr)
+      self.lr_scheduler = StepLR(
+        self.optim,
+        step_size=step_size * len(self.train_dataloader),
+        gamma=gamma
       )
     else:
       self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr'])

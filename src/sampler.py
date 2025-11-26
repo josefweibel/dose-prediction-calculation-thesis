@@ -11,6 +11,7 @@ from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
 from models import build_model
+from conditioning import build_conditioning_selector
 
 
 class Sampler:
@@ -38,11 +39,15 @@ class Sampler:
     self.manager = Manager()
     shared_cache = build_cache(self.sampling_config, self.manager, 'data')
 
+    self.conditioning_selector = build_conditioning_selector(self.model_config)
+
     self.dataset = GDPHMMSlicesDataset(
       dataset_name=self.model_config['data']['dataset_name'],
       split=data_split,
       img_size=self.model_config['data']['img_size'],
       cache=shared_cache,
+      include_sdm=self.conditioning_selector.needs_sdm(),
+      voxel_spacing=self.model_config['data'].get('voxel_spacing', None),
     )
 
     if self.is_main_process:
@@ -70,7 +75,7 @@ class Sampler:
     if self.sampling_config['prefetch_on_gpu'] and self.device.type == 'cuda':
       self.dataloader = PrefetchLoader(self.dataloader, self.device)
 
-    self.ema_model = build_model(self.model_config, self.dataset).to(self.device)
+    self.ema_model = build_model(self.model_config, self.conditioning_selector).to(self.device)
 
     if epoch is None or epoch == 'latest':
       checkpoint = load_last_checkpoint(model_name)
@@ -89,6 +94,7 @@ class Sampler:
       self.model_config,
       self.sampling_config,
       self.device,
+      self.conditioning_selector,
       rank=self.rank,
       world_size=self.world_size,
     )

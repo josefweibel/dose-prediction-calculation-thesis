@@ -7,6 +7,7 @@ from PIL import Image
 import pandas as pd
 from multiprocessing import shared_memory
 import time
+from scipy.ndimage import distance_transform_edt
 
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
 
@@ -50,6 +51,34 @@ def normalize_gdphmm_img(x):
 def normalize_gdphmm_dose(x):
   return (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
 
+def compute_sdm(mask: np.ndarray, voxel_spacing: tuple = (1.0, 1.0, 1.0)) -> np.ndarray:
+  """
+  Compute Signed Distance Map (SDM) for a binary mask.
+
+  SDM provides the minimum distance from each voxel to the contour of the ROI,
+  where positive values are inside the ROI, negative values are outside, and
+  zero values are on the boundary.
+
+  Args:
+      mask: Binary mask (H, W) or (H, W, D) where 1=inside ROI, 0=outside
+      voxel_spacing: Physical spacing (is, js) or (is, js, ks) in mm
+
+  Returns:
+      SDM with positive values inside, negative outside, 0 on boundary
+  """
+  mask = mask.astype(bool)
+
+  # Distance transform for points inside (positive distances)
+  dist_inside = distance_transform_edt(mask, sampling=voxel_spacing)
+
+  # Distance transform for points outside (will be negated)
+  dist_outside = distance_transform_edt(~mask, sampling=voxel_spacing)
+
+  # Combine: positive inside, negative outside
+  sdm = dist_inside - dist_outside
+
+  return sdm
+
 class GDPHMMSlicesDataset(Dataset):
   def __init__(
     self,
@@ -59,11 +88,15 @@ class GDPHMMSlicesDataset(Dataset):
     cache,
     limit=None,
     skip=0,
+    include_sdm=False,
+    voxel_spacing=(1.0, 1.0, 1.0),
   ):
     self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
     self.cache = cache
+    self.include_sdm = include_sdm
+    self.voxel_spacing = voxel_spacing
 
     dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
     self.index_map = pd.read_csv(dir / '_index.csv')
@@ -97,6 +130,12 @@ class GDPHMMSlicesDataset(Dataset):
       T.ToTensor(),
       T.Lambda(to_float),
       T.Lambda(normalize_gdphmm_dose),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+    ])
+
+    self.sdm_transforms = T.Compose([
+      T.Lambda(to_plain_tensor),
+      T.Lambda(to_float),
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
@@ -158,11 +197,53 @@ class GDPHMMSlicesDataset(Dataset):
       }
     }
 
+    if self.include_sdm:
+      oar_sdm_vol, oar_sdm_shm = self.cache.get(file.name + ':oar_sdm')
+      ptv_sdm_vol, ptv_sdm_shm = self.cache.get(file.name + ':ptv_sdm')
+
+      if oar_sdm_vol is None or ptv_sdm_vol is None:
+        # Compute SDM for each OAR channel on full 3D volume
+        oar_sdm_vol = np.stack([
+          compute_sdm(oar_vol[i], self.voxel_spacing)
+          for i in range(oar_vol.shape[0])
+        ], axis=0)
+
+        # Compute SDM for PTV on full 3D volume
+        ptv_binary = (ptv_vol > 0).astype(np.uint8)
+        ptv_sdm_vol = compute_sdm(ptv_binary, self.voxel_spacing)
+
+        # Cache the computed SDMs
+        oar_sdm_cache, ptv_sdm_cache = self.pack_sdm_for_cache(oar_sdm_vol, ptv_sdm_vol)
+        self.cache.put(file.name + ':oar_sdm', oar_sdm_cache)
+        self.cache.put(file.name + ':ptv_sdm', ptv_sdm_cache)
+      else:
+        oar_sdm_vol, ptv_sdm_vol = self.unpack_sdm_from_cache(oar_sdm_vol, ptv_sdm_vol)
+
+      sample['oar_sdm'] = self.sdm_transforms(oar_sdm_vol[:, :, :, slice_idx])
+      sample['ptv_sdm'] = self.sdm_transforms(ptv_sdm_vol[:, :, slice_idx])
+
+      # Close shared memory handles
+      if oar_sdm_shm is not None:
+        oar_sdm_shm.close()
+      if ptv_sdm_shm is not None:
+        ptv_sdm_shm.close()
+
     for shm in [dose_shm, ptv_shm, ct_shm, oar_shm, body_shm]:
       if shm is not None:
         shm.close()
 
-    structure = torch.cat([sample['ct'], sample['ptv'], sample['oar']], dim=0)
+    # Build structure input - always return all available data
+    # The model/trainer will decide which channels to use based on config
+    if self.include_sdm:
+      structure = torch.cat([
+        sample['ct'],
+        sample['ptv'],
+        sample['oar'],
+        sample['ptv_sdm'].unsqueeze(0),
+        sample['oar_sdm']
+      ], dim=0)
+    else:
+      structure = torch.cat([sample['ct'], sample['ptv'], sample['oar']], dim=0)
 
     return structure, sample['dose'], sample['body'], sample['info']
 
@@ -188,6 +269,18 @@ class GDPHMMSlicesDataset(Dataset):
     oar_vol = oar_pack.astype(np.uint8)
     body_vol = body_pack.astype(np.uint8)
     return ct_vol, dose_vol, ptv_vol, oar_vol, body_vol
+
+  def pack_sdm_for_cache(self, oar_sdm_vol, ptv_sdm_vol):
+    """Pack SDM volumes for efficient caching using float16."""
+    oar_sdm_pack = oar_sdm_vol.astype(np.float16)
+    ptv_sdm_pack = ptv_sdm_vol.astype(np.float16)
+    return oar_sdm_pack, ptv_sdm_pack
+
+  def unpack_sdm_from_cache(self, oar_sdm_pack, ptv_sdm_pack):
+    """Unpack SDM volumes from cache."""
+    oar_sdm_vol = oar_sdm_pack.astype(np.float32)
+    ptv_sdm_vol = ptv_sdm_pack.astype(np.float32)
+    return oar_sdm_vol, ptv_sdm_vol
 
 class PadToFixedSize:
   def __init__(self, target_size, fill=0, padding_mode='constant'):

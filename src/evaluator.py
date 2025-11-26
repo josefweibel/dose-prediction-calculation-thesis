@@ -47,13 +47,14 @@ def build_metrics(dataset, device):
 
 
 class Evaluator:
-  def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1):
+  def __init__(self, dataloader, model_config, sampling_config, device, conditioning_selector, rank=0, world_size=1):
     self.dataloader = dataloader
     self.model_config = model_config
     self.sampling_config = sampling_config
     self.device = device
     self.rank = rank
     self.world_size = world_size
+    self.conditioning_selector = conditioning_selector
 
     self.metrics = build_metrics(dataloader.dataset, device)
 
@@ -70,6 +71,7 @@ class Evaluator:
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
         body = body.to(self.device)
+        condition = self.conditioning_selector.select_channels(structure)
 
         autocast = contextlib.nullcontext()
         if self.sampling_config['precision'] == 'fp16_amp':
@@ -80,7 +82,7 @@ class Evaluator:
         with autocast:
           start = time()
           x_T = torch.randn_like(target, device=self.device)
-          pred = sampler(x_T, structure)
+          pred = sampler(x_T, condition)
           duration = time() - start
 
         pred = torch.clamp(pred, 0., 1.)
