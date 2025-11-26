@@ -53,7 +53,7 @@ for model_dir in "${SAMPLES_DIR}"/*; do
       data_split="${split_epoch_name%_*}"
       epoch="${split_epoch_name##*_}"
 
-      ((submitted_jobs++))
+      submitted_jobs=$((submitted_jobs + 1))
       echo "[${submitted_jobs}] Submitting: ${model_name} / ${sampling_name} / ${data_split} / ${epoch}"
 
       # Submit the job
