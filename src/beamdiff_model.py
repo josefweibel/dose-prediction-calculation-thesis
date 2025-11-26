@@ -64,7 +64,7 @@ class ResNetBlock(nn.Module):
 
     # Timestep embedding projection
     if time_emb_dim is not None:
-      self.time_emb_proj = nn.Linear(time_emb_dim * 2, out_channels * 2)
+      self.time_emb_proj = nn.Linear(time_emb_dim, in_channels * 2)
     else:
       self.time_emb_proj = None
 
@@ -550,7 +550,7 @@ def build_beamdiff(config, in_struc_channels):
   """
   model = NoisePredictor(
     in_channels_struct=in_struc_channels,
-    in_channels_beam=config.get('in_channels_beam', 1),
+    in_channels_beam=config.get('in_channels_beam', 0),
     base_channels=config.get('base_channels', 128),
     channel_mult=tuple(config.get('channel_mult', [1, 1, 2, 3, 4])),
     num_res_blocks=config.get('num_res_blocks', 2),
