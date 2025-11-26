@@ -20,7 +20,7 @@ diffusion:
   beta_T: 0.02
   T: 1000
 
-beamdiff:
+beamdiff: {}
 
 conditioning:
   types:

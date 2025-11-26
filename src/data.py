@@ -239,7 +239,7 @@ class GDPHMMSlicesDataset(Dataset):
         sample['ct'],
         sample['ptv'],
         sample['oar'],
-        sample['ptv_sdm'].unsqueeze(0),
+        sample['ptv_sdm'],
         sample['oar_sdm']
       ], dim=0)
     else:
