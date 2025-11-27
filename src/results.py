@@ -350,7 +350,7 @@ class SampleResults(BaseResults):
     vol_dose = np.zeros((176, 160, len(original_idx)))
 
     for i, slice_index in original_idx.items():
-      structure, dose, _, _ = self.dataset[i]
+      structure, dose, _ = self.dataset[i]
       dose = self.dataset.denormalize_target(dose)[0].numpy()
 
       vol_structure[:, :, :, slice_index] = structure.numpy()
@@ -403,7 +403,7 @@ class SampleResults(BaseResults):
         raise ValueError(f'Slice index {slice_index} not found for sample {self.sample}.')
 
       idx = [i for i, s_idx in original_idx.items() if s_idx == slice_index][0]
-      structure, original_dose, _, _ = self.dataset[idx]
+      structure, original_dose, _ = self.dataset[idx]
       original_dose = self.dataset.denormalize_target(original_dose)[0].numpy()
       pred_dose_vol = self.load_pred_volume()
       pred_dose = pred_dose_vol[:, :, slice_index]
@@ -719,7 +719,7 @@ class ModelComparison(BaseResults):
         raise ValueError(f'Slice index {slice_index} not found for sample {sample}.')
 
       idx = [i for i, s_idx in original_idx.items() if s_idx == slice_index][0]
-      structure, original_dose, _, _ = first_result.dataset[idx]
+      structure, original_dose, _ = first_result.dataset[idx]
       original_dose = first_result.dataset.denormalize_target(original_dose)[0].numpy()
     elif axis == "axial" or axis == "coronal":
       structure_vol, original_dose_vol = sample_results.load_orig_volume()

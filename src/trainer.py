@@ -225,7 +225,7 @@ class Trainer:
       self.model.train()
 
       pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False, disable=not self.is_main_process)
-      for structure, target, _, _ in pbar_batches:
+      for structure, target, _ in pbar_batches:
         self.optim.zero_grad()
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)

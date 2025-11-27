@@ -137,11 +137,12 @@ class Evaluator:
       sample_metrics = []
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
-      for structure, target, body, info in pbar:
+      for structure, target, info in pbar:
         structure = structure.to(self.device)
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
-        body = body.to(self.device)
+        body = self.dataloader.dataset.selector.get_body(structure)
+
         condition = self.dataloader.dataset.selector.select_channels(structure, self.conditioning_groups)
 
         autocast = contextlib.nullcontext()

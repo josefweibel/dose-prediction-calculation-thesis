@@ -35,11 +35,11 @@ class MetricsRecalculator:
     sample_metrics = []
 
     for idx in tqdm(range(len(self.dataset))):
-      structure, target, body, info = self.dataset[idx]
+      structure, target, info = self.dataset[idx]
       structure = structure.unsqueeze(0).to(self.device)
       target = target.unsqueeze(0).to(self.device)
       target = self.dataset.denormalize_target(target)
-      body = body.unsqueeze(0).to(self.device)
+      body = self.dataset.selector.get_body(structure).to(self.device)
 
       file_name = info['file_name']
       slice_idx = info['index']

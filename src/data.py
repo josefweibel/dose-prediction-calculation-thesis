@@ -49,6 +49,7 @@ class StructureSelector:
 
   Available groups:
     - 'ct': CT scan (1 channel)
+    - 'body': Body mask (1 channel)
     - 'ptv': Combined PTV mask (1 channel)
     - 'ptv_masks': Individual PTV masks for 70/63/56 Gy (3 channels)
     - 'oar': OAR binary masks (33 channels)
@@ -59,6 +60,7 @@ class StructureSelector:
   # Define all available structure groups and their channel counts
   AVAILABLE_GROUPS = {
     'ct': 1,
+    'body': 1,
     'ptv': 1,
     'ptv_masks': 3,  # ptv70, ptv63, ptv56
     'oar': len(GDPHMM_OAR),  # 33
@@ -99,7 +101,7 @@ class StructureSelector:
     Build structure tensor from preprocessed data dict.
 
     Args:
-      data: Dict with keys 'ct', 'ptv', 'ptv70', 'ptv63', 'ptv56', 'oar', 'oar_sdm', 'ptv_sdm'
+      data: Dict with keys 'ct', 'body', 'ptv', 'ptv70', 'ptv63', 'ptv56', 'oar', 'oar_sdm', 'ptv_sdm'
             Each value should be a torch.Tensor or numpy array
 
     Returns:
@@ -110,6 +112,8 @@ class StructureSelector:
     for group in self.groups:
       if group == 'ct':
         components.append(data['ct'])
+      elif group == 'body':
+        components.append(data['body'])
       elif group == 'ptv':
         components.append(data['ptv'])
       elif group == 'ptv_masks':
@@ -245,6 +249,18 @@ class StructureSelector:
     """
     return self.get_component(structure, 'ct')
 
+  def get_body(self, structure):
+    """
+    Get body mask channel from structure tensor.
+
+    Args:
+      structure: (B, C, H, W) or (C, H, W) structure tensor
+
+    Returns:
+      Body mask channel(s): (B, 1, H, W) or (1, H, W)
+    """
+    return self.get_component(structure, 'body')
+
   def get_oar(self, structure, oar_name):
     """
     Get specific OAR channel from structure tensor.
@@ -296,8 +312,8 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     dataset_name: Name of dataset (e.g., 'gdphmm-hn')
     split: 'train', 'valid', or 'test'
     structure_groups: List of structure groups to load. If None, loads all.
-                      Available: ['ct', 'ptv', 'ptv_masks', 'oar', 'oar_sdm', 'ptv_sdm']
-                      Example: ['ct', 'oar', 'ptv_sdm'] to load only CT, OARs, and PTV SDM
+                      Available: ['ct', 'body', 'ptv', 'ptv_masks', 'oar', 'oar_sdm', 'ptv_sdm']
+                      Example: ['ct', 'body', 'oar', 'ptv_sdm'] to load only CT, body mask, OARs, and PTV SDM
     limit: Optional limit on number of slices
     skip: Number of slices to skip from start
 
@@ -307,15 +323,16 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
       python scripts/preprocess_gdphmm_slices.py --pad-size 256 256
 
   Example usage:
-    # Load only CT, OARs, and PTV SDM (saves memory compared to loading everything)
+    # Load only CT, body, OARs, and PTV SDM (saves memory compared to loading everything)
     dataset = GDPHMMPreprocessedSlicesDataset(
       'gdphmm-hn', 'train',
-      structure_groups=['ct', 'oar', 'ptv_sdm']
+      structure_groups=['ct', 'body', 'oar', 'ptv_sdm']
     )
-    structure, dose, body, info = dataset[0]
+    structure, dose, info = dataset[0]
 
     # Access specific components easily
     ct = dataset.selector.get_component(structure, 'ct')
+    body = dataset.selector.get_component(structure, 'body')
     oar = dataset.selector.get_component(structure, 'oar')
   """
   def __init__(
@@ -366,9 +383,8 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
 
     Returns:
       structure: (C, H, W) tensor with C channels determined by structure_groups
-                 Use dataset.selector.get_component(structure, 'ct') to access components
+                 Use dataset.selector.get_component(structure, 'ct') or 'body' to access components
       dose: (1, H, W) tensor, normalized dose
-      body: (1, H, W) tensor, body mask
       info: dict with slice metadata
     """
     row = self.index.iloc[idx]
@@ -380,6 +396,7 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     # Convert all data to tensors with proper type conversions
     data = {
       'ct': torch.from_numpy(data_np['ct']),  # float32, normalized [0, 1]
+      'body': torch.from_numpy(data_np['body']),  # uint8 {0, 1}
       'ptv': torch.from_numpy(data_np['ptv']).float() / 100.0,  # uint8 {0, 56, 63, 70} → float32 [0, 1]
       'ptv70': torch.from_numpy(data_np['ptv70']),  # uint8 {0, 1}
       'ptv63': torch.from_numpy(data_np['ptv63']),  # uint8 {0, 1}
@@ -392,9 +409,8 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     # Use selector to build structure with only selected groups
     structure = self.selector.build_structure(data)
 
-    # Dose and body are always loaded
+    # Dose is always loaded
     dose = torch.from_numpy(data_np['dose'])  # float32, normalized [0, 1]
-    body = torch.from_numpy(data_np['body'])  # uint8 {0, 1}
 
     # Metadata
     info = {
@@ -404,7 +420,7 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
       'index': row['slice_idx']
     }
 
-    return structure, dose, body, info
+    return structure, dose, info
 
   def denormalize_target(self, x):
     """Denormalize dose from [0, 1] to [0, 88] Gy."""
