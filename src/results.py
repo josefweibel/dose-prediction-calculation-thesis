@@ -7,7 +7,7 @@ from itertools import cycle
 from multiprocessing import Manager
 from pathlib import Path
 
-from data import GDPHMMSlicesDataset, SharedCache, GDPHMM_OAR, GDPHMM_DOSE_MAX
+from data import create_gdphmm_dataset, SharedCache, GDPHMM_OAR, GDPHMM_DOSE_MAX
 
 
 SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
@@ -25,6 +25,8 @@ METRC_LABELS = {
   'rmse_body': 'Root Mean Squared Error (RMSE) Body',
   'psnr_body': 'Peak Signal-to-Noise Ratio (PSNR) Body',
   'dose_score_body': 'Dose Score (MAE) Body',
+  'var_laplacian_diff': 'Sharpness Metric (Variance of Laplacian Difference)',
+  'mae_challenge': 'Mean Absolute Error (MAE) Challenge',
 }
 
 METRIC_ABBRS = {
@@ -40,11 +42,17 @@ METRIC_ABBRS = {
   'rmse_body': 'RMSE Body',
   'psnr_body': 'PSNR Body',
   'dose_score_body': 'Dose Score (MAE) Body',
+  'var_laplacian_diff': 'Sharpness',
+  'mae_challenge': 'MAE Challenge',
 }
 
-DEFAULT_METRICS = ['rmse', 'dose_score', 'dvh', 'rmse_body', 'dose_score_body', 'homogeneity_index', 'ssim', 'psnr', 'psnr_body']
+DEFAULT_METRICS = [
+  'rmse', 'dose_score', 'dvh',
+  'var_laplacian_diff', 'dose_score_body', 'homogeneity_index',
+  'ssim', 'mae_challenge', 'psnr_body'
+]
 
-HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body']
+HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body', 'var_laplacian_diff']
 
 manager = None
 
@@ -54,12 +62,17 @@ def build_dataset(dataset_split='test'):
     manager = Manager()
 
   cache = SharedCache(manager)
-  return GDPHMMSlicesDataset(
-    dataset_name='gdphmm-hn-vmat',
-    split=dataset_split,
-    img_size=[176, 160],
-    cache=cache,
-  )
+
+  # Create a config dict for the factory function
+  config = {
+    'data': {
+      'dataset_strategy': 'original',  # Use original dataset for backwards compatibility
+      'dataset_name': 'gdphmm-hn-vmat',
+      'img_size': [176, 160],
+    }
+  }
+
+  return create_gdphmm_dataset(config, dataset_split, cache=cache)
 
 
 def compute_dvh(dose, mask, bins):
@@ -486,6 +499,9 @@ class ModelComparison(BaseResults):
     data = []
     labels = []
     for result, label in zip(self.results_list, self.result_labels):
+      if metric not in result.volume_metrics.columns:
+        print(f'Warning: Metric {metric} not found in result for model {label}. Skipping.')
+        continue
       data.extend(result.volume_metrics[metric].tolist())
       labels.extend([label] * len(result.volume_metrics[metric]))
 

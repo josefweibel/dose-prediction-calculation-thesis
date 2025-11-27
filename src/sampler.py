@@ -4,7 +4,7 @@ from multiprocessing import Manager
 import numpy as np
 
 from config import read_model_config
-from data import GDPHMMSlicesDataset, build_cache
+from data import create_gdphmm_dataset, build_cache
 from evaluator import Evaluator
 from mamba_model import MambaUnet, remap_state_dict
 from utils.mp import detect_device, PrefetchLoader
@@ -41,13 +41,7 @@ class Sampler:
 
     self.conditioning_selector = build_conditioning_selector(self.model_config)
 
-    self.dataset = GDPHMMSlicesDataset(
-      dataset_name=self.model_config['data']['dataset_name'],
-      split=data_split,
-      img_size=self.model_config['data']['img_size'],
-      cache=shared_cache,
-      voxel_spacing=self.model_config['data'].get('voxel_spacing', None),
-    )
+    self.dataset = create_gdphmm_dataset(self.model_config, data_split, cache=shared_cache)
 
     if self.is_main_process:
       print('Dataset size', len(self.dataset))

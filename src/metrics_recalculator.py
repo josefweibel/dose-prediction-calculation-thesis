@@ -8,7 +8,7 @@ from evaluator import build_metrics, compute_metrics
 from results import SAMPLES_PATH
 from utils.mp import detect_device
 from config import read_model_config, read_sampling_config
-from data import GDPHMMSlicesDataset, build_cache
+from data import create_gdphmm_dataset, build_cache
 
 
 class MetricsRecalculator:
@@ -27,12 +27,7 @@ class MetricsRecalculator:
     self.manager = Manager()
     shared_cache = build_cache(self.sampling_config, self.manager, 'data')
 
-    self.dataset = GDPHMMSlicesDataset(
-      dataset_name=self.model_config['data']['dataset_name'],
-      split=data_split,
-      img_size=self.model_config['data']['img_size'],
-      cache=shared_cache,
-    )
+    self.dataset = create_gdphmm_dataset(self.model_config, data_split, cache=shared_cache)
 
     self.device = detect_device(None)
     self.metrics = build_metrics(self.dataset, self.device)

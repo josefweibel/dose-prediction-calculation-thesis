@@ -254,6 +254,215 @@ class GDPHMMSlicesDataset(Dataset):
 
     return ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm
 
+class GDPHMMPreprocessedSlicesDataset(Dataset):
+  """
+  Dataset for loading preprocessed GDPHMM slices.
+
+  This dataset loads slices that have been preprocessed with all transformations
+  already applied (clipping, normalization, SDM computation, type conversions, padding).
+  No caching is needed since slices are stored individually and ready to use.
+
+  Compared to GDPHMMSlicesDataset:
+    - No cache needed (slices already preprocessed)
+    - Faster loading (no on-the-fly transformations or padding)
+    - Simpler implementation
+    - Lower memory usage
+
+  Args:
+    dataset_name: Name of dataset (e.g., 'gdphmm-hn')
+    split: 'train', 'valid', or 'test'
+    limit: Optional limit on number of slices
+    skip: Number of slices to skip from start
+
+  Note:
+    Assumes slices were preprocessed with --pad-size argument.
+    Preprocess your data with:
+      python scripts/preprocess_gdphmm_slices.py --pad-size 256 256
+  """
+  def __init__(
+    self,
+    dataset_name,
+    split,
+    limit=None,
+    skip=0,
+  ):
+    self.dataset_name = dataset_name
+    self.split = split
+
+    # Load index of preprocessed slices
+    data_dir = GDPHMM_DATA_BASE_PATH / f'{dataset_name}_slices' / split
+    index_path = data_dir / '_index.csv'
+
+    if not index_path.exists():
+      raise FileNotFoundError(
+        f"Preprocessed data not found at {data_dir}. "
+        f"Run: python scripts/preprocess_gdphmm_slices.py --dataset {dataset_name} --pad-size 256 256"
+      )
+
+    self.index = pd.read_csv(index_path)
+    self.data_dir = data_dir
+
+    # Apply skip and limit
+    if skip > 0:
+      self.index = self.index.iloc[skip:]
+    if limit is not None:
+      indices = np.linspace(0, len(self.index) - 1, limit, dtype=int)
+      self.index = self.index.iloc[indices]
+
+    self.index = self.index.reset_index(drop=True)
+
+    self.n_structures = len(GDPHMM_OAR) + 1 + 1  # OARs + PTV + PTV_SDM
+    self.dose_range = (GDPHMM_DOSE_MIN, GDPHMM_DOSE_MAX)
+
+  def __len__(self):
+    return len(self.index)
+
+  def __getitem__(self, idx):
+    """
+    Load a preprocessed slice (already padded).
+
+    Returns:
+      structure: (C, H, W) tensor with C = 69 channels (CT, PTV, OAR, PTV_SDM, OAR_SDM)
+                 H, W = 256, 256 (pre-padded during preprocessing)
+      dose: (1, H, W) tensor, normalized dose
+      body: (1, H, W) tensor, body mask
+      info: dict with slice metadata
+    """
+    row = self.index.iloc[idx]
+    slice_path = self.data_dir / row['file']
+
+    # Load preprocessed slice (already transformed and padded)
+    data = np.load(slice_path)
+
+    # Convert to tensors with proper type conversions
+    # CT: already float32, normalized [0, 1]
+    ct = torch.from_numpy(data['ct'])
+
+    # Dose: already float32, normalized [0, 1]
+    dose = torch.from_numpy(data['dose'])
+
+    # PTV: uint8 {0, 56, 63, 70} → float32 [0, 1]
+    ptv = torch.from_numpy(data['ptv']).float() / 100.0
+
+    # Body: uint8 {0, 1}
+    body = torch.from_numpy(data['body'])
+
+    # OAR: uint8 {0, 1}
+    oar = torch.from_numpy(data['oar'])
+
+    # OAR SDM: float16 → float32
+    oar_sdm = torch.from_numpy(data['oar_sdm']).float()
+
+    # PTV SDM: float16 → float32
+    ptv_sdm = torch.from_numpy(data['ptv_sdm']).float()
+
+    # Concatenate structure channels: CT + PTV + OAR + PTV_SDM + OAR_SDM
+    # Note: Slices are already padded during preprocessing
+    structure = torch.cat([
+      ct,        # (1, H, W)
+      ptv,       # (1, H, W)
+      oar,       # (33, H, W)
+      ptv_sdm,   # (1, H, W)
+      oar_sdm    # (33, H, W)
+    ], dim=0)    # Total: (69, H, W)
+
+    # Metadata
+    info = {
+      'file_path': str(slice_path),
+      'file_name': row['file'],
+      'volume': row['volume'],
+      'index': row['slice_idx']
+    }
+
+    return structure, dose, body, info
+
+  def denormalize_target(self, x):
+    """Denormalize dose from [0, 1] to [0, 88] Gy."""
+    return x * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
+
+  def finish(self):
+    """Compatibility method (no cleanup needed for preprocessed dataset)."""
+    pass
+
+
+def create_gdphmm_dataset(config, split, cache=None):
+  """
+  Factory function to create GDPHMM dataset based on configuration.
+
+  This function creates either the original GDPHMMSlicesDataset (with cache)
+  or the new GDPHMMPreprocessedSlicesDataset (pre-padded, no cache) based
+  on the 'dataset_strategy' config option.
+
+  Args:
+    config: Configuration dict containing 'data' section
+    split: 'train', 'valid', or 'test'
+    cache: Cache object for original dataset (ignored for preprocessed)
+
+  Returns:
+    Dataset instance (either GDPHMMSlicesDataset or GDPHMMPreprocessedSlicesDataset)
+
+  Config options:
+    data:
+      dataset_strategy: 'original' or 'preprocessed' (default: 'original')
+      dataset_name: Name of dataset (e.g., 'gdphmm-hn')
+      img_size: Image size [H, W] (used only for original strategy)
+      train_limit/valid_limit: Optional limit on number of slices
+      train_skip/valid_skip: Optional number of slices to skip
+      voxel_spacing: Optional voxel spacing for SDM computation (original only)
+
+  Example config (original strategy):
+    data:
+      dataset_strategy: original  # or omit (default)
+      dataset_name: gdphmm-hn
+      img_size: [176, 160]
+      train_cache_size: 2048
+      valid_cache_size: 512
+
+  Example config (preprocessed strategy):
+    data:
+      dataset_strategy: preprocessed
+      dataset_name: gdphmm-hn
+      # Note: img_size not needed, slices are pre-padded to 256x256
+  """
+  data_config = config['data']
+  strategy = data_config.get('dataset_strategy', 'original')
+
+  # Common parameters
+  dataset_name = data_config['dataset_name']
+  limit_key = f'{split}_limit'
+  skip_key = f'{split}_skip'
+  limit = data_config.get(limit_key, None)
+  skip = data_config.get(skip_key, 0)
+
+  if strategy == 'preprocessed':
+    # New preprocessed dataset (no cache, pre-padded)
+    return GDPHMMPreprocessedSlicesDataset(
+      dataset_name=dataset_name,
+      split=split,
+      limit=limit,
+      skip=skip,
+    )
+  elif strategy == 'original':
+    # Original dataset (with cache, runtime padding)
+    img_size = data_config['img_size']
+    voxel_spacing = data_config.get('voxel_spacing', None)
+
+    return GDPHMMSlicesDataset(
+      dataset_name=dataset_name,
+      split=split,
+      img_size=img_size,
+      limit=limit,
+      skip=skip,
+      cache=cache,
+      voxel_spacing=voxel_spacing,
+    )
+  else:
+    raise ValueError(
+      f"Unknown dataset_strategy: '{strategy}'. "
+      f"Must be 'original' or 'preprocessed'"
+    )
+
+
 class PadToFixedSize:
   def __init__(self, target_size, fill=0, padding_mode='constant'):
     """

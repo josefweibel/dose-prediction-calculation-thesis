@@ -10,7 +10,7 @@ from tqdm import tqdm
 import copy
 import wandb
 
-from data import GDPHMMSlicesDataset
+from data import create_gdphmm_dataset
 from model_cache import DeepCache, CacheConfig
 from evaluator import Evaluator
 from config import read_sampling_config
@@ -97,30 +97,14 @@ class Trainer:
 
     self.conditioning_selector = build_conditioning_selector(self.config)
 
-    train_dataset = GDPHMMSlicesDataset(
-      dataset_name=self.config['data']['dataset_name'],
-      split='train',
-      img_size=self.config['data']['img_size'],
-      limit=self.config['data']['train_limit'] if 'train_limit' in self.config['data'] else None,
-      skip=self.config['data']['train_skip'] if 'train_skip' in self.config['data'] else 0,
-      cache=cache,
-      voxel_spacing=self.config['data'].get('voxel_spacing', None),
-    )
+    train_dataset = create_gdphmm_dataset(self.config, 'train', cache=cache)
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
 
     if self.config['data'].get('val_on_train', False):
       val_dataset = train_dataset
     else:
-      val_dataset = GDPHMMSlicesDataset(
-        dataset_name=self.config['data']['dataset_name'],
-        split='valid',
-        img_size=self.config['data']['img_size'],
-        limit=self.config['data']['valid_limit'] if 'valid_limit' in self.config['data'] else None,
-        skip=self.config['data']['valid_skip'] if 'valid_skip' in self.config['data'] else 0,
-        cache=cache,
-        voxel_spacing=self.config['data'].get('voxel_spacing', None),
-      )
+      val_dataset = create_gdphmm_dataset(self.config, 'valid', cache=cache)
     if self.is_main_process:
       print('Validation dataset size', len(val_dataset))
 

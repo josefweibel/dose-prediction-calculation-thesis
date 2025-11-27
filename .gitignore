@@ -223,3 +223,6 @@ checkpoints/
 !checkpoints/.gitkeep
 wandb/
 samples/
+.claude/
+
+data/gdphmm-hn_slices
