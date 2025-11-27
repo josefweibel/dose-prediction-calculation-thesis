@@ -23,11 +23,14 @@ Output structure:
 Each slice contains:
   - ct: (1, H, W) float32 - clipped and normalized CT scan
   - dose: (1, H, W) float32 - normalized dose distribution
-  - ptv: (1, H, W) uint8 - PTV dose levels {0, 56, 63, 70} Gy
+  - ptv: (1, H, W) uint8 - PTV dose levels {0, 56, 63, 70} Gy (combined mask for backward compatibility)
+  - ptv70: (1, H, W) uint8 - binary mask for PTV70
+  - ptv63: (1, H, W) uint8 - binary mask for PTV63
+  - ptv56: (1, H, W) uint8 - binary mask for PTV56
   - body: (1, H, W) uint8 - body mask
   - oar: (N_OAR, H, W) uint8 - binary OAR masks
   - oar_sdm: (N_OAR, H, W) float16 - signed distance maps for OARs
-  - ptv_sdm: (1, H, W) float16 - signed distance map for PTV
+  - ptv_sdm: (1, H, W) float16 - signed distance map for combined PTV
 """
 
 import numpy as np
@@ -77,7 +80,7 @@ def compute_sdms(oar_vol, ptv_vol, voxel_spacing):
   return oar_sdm, ptv_sdm
 
 
-def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size=None):
+def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, pad_size=None):
   """
   Apply all transformations to match the GDPHMMSlicesDataset behavior.
 
@@ -85,6 +88,7 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size
     - CT: clip to [-1024, 3071], normalize to [0, 1]
     - Dose: normalize to [0, 1]
     - PTV: store dose levels as uint8 (0, 56, 63, 70) instead of float32 (0.0, 0.56, 0.63, 0.70)
+    - PTV70/63/56: binary masks stored as uint8
     - Body: convert to uint8
     - OAR: convert to uint8
     - Padding: optionally pad to fixed size (saves runtime padding)
@@ -92,7 +96,10 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size
   Args:
     ct_vol: (H, W, D) float - CT scan
     dose_vol: (H, W, D) float - dose distribution
-    ptv_vol: (H, W, D) float - PTV mask with values in [0, 1] (dose/100)
+    ptv_vol: (H, W, D) float - combined PTV mask with values in [0, 1] (dose/100)
+    ptv70_vol: (H, W, D) - binary mask for PTV70
+    ptv63_vol: (H, W, D) - binary mask for PTV63
+    ptv56_vol: (H, W, D) - binary mask for PTV56
     body_vol: (H, W, D) - body mask
     oar_vol: (N_OAR, H, W, D) - OAR binary masks
     pad_size: optional (H, W) to pad all slices to this size
@@ -112,6 +119,11 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size
   # PTV: store as dose levels (0, 56, 63, 70) instead of normalized (0.0, 0.56, 0.63, 0.70)
   # This saves 75% storage (float32 -> uint8) with no information loss
   ptv_transformed = np.round(ptv_vol * 100).astype(np.uint8)
+
+  # Individual PTV masks: store as binary uint8
+  ptv70_transformed = ptv70_vol.astype(np.uint8)
+  ptv63_transformed = ptv63_vol.astype(np.uint8)
+  ptv56_transformed = ptv56_vol.astype(np.uint8)
 
   # Body: convert to uint8
   body_transformed = body_vol.astype(np.uint8)
@@ -144,10 +156,13 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size
     ct_transformed = np.pad(ct_transformed, pad_2d, mode='constant', constant_values=0)
     dose_transformed = np.pad(dose_transformed, pad_2d, mode='constant', constant_values=0)
     ptv_transformed = np.pad(ptv_transformed, pad_2d, mode='constant', constant_values=0)
+    ptv70_transformed = np.pad(ptv70_transformed, pad_2d, mode='constant', constant_values=0)
+    ptv63_transformed = np.pad(ptv63_transformed, pad_2d, mode='constant', constant_values=0)
+    ptv56_transformed = np.pad(ptv56_transformed, pad_2d, mode='constant', constant_values=0)
     body_transformed = np.pad(body_transformed, pad_2d, mode='constant', constant_values=0)
     oar_transformed = np.pad(oar_transformed, pad_3d, mode='constant', constant_values=0)
 
-  return ct_transformed, dose_transformed, ptv_transformed, body_transformed, oar_transformed
+  return ct_transformed, dose_transformed, ptv_transformed, ptv70_transformed, ptv63_transformed, ptv56_transformed, body_transformed, oar_transformed
 
 
 def process_volume(args):
@@ -178,15 +193,20 @@ def process_volume(args):
       axis=0
     )
 
-    # Build PTV volume (H, W, D)
+    # Build PTV volume (H, W, D) - combined mask
     ptv_vol = np.maximum.reduce(
       [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
     )
 
+    # Extract individual PTV masks (binary)
+    ptv70_vol = vol.get('PTV70', np.zeros_like(vol['dose'])).astype(np.uint8)
+    ptv63_vol = vol.get('PTV63', np.zeros_like(vol['dose'])).astype(np.uint8)
+    ptv56_vol = vol.get('PTV56', np.zeros_like(vol['dose'])).astype(np.uint8)
+
     # Apply all transformations (clipping, normalization, type conversion, padding)
     # NOTE: Padding is applied BEFORE SDM computation to avoid 0-valued edges in distance maps
-    ct_vol, dose_vol, ptv_vol, body_vol, oar_vol = apply_transformations(
-      ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size=pad_size
+    ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol = apply_transformations(
+      ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, pad_size=pad_size
     )
 
     # Compute signed distance maps AFTER padding so distances are correct at edges
@@ -208,6 +228,9 @@ def process_volume(args):
         'ct': ct_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
         'dose': dose_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
         'ptv': ptv_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'ptv70': ptv70_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'ptv63': ptv63_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'ptv56': ptv56_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
         'body': body_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
         'oar': oar_vol[:, :, :, slice_idx],  # (N_OAR, H, W)
         'oar_sdm': oar_sdm[:, :, :, slice_idx],  # (N_OAR, H, W)

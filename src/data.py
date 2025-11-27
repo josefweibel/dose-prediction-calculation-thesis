@@ -311,7 +311,7 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
 
     self.index = self.index.reset_index(drop=True)
 
-    self.n_structures = len(GDPHMM_OAR) + 1 + 1  # OARs + PTV + PTV_SDM
+    self.n_structures = len(GDPHMM_OAR) * 2 + 1 + 3 + 1  # OARs + OAR_SDM + PTV + (PTV70, PTV63, PTV56) + PTV_SDM
     self.dose_range = (GDPHMM_DOSE_MIN, GDPHMM_DOSE_MAX)
 
   def __len__(self):
@@ -322,8 +322,7 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     Load a preprocessed slice (already padded).
 
     Returns:
-      structure: (C, H, W) tensor with C = 69 channels (CT, PTV, OAR, PTV_SDM, OAR_SDM)
-                 H, W = 256, 256 (pre-padded during preprocessing)
+      structure: (C, H, W) tensor with C = 72 channels (CT, PTV, PTV70, PTV63, PTV56, OAR, PTV_SDM, OAR_SDM)
       dose: (1, H, W) tensor, normalized dose
       body: (1, H, W) tensor, body mask
       info: dict with slice metadata
@@ -344,6 +343,11 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     # PTV: uint8 {0, 56, 63, 70} → float32 [0, 1]
     ptv = torch.from_numpy(data['ptv']).float() / 100.0
 
+    # Individual PTV masks: uint8 {0, 1} → keep as uint8
+    ptv70 = torch.from_numpy(data['ptv70'])
+    ptv63 = torch.from_numpy(data['ptv63'])
+    ptv56 = torch.from_numpy(data['ptv56'])
+
     # Body: uint8 {0, 1}
     body = torch.from_numpy(data['body'])
 
@@ -356,15 +360,18 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     # PTV SDM: float16 → float32
     ptv_sdm = torch.from_numpy(data['ptv_sdm']).float()
 
-    # Concatenate structure channels: CT + PTV + OAR + PTV_SDM + OAR_SDM
+    # Concatenate structure channels: CT + PTV + PTV70 + PTV63 + PTV56 + OAR + PTV_SDM + OAR_SDM
     # Note: Slices are already padded during preprocessing
     structure = torch.cat([
       ct,        # (1, H, W)
       ptv,       # (1, H, W)
       oar,       # (33, H, W)
       ptv_sdm,   # (1, H, W)
-      oar_sdm    # (33, H, W)
-    ], dim=0)    # Total: (69, H, W)
+      oar_sdm,   # (33, H, W)
+      ptv70,     # (1, H, W)
+      ptv63,     # (1, H, W)
+      ptv56,     # (1, H, W)
+    ], dim=0)    # Total: (72, H, W)
 
     # Metadata
     info = {
