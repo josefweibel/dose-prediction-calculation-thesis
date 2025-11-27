@@ -14,6 +14,9 @@ All transformations from the original dataset are applied:
   - OAR SDM: signed distance maps, stored as float16 (saves 50% space)
   - PTV SDM: signed distance map, stored as float16 (saves 50% space)
 
+IMPORTANT: SDMs are computed AFTER padding to ensure correct distance values at edges.
+If SDMs were computed before padding, the padded regions would have incorrect 0 values.
+
 Output structure:
   data/{dataset_name}_slices/{split}/{volume_name}/slice_{idx:04d}.npz
 
@@ -74,7 +77,7 @@ def compute_sdms(oar_vol, ptv_vol, voxel_spacing):
   return oar_sdm, ptv_sdm
 
 
-def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, oar_sdm, ptv_sdm, pad_size=None):
+def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size=None):
   """
   Apply all transformations to match the GDPHMMSlicesDataset behavior.
 
@@ -84,7 +87,6 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, oar_sdm,
     - PTV: store dose levels as uint8 (0, 56, 63, 70) instead of float32 (0.0, 0.56, 0.63, 0.70)
     - Body: convert to uint8
     - OAR: convert to uint8
-    - SDMs: convert to float16 (saves 50% storage, sufficient precision)
     - Padding: optionally pad to fixed size (saves runtime padding)
 
   Args:
@@ -93,12 +95,10 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, oar_sdm,
     ptv_vol: (H, W, D) float - PTV mask with values in [0, 1] (dose/100)
     body_vol: (H, W, D) - body mask
     oar_vol: (N_OAR, H, W, D) - OAR binary masks
-    oar_sdm: (N_OAR, H, W, D) float - OAR signed distance maps
-    ptv_sdm: (H, W, D) float - PTV signed distance map
     pad_size: optional (H, W) to pad all slices to this size
 
   Returns:
-    Transformed versions ready for direct use
+    Transformed versions ready for direct use (without SDMs - those are computed after padding)
   """
   # CT: clip and normalize
   ct_transformed = np.clip(ct_vol, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX)
@@ -118,10 +118,6 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, oar_sdm,
 
   # OAR: convert to uint8
   oar_transformed = oar_vol.astype(np.uint8)
-
-  # SDMs: convert to float16 for storage efficiency (saves 50% space, sufficient precision)
-  oar_sdm_transformed = oar_sdm.astype(np.float16)
-  ptv_sdm_transformed = ptv_sdm.astype(np.float16)
 
   # Optionally pad all volumes to fixed size using np.pad (much simpler and faster!)
   if pad_size is not None:
@@ -149,11 +145,9 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, oar_sdm,
     dose_transformed = np.pad(dose_transformed, pad_2d, mode='constant', constant_values=0)
     ptv_transformed = np.pad(ptv_transformed, pad_2d, mode='constant', constant_values=0)
     body_transformed = np.pad(body_transformed, pad_2d, mode='constant', constant_values=0)
-    ptv_sdm_transformed = np.pad(ptv_sdm_transformed, pad_2d, mode='constant', constant_values=0)
     oar_transformed = np.pad(oar_transformed, pad_3d, mode='constant', constant_values=0)
-    oar_sdm_transformed = np.pad(oar_sdm_transformed, pad_3d, mode='constant', constant_values=0)
 
-  return ct_transformed, dose_transformed, ptv_transformed, body_transformed, oar_transformed, oar_sdm_transformed, ptv_sdm_transformed
+  return ct_transformed, dose_transformed, ptv_transformed, body_transformed, oar_transformed
 
 
 def process_volume(args):
@@ -189,13 +183,18 @@ def process_volume(args):
       [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
     )
 
-    # Compute signed distance maps
+    # Apply all transformations (clipping, normalization, type conversion, padding)
+    # NOTE: Padding is applied BEFORE SDM computation to avoid 0-valued edges in distance maps
+    ct_vol, dose_vol, ptv_vol, body_vol, oar_vol = apply_transformations(
+      ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, pad_size=pad_size
+    )
+
+    # Compute signed distance maps AFTER padding so distances are correct at edges
     oar_sdm, ptv_sdm = compute_sdms(oar_vol, ptv_vol, voxel_spacing)
 
-    # Apply all transformations (clipping, normalization, type conversion, padding)
-    ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, oar_sdm, ptv_sdm = apply_transformations(
-      ct_vol, dose_vol, ptv_vol, body_vol, oar_vol, oar_sdm, ptv_sdm, pad_size=pad_size
-    )
+    # Convert SDMs to float16 for storage efficiency (saves 50% space, sufficient precision)
+    oar_sdm = oar_sdm.astype(np.float16)
+    ptv_sdm = ptv_sdm.astype(np.float16)
 
     # Create output directory for this volume
     volume_name = file_path.stem
