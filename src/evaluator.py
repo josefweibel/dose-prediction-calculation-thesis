@@ -14,7 +14,7 @@ from model_sampler import build_sampler
 from data import GDPHMM_OAR
 
 
-def compute_metrics(metrics, preds, target, structure, body):
+def compute_metrics(metrics, preds, target, structure, body, dataset):
   """
   Update all metrics with predictions and targets.
 
@@ -27,6 +27,7 @@ def compute_metrics(metrics, preds, target, structure, body):
     target: True doses, shape (batch_size, 1, H, W)
     structure: Structure tensor, shape (batch_size, n_channels, H, W)
     body: Body mask, shape (batch_size, 1, H, W)
+    dataset: Dataset with selector attribute
 
   Returns:
     Dictionary mapping metric names to computed values
@@ -41,9 +42,12 @@ def compute_metrics(metrics, preds, target, structure, body):
     elif isinstance(metric, BodyMaskedMetric):
       metric.update(preds, target, body)
     elif isinstance(metric, HomogeneityIndex):
-      metric.update(preds, target, structure[:, 1])
+      # Get PTV channel using selector
+      ptv_channel = dataset.selector.get_ptv(structure)
+      metric.update(preds, target, ptv_channel[:, 0])  # Remove channel dim
     elif isinstance(metric, ChallengeMAE):
-      metric.update(preds, target, structure[:, 1], body[0])
+      ptv_channel = dataset.selector.get_ptv(structure)
+      metric.update(preds, target, ptv_channel[:, 0], body[0])  # Remove channel dim
     else:
       metric.update(preds, target)
 
@@ -84,7 +88,13 @@ def build_metrics(dataset, device, include_region_metrics=True):
   }
 
   if include_region_metrics:
-    regions = [('PTV', 1)] + [(oar_name, i + 2) for i, oar_name in enumerate(GDPHMM_OAR)]
+    # Build region list with indices for RegionMaskedMetric
+    ptv_start, _ = dataset.selector.get_channel_indices('ptv')
+    regions = [('PTV', ptv_start)]
+
+    for oar_name in GDPHMM_OAR:
+      oar_index = dataset.selector.get_oar_index(oar_name)
+      regions.append((oar_name, oar_index))
 
     region_metric_configs = [
       ('mse', lambda: MeanSquaredError(sync_on_compute=False)),
@@ -108,14 +118,14 @@ def build_metrics(dataset, device, include_region_metrics=True):
 
 
 class Evaluator:
-  def __init__(self, dataloader, model_config, sampling_config, device, conditioning_selector, rank=0, world_size=1):
+  def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1):
     self.dataloader = dataloader
     self.model_config = model_config
     self.sampling_config = sampling_config
     self.device = device
     self.rank = rank
     self.world_size = world_size
-    self.conditioning_selector = conditioning_selector
+    self.conditioning_groups = self.model_config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
 
     self.metrics = build_metrics(dataloader.dataset, device)
 
@@ -132,7 +142,7 @@ class Evaluator:
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
         body = body.to(self.device)
-        condition = self.conditioning_selector.select_channels(structure)
+        condition = self.dataloader.dataset.selector.select_channels(structure, self.conditioning_groups)
 
         autocast = contextlib.nullcontext()
         if self.sampling_config['precision'] == 'fp16_amp':
@@ -166,7 +176,8 @@ class Evaluator:
             sample_pred,
             sample_target,
             structure[i:i+1],
-            body[i:i+1]
+            body[i:i+1],
+            self.dataloader.dataset
           )
           sample_row.update(metric_results)
 

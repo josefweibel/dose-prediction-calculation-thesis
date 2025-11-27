@@ -187,7 +187,7 @@ class BaseResults:
     return ax
 
   def plot_organ_dvh(self, organ_name, ax=None, max_dose=None):
-    structure_index = GDPHMM_OAR.index(organ_name) + 2  # +2 to skip CT and PTV
+    structure_index = self.dataset.selector.get_oar_index(organ_name)
     ax = self.plot_dvh(structure_index, ax, max_dose)
     ax.set_title(f'{organ_name} DVH Comparison')
     return ax
@@ -298,7 +298,9 @@ class BaseResults:
     return ax
 
   def plot_ptv_dvh(self, ax=None):
-    ax = self.plot_dvh(1, ax)
+    # For DVH plotting, we still need the index
+    ptv_start, _ = self.dataset.selector.get_channel_indices('ptv')
+    ax = self.plot_dvh(ptv_start, ax)
     ax.set_title(f'PTV DVH Comparison')
     return ax
 
@@ -429,9 +431,11 @@ class SampleResults(BaseResults):
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
-    ax[0].imshow(structure[0], cmap='gray')
+    # Get CT and PTV using selector
+    ct_slice = self.dataset.selector.get_ct(structure)[0]
+    ptv_mask = self.dataset.selector.get_ptv(structure)[0] > 0
 
-    ptv_mask = structure[1] > 0
+    ax[0].imshow(ct_slice, cmap='gray')
     overlay = np.zeros((*ptv_mask.shape, 4))
     overlay[ptv_mask, 0] = 1.0     # red channel
     overlay[ptv_mask, 3] = 0.3     # alpha channel
@@ -738,9 +742,11 @@ class ModelComparison(BaseResults):
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
-    axes[1, 0].imshow(structure[0], cmap='gray')
+    # Get CT and PTV using selector
+    ct_slice = first_result.dataset.selector.get_ct(structure)[0]
+    ptv_mask = first_result.dataset.selector.get_ptv(structure)[0] > 0
 
-    ptv_mask = structure[1] > 0
+    axes[1, 0].imshow(ct_slice, cmap='gray')
     overlay = np.zeros((*ptv_mask.shape, 4))
     overlay[ptv_mask, 0] = 1.0     # red channel
     overlay[ptv_mask, 3] = 0.3     # alpha channel

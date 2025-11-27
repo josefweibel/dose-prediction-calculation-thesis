@@ -18,7 +18,6 @@ from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
 from c3d_model import C3DLoss
 from models import build_model
-from conditioning import build_conditioning_selector
 
 def extract(v, t, x_shape):
   """
@@ -95,17 +94,18 @@ class Trainer:
 
     self.device = detect_device(local_rank)
 
-    self.conditioning_selector = build_conditioning_selector(self.config)
-
-    train_dataset = create_gdphmm_dataset(self.config, 'train', cache=cache)
-    if self.is_main_process:
-      print('Training dataset size', len(train_dataset))
+    # Training dataset uses only conditioning groups
+    conditioning_groups = self.config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
+    train_dataset = create_gdphmm_dataset(self.config, 'train', structure_groups=conditioning_groups, cache=cache)
 
     if self.config['data'].get('val_on_train', False):
       val_dataset = train_dataset
     else:
-      val_dataset = create_gdphmm_dataset(self.config, 'valid', cache=cache)
+      # Validation dataset loads all structures for metrics computation
+      val_dataset = create_gdphmm_dataset(self.config, 'valid', structure_groups=None, cache=cache)
+
     if self.is_main_process:
+      print('Training dataset size', len(train_dataset))
       print('Validation dataset size', len(val_dataset))
 
     self.train_sampler = None
@@ -149,7 +149,7 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    self.net_model = build_model(self.config, self.conditioning_selector).to(self.device)
+    self.net_model = build_model(self.config, train_dataset.selector.total_channels).to(self.device)
 
     if 'diffusion' in self.config:
       self.model = DiffusionModelTrainerModule(
@@ -212,7 +212,6 @@ class Trainer:
       model_config,
       read_sampling_config(self.config['validation_sampler']),
       self.device,
-      self.conditioning_selector,
       rank=self.rank,
       world_size=self.world_size,
     )
@@ -230,7 +229,7 @@ class Trainer:
         self.optim.zero_grad()
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
-        condition = self.conditioning_selector.select_channels(structure)
+        condition = structure # Training dataset already loads only conditioning groups, so structure IS the condition
 
         with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, condition)

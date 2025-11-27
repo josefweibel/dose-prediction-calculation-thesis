@@ -4,14 +4,13 @@ from multiprocessing import Manager
 import numpy as np
 
 from config import read_model_config
-from data import create_gdphmm_dataset, build_cache
+from data import create_gdphmm_dataset, build_cache, StructureSelector
 from evaluator import Evaluator
-from mamba_model import MambaUnet, remap_state_dict
+from mamba_model import remap_state_dict
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
 from models import build_model
-from conditioning import build_conditioning_selector
 
 
 class Sampler:
@@ -39,9 +38,11 @@ class Sampler:
     self.manager = Manager()
     shared_cache = build_cache(self.sampling_config, self.manager, 'data')
 
-    self.conditioning_selector = build_conditioning_selector(self.model_config)
+    self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None, cache=shared_cache)
 
-    self.dataset = create_gdphmm_dataset(self.model_config, data_split, cache=shared_cache)
+    conditioning_groups = self.model_config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
+    conditioning_selector = StructureSelector(groups=conditioning_groups)
+    self.conditioning_total_channels = conditioning_selector.total_channels
 
     if self.is_main_process:
       print('Dataset size', len(self.dataset))
@@ -68,7 +69,7 @@ class Sampler:
     if self.sampling_config['prefetch_on_gpu'] and self.device.type == 'cuda':
       self.dataloader = PrefetchLoader(self.dataloader, self.device)
 
-    self.ema_model = build_model(self.model_config, self.conditioning_selector).to(self.device)
+    self.ema_model = build_model(self.model_config, self.conditioning_total_channels).to(self.device)
 
     if epoch is None or epoch == 'latest':
       checkpoint = load_last_checkpoint(model_name)
@@ -87,7 +88,6 @@ class Sampler:
       self.model_config,
       self.sampling_config,
       self.device,
-      self.conditioning_selector,
       rank=self.rank,
       world_size=self.world_size,
     )

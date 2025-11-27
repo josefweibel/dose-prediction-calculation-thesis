@@ -4,8 +4,7 @@ from c3d_model import C3D, C3D_2D
 from beamdiff_model import build_beamdiff
 
 
-def build_model(model_config, conditioning_selector):
-  n_input_channels = conditioning_selector.get_n_input_channels()
+def build_model(model_config, n_input_channels):
 
   if 'c3d' in model_config:
     if model_config['c3d'].get('use_2d', True):

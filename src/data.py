@@ -33,6 +33,251 @@ GDPHMM_PTV = {
 }
 
 
+class StructureSelector:
+  """
+  Helper class to manage selective loading and indexing of structure components.
+
+  This class solves two problems:
+  1. Allows loading only needed structure groups (saves memory/computation)
+  2. Provides easy access to structure components without manual index tracking
+
+  Usage:
+    # Define what you need
+    selector = StructureSelector(groups=['ct', 'oar', 'ptv_sdm'])
+
+    # In dataset __getitem__, load only selected groups
+    structure = selector.build_structure(data)
+
+    # Access components easily
+    ct = selector.get_component(structure, 'ct')
+    oar = selector.get_component(structure, 'oar')
+
+  Available groups:
+    - 'ct': CT scan (1 channel)
+    - 'ptv': Combined PTV mask (1 channel)
+    - 'ptv_masks': Individual PTV masks for 70/63/56 Gy (3 channels)
+    - 'oar': OAR binary masks (33 channels)
+    - 'oar_sdm': OAR signed distance maps (33 channels)
+    - 'ptv_sdm': PTV signed distance map (1 channel)
+  """
+
+  # Define all available structure groups and their channel counts
+  AVAILABLE_GROUPS = {
+    'ct': 1,
+    'ptv': 1,
+    'ptv_masks': 3,  # ptv70, ptv63, ptv56
+    'oar': len(GDPHMM_OAR),  # 33
+    'oar_sdm': len(GDPHMM_OAR),  # 33
+    'ptv_sdm': 1,
+  }
+
+  def __init__(self, groups=None):
+    """
+    Initialize structure selector.
+
+    Args:
+      groups: List of group names to include. If None, includes all groups.
+              Example: ['ct', 'oar', 'ptv_sdm']
+    """
+    if groups is None:
+      groups = list(self.AVAILABLE_GROUPS.keys())
+
+    # Validate groups
+    invalid = set(groups) - set(self.AVAILABLE_GROUPS.keys())
+    if invalid:
+      raise ValueError(f"Invalid groups: {invalid}. Available: {list(self.AVAILABLE_GROUPS.keys())}")
+
+    self.groups = groups
+
+    # Build index mapping: group_name -> (start_idx, end_idx)
+    self._index_map = {}
+    current_idx = 0
+    for group in groups:
+      n_channels = self.AVAILABLE_GROUPS[group]
+      self._index_map[group] = (current_idx, current_idx + n_channels)
+      current_idx += n_channels
+
+    self.total_channels = current_idx
+
+  def build_structure(self, data):
+    """
+    Build structure tensor from preprocessed data dict.
+
+    Args:
+      data: Dict with keys 'ct', 'ptv', 'ptv70', 'ptv63', 'ptv56', 'oar', 'oar_sdm', 'ptv_sdm'
+            Each value should be a torch.Tensor or numpy array
+
+    Returns:
+      structure: (C, H, W) tensor with only selected groups concatenated
+    """
+    components = []
+
+    for group in self.groups:
+      if group == 'ct':
+        components.append(data['ct'])
+      elif group == 'ptv':
+        components.append(data['ptv'])
+      elif group == 'ptv_masks':
+        components.extend([data['ptv70'], data['ptv63'], data['ptv56']])
+      elif group == 'oar':
+        components.append(data['oar'])
+      elif group == 'oar_sdm':
+        components.append(data['oar_sdm'])
+      elif group == 'ptv_sdm':
+        components.append(data['ptv_sdm'])
+
+    # Concatenate all components
+    structure = torch.cat(components, dim=0)
+    return structure
+
+  def get_component(self, structure, group_name):
+    """
+    Extract a specific component from the concatenated structure tensor.
+
+    Args:
+      structure: (C, H, W) concatenated structure tensor
+      group_name: Name of group to extract (e.g., 'ct', 'oar')
+
+    Returns:
+      component: (C_group, H, W) tensor for the requested group
+    """
+    if group_name not in self._index_map:
+      raise ValueError(f"Group '{group_name}' not in selected groups: {self.groups}")
+
+    start, end = self._index_map[group_name]
+    return structure[start:end]
+
+  def get_channel_indices(self, group_name):
+    """
+    Get the channel index range for a specific group.
+
+    Args:
+      group_name: Name of group
+
+    Returns:
+      (start_idx, end_idx): Tuple of start and end indices
+    """
+    if group_name not in self._index_map:
+      raise ValueError(f"Group '{group_name}' not in selected groups: {self.groups}")
+    return self._index_map[group_name]
+
+  def get_oar_index(self, oar_name):
+    """
+    Get the channel index for a specific OAR within the OAR group.
+
+    Args:
+      oar_name: Name of the OAR (from GDPHMM_OAR list)
+
+    Returns:
+      Global channel index in the concatenated structure tensor
+    """
+    if 'oar' not in self._index_map:
+      raise ValueError("'oar' group not in selected groups")
+
+    oar_idx = GDPHMM_OAR.index(oar_name)
+    oar_start, _ = self._index_map['oar']
+    return oar_start + oar_idx
+
+  def get_oar_sdm_index(self, oar_name):
+    """
+    Get the channel index for a specific OAR SDM within the OAR SDM group.
+
+    Args:
+      oar_name: Name of the OAR (from GDPHMM_OAR list)
+
+    Returns:
+      Global channel index in the concatenated structure tensor
+    """
+    if 'oar_sdm' not in self._index_map:
+      raise ValueError("'oar_sdm' group not in selected groups")
+
+    oar_idx = GDPHMM_OAR.index(oar_name)
+    oar_sdm_start, _ = self._index_map['oar_sdm']
+    return oar_sdm_start + oar_idx
+
+  def select_channels(self, structure, groups):
+    """
+    Select specific groups from the structure tensor.
+
+    This is useful when you have a full structure tensor but only need certain groups
+    (e.g., for conditioning the model with a subset of available structures).
+
+    Args:
+      structure: (B, C, H, W) or (C, H, W) structure tensor
+      groups: List of group names to select (e.g., ['ct', 'ptv'])
+
+    Returns:
+      Selected channels concatenated together
+
+    Example:
+      # Dataset loaded all: ['ct', 'ptv', 'oar']
+      structure, _, _, _ = dataset[0]  # 35 channels
+
+      # Select only ct and ptv for conditioning
+      condition = dataset.selector.select_channels(structure, ['ct', 'ptv'])  # 2 channels
+    """
+    selected = []
+    for group in groups:
+      if group not in self._index_map:
+        raise ValueError(f"Group '{group}' not in dataset's loaded groups: {self.groups}")
+      component = self.get_component(structure, group)
+      selected.append(component)
+
+    import torch
+    return torch.cat(selected, dim=-3)  # Concatenate on channel dim (works for both 3D and 4D)
+
+  def get_ptv(self, structure):
+    """
+    Get PTV channel from structure tensor.
+
+    Args:
+      structure: (B, C, H, W) or (C, H, W) structure tensor
+
+    Returns:
+      PTV channel(s): (B, 1, H, W) or (1, H, W)
+    """
+    return self.get_component(structure, 'ptv')
+
+  def get_ct(self, structure):
+    """
+    Get CT channel from structure tensor.
+
+    Args:
+      structure: (B, C, H, W) or (C, H, W) structure tensor
+
+    Returns:
+      CT channel(s): (B, 1, H, W) or (1, H, W)
+    """
+    return self.get_component(structure, 'ct')
+
+  def get_oar(self, structure, oar_name):
+    """
+    Get specific OAR channel from structure tensor.
+
+    Args:
+      structure: (B, C, H, W) or (C, H, W) structure tensor
+      oar_name: Name of the OAR (from GDPHMM_OAR list)
+
+    Returns:
+      OAR channel: (B, 1, H, W) or (1, H, W)
+    """
+    if 'oar' not in self._index_map:
+      raise ValueError("'oar' group not in selected groups")
+
+    oar_idx = GDPHMM_OAR.index(oar_name)
+    oar_start, _ = self._index_map['oar']
+    global_idx = oar_start + oar_idx
+
+    # Handle both batched and unbatched
+    if structure.ndim == 4:  # (B, C, H, W)
+      return structure[:, global_idx:global_idx+1]
+    else:  # (C, H, W)
+      return structure[global_idx:global_idx+1]
+
+  def __repr__(self):
+    return f"StructureSelector(groups={self.groups}, total_channels={self.total_channels})"
+
+
 def to_float(x):
   return x.float()
 
@@ -256,21 +501,29 @@ class GDPHMMSlicesDataset(Dataset):
 
 class GDPHMMPreprocessedSlicesDataset(Dataset):
   """
-  Dataset for loading preprocessed GDPHMM slices.
+  Dataset for loading preprocessed GDPHMM slices with flexible structure selection.
 
   This dataset loads slices that have been preprocessed with all transformations
   already applied (clipping, normalization, SDM computation, type conversions, padding).
   No caching is needed since slices are stored individually and ready to use.
+
+  Uses StructureSelector to:
+    1. Load only needed structure groups (saves memory/computation)
+    2. Provide easy access to structure components without manual indexing
 
   Compared to GDPHMMSlicesDataset:
     - No cache needed (slices already preprocessed)
     - Faster loading (no on-the-fly transformations or padding)
     - Simpler implementation
     - Lower memory usage
+    - Flexible structure selection
 
   Args:
     dataset_name: Name of dataset (e.g., 'gdphmm-hn')
     split: 'train', 'valid', or 'test'
+    structure_groups: List of structure groups to load. If None, loads all.
+                      Available: ['ct', 'ptv', 'ptv_masks', 'oar', 'oar_sdm', 'ptv_sdm']
+                      Example: ['ct', 'oar', 'ptv_sdm'] to load only CT, OARs, and PTV SDM
     limit: Optional limit on number of slices
     skip: Number of slices to skip from start
 
@@ -278,16 +531,31 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     Assumes slices were preprocessed with --pad-size argument.
     Preprocess your data with:
       python scripts/preprocess_gdphmm_slices.py --pad-size 256 256
+
+  Example usage:
+    # Load only CT, OARs, and PTV SDM (saves memory compared to loading everything)
+    dataset = GDPHMMPreprocessedSlicesDataset(
+      'gdphmm-hn', 'train',
+      structure_groups=['ct', 'oar', 'ptv_sdm']
+    )
+    structure, dose, body, info = dataset[0]
+
+    # Access specific components easily
+    ct = dataset.selector.get_component(structure, 'ct')
+    oar = dataset.selector.get_component(structure, 'oar')
   """
   def __init__(
     self,
     dataset_name,
     split,
+    structure_groups=None,
     limit=None,
     skip=0,
   ):
     self.dataset_name = dataset_name
     self.split = split
+
+    self.selector = StructureSelector(groups=structure_groups)
 
     # Load index of preprocessed slices
     data_dir = GDPHMM_DATA_BASE_PATH / f'{dataset_name}_slices' / split
@@ -311,7 +579,8 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
 
     self.index = self.index.reset_index(drop=True)
 
-    self.n_structures = len(GDPHMM_OAR) * 2 + 1 + 3 + 1  # OARs + OAR_SDM + PTV + (PTV70, PTV63, PTV56) + PTV_SDM
+    # Use selector's total channels instead of hardcoded value
+    self.n_structures = self.selector.total_channels
     self.dose_range = (GDPHMM_DOSE_MIN, GDPHMM_DOSE_MAX)
 
   def __len__(self):
@@ -319,10 +588,11 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
 
   def __getitem__(self, idx):
     """
-    Load a preprocessed slice (already padded).
+    Load a preprocessed slice (already padded) with only selected structure groups.
 
     Returns:
-      structure: (C, H, W) tensor with C = 72 channels (CT, PTV, PTV70, PTV63, PTV56, OAR, PTV_SDM, OAR_SDM)
+      structure: (C, H, W) tensor with C channels determined by structure_groups
+                 Use dataset.selector.get_component(structure, 'ct') to access components
       dose: (1, H, W) tensor, normalized dose
       body: (1, H, W) tensor, body mask
       info: dict with slice metadata
@@ -331,47 +601,26 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     slice_path = self.data_dir / row['file']
 
     # Load preprocessed slice (already transformed and padded)
-    data = np.load(slice_path)
+    data_np = np.load(slice_path)
 
-    # Convert to tensors with proper type conversions
-    # CT: already float32, normalized [0, 1]
-    ct = torch.from_numpy(data['ct'])
+    # Convert all data to tensors with proper type conversions
+    data = {
+      'ct': torch.from_numpy(data_np['ct']),  # float32, normalized [0, 1]
+      'ptv': torch.from_numpy(data_np['ptv']).float() / 100.0,  # uint8 {0, 56, 63, 70} → float32 [0, 1]
+      'ptv70': torch.from_numpy(data_np['ptv70']),  # uint8 {0, 1}
+      'ptv63': torch.from_numpy(data_np['ptv63']),  # uint8 {0, 1}
+      'ptv56': torch.from_numpy(data_np['ptv56']),  # uint8 {0, 1}
+      'oar': torch.from_numpy(data_np['oar']),  # uint8 {0, 1}
+      'oar_sdm': torch.from_numpy(data_np['oar_sdm']).float(),  # float16 → float32
+      'ptv_sdm': torch.from_numpy(data_np['ptv_sdm']).float(),  # float16 → float32
+    }
 
-    # Dose: already float32, normalized [0, 1]
-    dose = torch.from_numpy(data['dose'])
+    # Use selector to build structure with only selected groups
+    structure = self.selector.build_structure(data)
 
-    # PTV: uint8 {0, 56, 63, 70} → float32 [0, 1]
-    ptv = torch.from_numpy(data['ptv']).float() / 100.0
-
-    # Individual PTV masks: uint8 {0, 1} → keep as uint8
-    ptv70 = torch.from_numpy(data['ptv70'])
-    ptv63 = torch.from_numpy(data['ptv63'])
-    ptv56 = torch.from_numpy(data['ptv56'])
-
-    # Body: uint8 {0, 1}
-    body = torch.from_numpy(data['body'])
-
-    # OAR: uint8 {0, 1}
-    oar = torch.from_numpy(data['oar'])
-
-    # OAR SDM: float16 → float32
-    oar_sdm = torch.from_numpy(data['oar_sdm']).float()
-
-    # PTV SDM: float16 → float32
-    ptv_sdm = torch.from_numpy(data['ptv_sdm']).float()
-
-    # Concatenate structure channels: CT + PTV + PTV70 + PTV63 + PTV56 + OAR + PTV_SDM + OAR_SDM
-    # Note: Slices are already padded during preprocessing
-    structure = torch.cat([
-      ct,        # (1, H, W)
-      ptv,       # (1, H, W)
-      oar,       # (33, H, W)
-      ptv_sdm,   # (1, H, W)
-      oar_sdm,   # (33, H, W)
-      ptv70,     # (1, H, W)
-      ptv63,     # (1, H, W)
-      ptv56,     # (1, H, W)
-    ], dim=0)    # Total: (72, H, W)
+    # Dose and body are always loaded
+    dose = torch.from_numpy(data_np['dose'])  # float32, normalized [0, 1]
+    body = torch.from_numpy(data_np['body'])  # uint8 {0, 1}
 
     # Metadata
     info = {
@@ -392,82 +641,32 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     pass
 
 
-def create_gdphmm_dataset(config, split, cache=None):
+def create_gdphmm_dataset(config, split, structure_groups=None, cache=None):
   """
   Factory function to create GDPHMM dataset based on configuration.
 
-  This function creates either the original GDPHMMSlicesDataset (with cache)
-  or the new GDPHMMPreprocessedSlicesDataset (pre-padded, no cache) based
-  on the 'dataset_strategy' config option.
-
   Args:
-    config: Configuration dict containing 'data' section
+    config: Configuration dict
     split: 'train', 'valid', or 'test'
-    cache: Cache object for original dataset (ignored for preprocessed)
+    structure_groups: List of structure groups to load. If None, loads all available groups.
+    cache: Cache object (unused, kept for compatibility)
 
-  Returns:
-    Dataset instance (either GDPHMMSlicesDataset or GDPHMMPreprocessedSlicesDataset)
-
-  Config options:
+  Config:
     data:
-      dataset_strategy: 'original' or 'preprocessed' (default: 'original')
-      dataset_name: Name of dataset (e.g., 'gdphmm-hn')
-      img_size: Image size [H, W] (used only for original strategy)
-      train_limit/valid_limit: Optional limit on number of slices
-      train_skip/valid_skip: Optional number of slices to skip
-      voxel_spacing: Optional voxel spacing for SDM computation (original only)
-
-  Example config (original strategy):
-    data:
-      dataset_strategy: original  # or omit (default)
-      dataset_name: gdphmm-hn
-      img_size: [176, 160]
-      train_cache_size: 2048
-      valid_cache_size: 512
-
-  Example config (preprocessed strategy):
-    data:
-      dataset_strategy: preprocessed
-      dataset_name: gdphmm-hn
-      # Note: img_size not needed, slices are pre-padded to 256x256
+      dataset_name: Name of dataset
   """
   data_config = config['data']
-  strategy = data_config.get('dataset_strategy', 'original')
-
-  # Common parameters
   dataset_name = data_config['dataset_name']
-  limit_key = f'{split}_limit'
-  skip_key = f'{split}_skip'
-  limit = data_config.get(limit_key, None)
-  skip = data_config.get(skip_key, 0)
+  limit = data_config.get(f'{split}_limit', None)
+  skip = data_config.get(f'{split}_skip', 0)
 
-  if strategy == 'preprocessed':
-    # New preprocessed dataset (no cache, pre-padded)
-    return GDPHMMPreprocessedSlicesDataset(
-      dataset_name=dataset_name,
-      split=split,
-      limit=limit,
-      skip=skip,
-    )
-  elif strategy == 'original':
-    # Original dataset (with cache, runtime padding)
-    img_size = data_config['img_size']
-    voxel_spacing = data_config.get('voxel_spacing', None)
-
-    return GDPHMMSlicesDataset(
-      dataset_name=dataset_name,
-      split=split,
-      img_size=img_size,
-      limit=limit,
-      skip=skip,
-      cache=cache,
-      voxel_spacing=voxel_spacing,
-    )
-  else:
-    raise ValueError(
-      f"Unknown dataset_strategy: '{strategy}'. "
-      f"Must be 'original' or 'preprocessed'"
-    )
+  return GDPHMMPreprocessedSlicesDataset(
+    dataset_name=dataset_name,
+    split=split,
+    structure_groups=structure_groups,
+    limit=limit,
+    skip=skip,
+  )
 
 
 class PadToFixedSize:
