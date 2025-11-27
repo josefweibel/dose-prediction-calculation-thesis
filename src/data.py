@@ -134,17 +134,22 @@ class StructureSelector:
     Extract a specific component from the concatenated structure tensor.
 
     Args:
-      structure: (C, H, W) concatenated structure tensor
+      structure: (B, C, H, W) or (C, H, W) concatenated structure tensor
       group_name: Name of group to extract (e.g., 'ct', 'oar')
 
     Returns:
-      component: (C_group, H, W) tensor for the requested group
+      component: (B, C_group, H, W) or (C_group, H, W) tensor for the requested group
     """
     if group_name not in self._index_map:
       raise ValueError(f"Group '{group_name}' not in selected groups: {self.groups}")
 
     start, end = self._index_map[group_name]
-    return structure[start:end]
+
+    # Handle both batched and unbatched tensors
+    if structure.ndim == 4:  # (B, C, H, W)
+      return structure[:, start:end]
+    else:  # (C, H, W)
+      return structure[start:end]
 
   def get_channel_indices(self, group_name):
     """
@@ -219,10 +224,8 @@ class StructureSelector:
     for group in groups:
       if group not in self._index_map:
         raise ValueError(f"Group '{group}' not in dataset's loaded groups: {self.groups}")
-      component = self.get_component(structure, group)
-      selected.append(component)
+      selected.append(self.get_component(structure, group))
 
-    import torch
     return torch.cat(selected, dim=-3)  # Concatenate on channel dim (works for both 3D and 4D)
 
   def get_ptv(self, structure):
