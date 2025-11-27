@@ -52,8 +52,35 @@ from data import (
   GDPHMM_DOSE_MAX,
   GDPHMM_OAR,
   GDPHMM_PTV,
-  compute_sdm
 )
+
+def compute_sdm(mask: np.ndarray, voxel_spacing: tuple = (1.0, 1.0, 1.0)) -> np.ndarray:
+  """
+  Compute Signed Distance Map (SDM) for a binary mask.
+
+  SDM provides the minimum distance from each voxel to the contour of the ROI,
+  where positive values are inside the ROI, negative values are outside, and
+  zero values are on the boundary.
+
+  Args:
+      mask: Binary mask (H, W) or (H, W, D) where 1=inside ROI, 0=outside
+      voxel_spacing: Physical spacing (is, js) or (is, js, ks) in mm
+
+  Returns:
+      SDM with positive values inside, negative outside, 0 on boundary
+  """
+  mask = mask.astype(bool)
+
+  # Distance transform for points inside (positive distances)
+  dist_inside = distance_transform_edt(mask, sampling=voxel_spacing)
+
+  # Distance transform for points outside (will be negated)
+  dist_outside = distance_transform_edt(~mask, sampling=voxel_spacing)
+
+  # Combine: positive inside, negative outside
+  sdm = dist_inside - dist_outside
+
+  return sdm
 
 
 def compute_sdms(oar_vol, ptv_vol, voxel_spacing):
