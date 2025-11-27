@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-from multiprocessing import Manager
 import torch
 from tqdm import tqdm
 
@@ -8,7 +7,7 @@ from evaluator import build_metrics, compute_metrics
 from results import SAMPLES_PATH
 from utils.mp import detect_device
 from config import read_model_config, read_sampling_config
-from data import create_gdphmm_dataset, build_cache
+from data import create_gdphmm_dataset
 
 
 class MetricsRecalculator:
@@ -24,10 +23,7 @@ class MetricsRecalculator:
     self.data_split = data_split
     self.epoch = epoch
 
-    self.manager = Manager()
-    shared_cache = build_cache(self.sampling_config, self.manager, 'data')
-
-    self.dataset = create_gdphmm_dataset(self.model_config, data_split, cache=shared_cache)
+    self.dataset = create_gdphmm_dataset(self.model_config, data_split)
 
     self.device = detect_device(None)
     self.metrics = build_metrics(self.dataset, self.device)

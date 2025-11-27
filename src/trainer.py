@@ -83,7 +83,7 @@ class C3DTrainerModule(nn.Module):
 
 
 class Trainer:
-  def __init__(self, model_config, cache, n_epochs=None, rank=None, world_size=None, local_rank=None):
+  def __init__(self, model_config, n_epochs=None, rank=None, world_size=None, local_rank=None):
     self.name = model_config["name"]
     self.config = model_config
     self.rank = rank
@@ -96,13 +96,13 @@ class Trainer:
 
     # Training dataset uses only conditioning groups
     conditioning_groups = self.config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
-    train_dataset = create_gdphmm_dataset(self.config, 'train', structure_groups=conditioning_groups, cache=cache)
+    train_dataset = create_gdphmm_dataset(self.config, 'train', structure_groups=conditioning_groups)
 
     if self.config['data'].get('val_on_train', False):
       val_dataset = train_dataset
     else:
       # Validation dataset loads all structures for metrics computation
-      val_dataset = create_gdphmm_dataset(self.config, 'valid', structure_groups=None, cache=cache)
+      val_dataset = create_gdphmm_dataset(self.config, 'valid', structure_groups=None)
 
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))

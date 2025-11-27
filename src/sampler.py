@@ -1,10 +1,9 @@
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from multiprocessing import Manager
 import numpy as np
 
 from config import read_model_config
-from data import create_gdphmm_dataset, build_cache, StructureSelector
+from data import create_gdphmm_dataset, StructureSelector
 from evaluator import Evaluator
 from mamba_model import remap_state_dict
 from utils.mp import detect_device, PrefetchLoader
@@ -35,10 +34,7 @@ class Sampler:
 
     self.device = detect_device(local_rank)
 
-    self.manager = Manager()
-    shared_cache = build_cache(self.sampling_config, self.manager, 'data')
-
-    self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None, cache=shared_cache)
+    self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None)
 
     conditioning_groups = self.model_config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
     conditioning_selector = StructureSelector(groups=conditioning_groups)

@@ -4,10 +4,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import List
 from itertools import cycle
-from multiprocessing import Manager
 from pathlib import Path
 
-from data import create_gdphmm_dataset, SharedCache, GDPHMM_OAR, GDPHMM_DOSE_MAX
+from data import create_gdphmm_dataset, GDPHMM_OAR, GDPHMM_DOSE_MAX
 
 
 SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
@@ -54,15 +53,7 @@ DEFAULT_METRICS = [
 
 HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body', 'var_laplacian_diff']
 
-manager = None
-
 def build_dataset(dataset_split='test'):
-  global manager
-  if manager is None:
-    manager = Manager()
-
-  cache = SharedCache(manager)
-
   # Create a config dict for the factory function
   config = {
     'data': {
@@ -72,7 +63,7 @@ def build_dataset(dataset_split='test'):
     }
   }
 
-  return create_gdphmm_dataset(config, dataset_split, cache=cache)
+  return create_gdphmm_dataset(config, dataset_split)
 
 
 def compute_dvh(dose, mask, bins):
