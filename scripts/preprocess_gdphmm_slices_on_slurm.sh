@@ -36,6 +36,7 @@ echo
 srun singularity exec \
   --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
   --bind "/storage/scratch/users/jw19s096:/storage/scratch/users/jw19s096" \
+  --bind "/storage/research/artorg_mia/Head_and_Neck/GDPHMM/train_HaN/:/storage/research/artorg_mia/Head_and_Neck/GDPHMM/train_HaN/" \
   --pwd /work \
   ${HOME_PATH}/images/dose-prediction-thesis.sif \
   bash -c "PYTHONPATH=/work/src python scripts/preprocess_gdphmm_slices.py --dataset ${DATASET} --workers 16"

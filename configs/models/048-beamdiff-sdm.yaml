@@ -1,10 +1,9 @@
 data:
+  dataset_strategy: preprocessed
   dataset_name: gdphmm-hn-vmat
-  img_size: [176, 160]
   train_cache_size: inf
   valid_cache_size: inf
   valid_limit: 512
-  voxel_spacing: [2.5, 2.5, 2.0]
 
 batch_size: 128
 epochs: 200
@@ -30,7 +29,7 @@ conditioning:
 
 mixed_precision: false
 num_workers: 4
-prefetch_factor: 4
+prefetch_factor: 8
 prefetch_on_gpu: false
 
 grad_clip: 0.5
