@@ -92,12 +92,15 @@ class HomogeneityIndex(Metric):
       self.count += 1
 
   def compute(self):
+    if self.count == 0:
+      return torch.tensor(float('nan'))
     return self.total / self.count
 
 class BodyMaskedMetric(Metric):
   def __init__(self, base_metric: Metric, *args, **kwargs):
     super().__init__(*args, **kwargs)
     self.base_metric = base_metric
+    self.add_state("samples_processed", default=torch.tensor(0), dist_reduce_fx="sum")
 
   def update(self, preds: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
     mask = mask.to(torch.bool) > 0
@@ -111,8 +114,11 @@ class BodyMaskedMetric(Metric):
         continue
 
       self.base_metric.update(p.unsqueeze(0), t.unsqueeze(0))
+      self.samples_processed += 1
 
   def compute(self):
+    if self.samples_processed == 0:
+      return torch.tensor(float('nan'))
     return self.base_metric.compute()
 
   def reset(self):
