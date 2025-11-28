@@ -197,6 +197,39 @@ class Trainer:
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
+      # Debug: Check for NaN/Inf in loaded model weights
+      if self.is_main_process:
+        has_nan = False
+        has_inf = False
+        for name, param in self.net_model.named_parameters():
+          if torch.isnan(param).any():
+            print(f'WARNING: NaN detected in model parameter: {name}')
+            has_nan = True
+          if torch.isinf(param).any():
+            print(f'WARNING: Inf detected in model parameter: {name}')
+            has_inf = True
+        if not has_nan and not has_inf:
+          print('Model weights check: OK (no NaN/Inf)')
+
+        # Check optimizer state
+        for group_idx, group in enumerate(self.optim.param_groups):
+          print(f'Optimizer group {group_idx} LR: {group["lr"]}')
+
+        # Check optimizer state for NaN/Inf
+        optimizer_has_nan = False
+        for state_value in self.optim.state.values():
+          if isinstance(state_value, dict):
+            for key, val in state_value.items():
+              if torch.is_tensor(val):
+                if torch.isnan(val).any():
+                  print(f'WARNING: NaN detected in optimizer state: {key}')
+                  optimizer_has_nan = True
+                if torch.isinf(val).any():
+                  print(f'WARNING: Inf detected in optimizer state: {key}')
+                  optimizer_has_nan = True
+        if not optimizer_has_nan:
+          print('Optimizer state check: OK (no NaN/Inf)')
+
       if self.scaler is not None and 'scaler_state_dict' in checkpoint:
         self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
     elif self.is_main_process:
@@ -249,6 +282,22 @@ class Trainer:
 
         current_lr = self.optim.param_groups[0]['lr']
 
+        # Debug: Check for NaN loss
+        if torch.isnan(loss) or torch.isinf(loss):
+          if self.is_main_process:
+            print(f'\nNaN/Inf loss detected at epoch {self.epoch}, batch {batch_idx}')
+            print(f'Loss value: {loss.item()}')
+            print(f'Learning rate: {current_lr}')
+            print(f'Target stats - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
+            print(f'Condition stats - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
+            # Check model parameters for NaN
+            for name, param in self.net_model.named_parameters():
+              if torch.isnan(param).any() or torch.isinf(param).any():
+                print(f'  NaN/Inf in parameter: {name}')
+              if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                print(f'  NaN/Inf in gradient: {name}')
+          raise ValueError(f'NaN/Inf loss detected at epoch {self.epoch}, batch {batch_idx}')
+
         if self.scaler is not None:
           self.scaler.scale(loss).backward()
           self.scaler.unscale_(self.optim)
@@ -259,7 +308,8 @@ class Trainer:
           loss.backward()
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
-          self.lr_scheduler.step()
+
+        self.lr_scheduler.step()
 
         self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
 
