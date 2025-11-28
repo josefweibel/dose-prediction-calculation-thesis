@@ -137,13 +137,22 @@ class Evaluator:
       sample_metrics = []
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
-      for structure, target, info in pbar:
+      for batch_idx, (structure, target, info) in enumerate(pbar):
         structure = structure.to(self.device)
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
         body = self.dataloader.dataset.selector.get_body(structure)
 
         condition = self.dataloader.dataset.selector.select_channels(structure, self.conditioning_groups)
+
+        # Debug: Print shapes on first batch
+        if batch_idx == 0 and self.rank == 0:
+          print(f"\n[DEBUG] Evaluation batch 0:")
+          print(f"  structure.shape: {structure.shape}")
+          print(f"  condition.shape: {condition.shape}")
+          print(f"  conditioning_groups: {self.conditioning_groups}")
+          print(f"  validation dataset groups: {self.dataloader.dataset.selector.groups}")
+          print(f"  validation dataset total_channels: {self.dataloader.dataset.selector.total_channels}")
 
         autocast = contextlib.nullcontext()
         if self.sampling_config['precision'] == 'fp16_amp':

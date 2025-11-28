@@ -107,6 +107,12 @@ class Trainer:
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
       print('Validation dataset size', len(val_dataset))
+      print(f'\n[DEBUG] Dataset configuration:')
+      print(f'  Training dataset groups: {train_dataset.selector.groups}')
+      print(f'  Training dataset total_channels: {train_dataset.selector.total_channels}')
+      print(f'  Validation dataset groups: {val_dataset.selector.groups}')
+      print(f'  Validation dataset total_channels: {val_dataset.selector.total_channels}')
+      print(f'  Conditioning groups: {conditioning_groups}')
 
     self.train_sampler = None
     self.val_sampler = None
@@ -225,11 +231,18 @@ class Trainer:
       self.model.train()
 
       pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False, disable=not self.is_main_process)
-      for structure, target, _ in pbar_batches:
+      for batch_idx, (structure, target, _) in enumerate(pbar_batches):
         self.optim.zero_grad()
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
         condition = structure # Training dataset already loads only conditioning groups, so structure IS the condition
+
+        # Debug: Print shapes on first batch of first epoch
+        if self.epoch == 0 and batch_idx == 0 and self.is_main_process:
+          print(f"\n[DEBUG] Training epoch 0, batch 0:")
+          print(f"  structure.shape: {structure.shape}")
+          print(f"  condition.shape: {condition.shape}")
+          print(f"  Expected model input channels: {self.net_model.in_channels if hasattr(self.net_model, 'in_channels') else 'unknown'}")
 
         with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, condition)
