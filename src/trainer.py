@@ -218,62 +218,10 @@ class Trainer:
         # Safe to load optimizer state
         self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
-      # CRITICAL: Synchronize ALL state across ranks in distributed training
-      # This ensures all ranks have identical weights/buffers/optimizer state after loading
+      # All ranks loaded from the same checkpoint file, so they should have identical state
+      # No synchronization needed - just a barrier to ensure all ranks finish loading
       if self.is_distributed:
-        # Get the unwrapped model (in case of DDP)
-        model_to_sync = self.model.module if hasattr(self.model, 'module') else self.model
-
-        # Broadcast all parameters and buffers from rank 0 to all other ranks
-        # This includes: model weights, batch norm stats, diffusion alphas, etc.
-        for param in model_to_sync.parameters():
-          dist.broadcast(param.data, src=0)
-        for buffer in model_to_sync.buffers():
-          dist.broadcast(buffer.data, src=0)
-
-        # Also sync EMA model
-        for param in self.ema_model.parameters():
-          dist.broadcast(param.data, src=0)
-        for buffer in self.ema_model.buffers():
-          dist.broadcast(buffer.data, src=0)
-
-        # CRITICAL: Also sync optimizer state (momentum, velocity buffers, etc.)
-        # This is crucial - optimizer state must be identical across ranks
-        # Broadcast optimizer state tensors directly to avoid pickle corruption
-        for param_group in self.optim.param_groups:
-          for param_id in param_group['params']:
-            if param_id in self.optim.state:
-              state = self.optim.state[param_id]
-              for key, value in state.items():
-                if torch.is_tensor(value):
-                  # Broadcast tensor directly (no pickle) - this avoids corruption
-                  dist.broadcast(value, src=0)
-                else:
-                  # For non-tensor values (rare, but handle for completeness)
-                  # Most optimizer state values are tensors, but handle scalars just in case
-                  if self.is_main_process:
-                    scalar_tensor = torch.tensor(float(value), dtype=torch.float32, device=self.device)
-                  else:
-                    scalar_tensor = torch.tensor(0.0, dtype=torch.float32, device=self.device)
-                  dist.broadcast(scalar_tensor, src=0)
-                  if not self.is_main_process:
-                    self.optim.state[param_id][key] = scalar_tensor.item()
-
-        # CRITICAL: Also sync LR scheduler state
-        # The scheduler has internal state like last_epoch, step counts, etc.
-        # Use broadcast_object_list to sync the entire state dict from rank 0
-        scheduler_state = [self.lr_scheduler.state_dict() if self.is_main_process else None]
-        dist.broadcast_object_list(scheduler_state, src=0)
-
-        # Reload the synchronized scheduler state on non-main ranks
-        if not self.is_main_process:
-          self.lr_scheduler.load_state_dict(scheduler_state[0])
-
-        # Synchronize all ranks before continuing
         dist.barrier()
-
-        if self.is_main_process:
-          print('Model weights, buffers, optimizer state, and LR scheduler synchronized across all ranks')
 
       # Debug: Check for NaN/Inf in loaded model weights on ALL ranks (not just main)
       # This helps catch if synchronization failed
