@@ -219,11 +219,13 @@ class Trainer:
 
         # CRITICAL: Also sync optimizer state (momentum, velocity buffers, etc.)
         # This is crucial - optimizer state must be identical across ranks
-        for state in self.optim.state.values():
-          if isinstance(state, dict):
-            for key, value in state.items():
-              if torch.is_tensor(value):
-                dist.broadcast(value, src=0)
+        # Use broadcast_object_list to handle both CPU and GPU tensors
+        optimizer_state = [self.optim.state_dict() if self.is_main_process else None]
+        dist.broadcast_object_list(optimizer_state, src=0)
+
+        # Reload the synchronized optimizer state on non-main ranks
+        if not self.is_main_process:
+          self.optim.load_state_dict(optimizer_state[0])
 
         # CRITICAL: Also sync LR scheduler state
         # The scheduler has internal state like last_epoch, step counts, etc.
