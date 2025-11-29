@@ -192,13 +192,14 @@ class Trainer:
       if self.is_main_process:
         print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
 
+      # Load state dicts on all ranks
       self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
-      # CRITICAL: Synchronize model state across all ranks in distributed training
-      # This ensures all ranks have identical weights/buffers after loading checkpoint
+      # CRITICAL: Synchronize ALL state across ranks in distributed training
+      # This ensures all ranks have identical weights/buffers/optimizer state after loading
       if self.is_distributed:
         # Get the unwrapped model (in case of DDP)
         model_to_sync = self.model.module if hasattr(self.model, 'module') else self.model
@@ -216,11 +217,36 @@ class Trainer:
         for buffer in self.ema_model.buffers():
           dist.broadcast(buffer.data, src=0)
 
+        # CRITICAL: Also sync optimizer state (momentum, velocity buffers, etc.)
+        # This is crucial - optimizer state must be identical across ranks
+        for state in self.optim.state.values():
+          if isinstance(state, dict):
+            for key, value in state.items():
+              if torch.is_tensor(value):
+                dist.broadcast(value, src=0)
+
+        # CRITICAL: Also sync LR scheduler state
+        # The scheduler has internal state like last_epoch, step counts, etc.
+        # Get scheduler state dict and broadcast all tensor values
+        scheduler_state = self.lr_scheduler.state_dict()
+        for key, value in scheduler_state.items():
+          if torch.is_tensor(value):
+            dist.broadcast(value, src=0)
+          elif isinstance(value, (int, float)):
+            # Convert scalar to tensor, broadcast, then convert back
+            tensor_val = torch.tensor(value, device=self.device)
+            dist.broadcast(tensor_val, src=0)
+            scheduler_state[key] = tensor_val.item()
+
+        # Reload the synchronized scheduler state on non-main ranks
+        if not self.is_main_process:
+          self.lr_scheduler.load_state_dict(scheduler_state)
+
         # Synchronize all ranks before continuing
         dist.barrier()
 
         if self.is_main_process:
-          print('Model weights and buffers synchronized across all ranks')
+          print('Model weights, buffers, optimizer state, and LR scheduler synchronized across all ranks')
 
       # Debug: Check for NaN/Inf in loaded model weights on ALL ranks (not just main)
       # This helps catch if synchronization failed
@@ -231,6 +257,21 @@ class Trainer:
           print(f'{rank_str} ERROR: NaN/Inf detected in model after loading checkpoint!')
         else:
           print(f'{rank_str} Model weights check: OK (no NaN/Inf)')
+
+        # Also check optimizer state for NaN
+        optimizer_has_nan = False
+        for state in self.optim.state.values():
+          if isinstance(state, dict):
+            for key, value in state.items():
+              if torch.is_tensor(value) and (torch.isnan(value).any() or torch.isinf(value).any()):
+                optimizer_has_nan = True
+                print(f'{rank_str} ERROR: NaN/Inf detected in optimizer state key: {key}')
+        if not optimizer_has_nan:
+          print(f'{rank_str} Optimizer state check: OK (no NaN/Inf)')
+
+        # Verify LR is the same across ranks
+        current_lr = self.optim.param_groups[0]['lr']
+        print(f'{rank_str} Learning rate after sync: {current_lr}')
 
       # Debug: Check for NaN/Inf in loaded model weights
       if self.is_main_process:
