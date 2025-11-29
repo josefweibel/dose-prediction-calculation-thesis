@@ -2,8 +2,11 @@
 
 set -e
 
+# Set to "true" to copy dataset to tmpdir, "false" to use dataset directly from home
+COPY_TO_TMPDIR=false
+
 HOME_PATH=/storage/homefs/jw19s096
-DATASET=gdphmm-hn-vmat
+DATASET=gdphmm-hn-vmat_slices
 
 CONFIG_NAME=$1
 
@@ -22,7 +25,7 @@ fi
 sbatch <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
-#SBATCH -q job_gpu_caim 
+#SBATCH -q job_gpu_caim
 #SBATCH --time 24:00:00
 #SBATCH --mem 180G
 #SBATCH --gpus h100:2
@@ -59,31 +62,40 @@ echo
 
 SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
 
-echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to \${SCRATCH_BASE_DIR}/data/${DATASET}"
+if [ "${COPY_TO_TMPDIR}" = "true" ]; then
+  echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to \${SCRATCH_BASE_DIR}/data/${DATASET}"
 
-function clean_up {
-  rm -rf "\${SCRATCH_BASE_DIR:?}"/*
-  find /dev/shm -user "\$USER" -delete
-  echo "Cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
-}
-trap clean_up EXIT
+  function clean_up {
+    rm -rf "\${SCRATCH_BASE_DIR:?}"/*
+    # find /dev/shm -user "\$USER" -delete
+    echo "Cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
+  }
+  trap clean_up EXIT
+else
+  echo "using dataset directly from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET}"
+fi
 
 srun bash -c '
   SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
 
-  if [ "\${SLURM_LOCALID}" -eq 0 ]; then
-    echo "[\$(hostname)] copying dataset..."
-    rm -rf "\${SCRATCH_BASE_DIR:?}"/*
-    mkdir -p "\${SCRATCH_BASE_DIR}/data"
-    cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "\${SCRATCH_BASE_DIR}/data/"
-    ls -l \${SCRATCH_BASE_DIR}/data/
-    ls -l \${SCRATCH_BASE_DIR}/data/${DATASET}
-    touch "\${SCRATCH_BASE_DIR}/.copy_done"
+  if [ "${COPY_TO_TMPDIR}" = "true" ]; then
+    if [ "\${SLURM_LOCALID}" -eq 0 ]; then
+      echo "[\$(hostname)] copying dataset..."
+      rm -rf "\${SCRATCH_BASE_DIR:?}"/*
+      mkdir -p "\${SCRATCH_BASE_DIR}/data"
+      cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "\${SCRATCH_BASE_DIR}/data/"
+      ls -l \${SCRATCH_BASE_DIR}/data/
+      ls -l \${SCRATCH_BASE_DIR}/data/${DATASET}
+      touch "\${SCRATCH_BASE_DIR}/.copy_done"
+    else
+      # wait until copy_done exists
+      while [ ! -f "\${SCRATCH_BASE_DIR}/.copy_done" ]; do
+        sleep 1
+      done
+    fi
+    DATASET_BIND="\${SCRATCH_BASE_DIR}/data/${DATASET}:/work/data/${DATASET}"
   else
-    # wait until copy_done exists
-    while [ ! -f "\${SCRATCH_BASE_DIR}/.copy_done" ]; do
-      sleep 1
-    done
+    DATASET_BIND="${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET}:/work/data/${DATASET}"
   fi
 
   echo
@@ -94,7 +106,7 @@ srun bash -c '
   singularity exec \
     --nv \
     --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
-    --bind "\${SCRATCH_BASE_DIR}/data/${DATASET}:/work/data/${DATASET}" \
+    --bind "\${DATASET_BIND}" \
     --bind "/storage/scratch/users/jw19s096:/storage/scratch/users/jw19s096" \
     --bind /dev/infiniband:/dev/infiniband \
     --pwd /work \
