@@ -271,7 +271,7 @@ class Trainer:
         condition = structure # Training dataset already loads only conditioning groups, so structure IS the condition
 
         # Debug: Print progress on ALL ranks for first few batches to see if there's a distributed training issue
-        if batch_idx < 3 and self.epoch <= 1:
+        if batch_idx < 5:  # Always check first 5 batches
           rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
           print(f'{rank_str} Processing batch {batch_idx}, target shape: {target.shape}, condition shape: {condition.shape}')
 
@@ -319,7 +319,7 @@ class Trainer:
           self.scaler.unscale_(self.optim)
 
           # Check gradients for NaN/Inf BEFORE clipping and stepping
-          if self.epoch <= 1 or batch_idx < 5:  # Check on ALL ranks for debugging
+          if batch_idx < 5:  # Always check first 5 batches
             rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
             for name, param in self.net_model.named_parameters():
               if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
@@ -336,7 +336,7 @@ class Trainer:
           loss.backward()
 
           # Check gradients for NaN/Inf BEFORE clipping and stepping
-          if self.epoch <= 1 or batch_idx < 5:  # Check on ALL ranks for debugging
+          if batch_idx < 5:  # Always check first 5 batches
             rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
             for name, param in self.net_model.named_parameters():
               if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
@@ -355,7 +355,7 @@ class Trainer:
         self.lr_scheduler.step()
 
         # Debug: Check if weights became NaN after optimizer step
-        if batch_idx < 5 and self.epoch <= 1:
+        if batch_idx < 5:  # Always check first 5 batches
           rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
           has_nan_after = any(torch.isnan(p).any() or torch.isinf(p).any() for p in self.net_model.parameters())
           if has_nan_after:
