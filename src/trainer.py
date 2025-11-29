@@ -277,6 +277,12 @@ class Trainer:
           print(f"  condition.shape: {condition.shape}")
           print(f"  Expected model input channels: {self.net_model.in_channels if hasattr(self.net_model, 'in_channels') else 'unknown'}")
 
+          # Check condition data statistics
+          print(f"\n[DEBUG] Condition statistics (first sample in batch):")
+          print(f"  CT channel - min: {condition[0, 0].min().item():.4f}, max: {condition[0, 0].max().item():.4f}, mean: {condition[0, 0].mean().item():.4f}")
+          print(f"  PTV_SDM channel - min: {condition[0, 1].min().item():.4f}, max: {condition[0, 1].max().item():.4f}, mean: {condition[0, 1].mean().item():.4f}")
+          print(f"  OAR_SDM first channel - min: {condition[0, 2].min().item():.4f}, max: {condition[0, 2].max().item():.4f}, mean: {condition[0, 2].mean().item():.4f}")
+
         with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, condition)
 
@@ -301,11 +307,36 @@ class Trainer:
         if self.scaler is not None:
           self.scaler.scale(loss).backward()
           self.scaler.unscale_(self.optim)
+
+          # Check gradients for NaN/Inf BEFORE clipping and stepping
+          if self.is_main_process and (self.epoch <= 1 or batch_idx < 5):
+            for name, param in self.net_model.named_parameters():
+              if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                print(f'\nERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
+                print(f'Parameter: {name}')
+                print(f'Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
+                print(f'NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
+                raise ValueError(f'NaN/Inf in gradients at epoch {self.epoch}, batch {batch_idx}, param {name}')
+
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.scaler.step(self.optim)
           self.scaler.update()
         else:
           loss.backward()
+
+          # Check gradients for NaN/Inf BEFORE clipping and stepping
+          if self.is_main_process and (self.epoch <= 1 or batch_idx < 5):
+            for name, param in self.net_model.named_parameters():
+              if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                print(f'\nERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
+                print(f'Parameter: {name}')
+                print(f'Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
+                print(f'NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
+                print(f'Input data stats:')
+                print(f'  Target - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
+                print(f'  Condition - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
+                raise ValueError(f'NaN/Inf in gradients at epoch {self.epoch}, batch {batch_idx}, param {name}')
+
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
 

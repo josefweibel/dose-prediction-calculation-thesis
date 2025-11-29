@@ -154,6 +154,12 @@ class Evaluator:
           print(f"  validation dataset groups: {self.dataloader.dataset.selector.groups}")
           print(f"  validation dataset total_channels: {self.dataloader.dataset.selector.total_channels}")
 
+          # Check condition data statistics
+          print(f"\n[DEBUG] Condition statistics (first sample in batch):")
+          print(f"  CT channel - min: {condition[0, 0].min().item():.4f}, max: {condition[0, 0].max().item():.4f}, mean: {condition[0, 0].mean().item():.4f}")
+          print(f"  PTV_SDM channel - min: {condition[0, 1].min().item():.4f}, max: {condition[0, 1].max().item():.4f}, mean: {condition[0, 1].mean().item():.4f}")
+          print(f"  OAR_SDM first channel - min: {condition[0, 2].min().item():.4f}, max: {condition[0, 2].max().item():.4f}, mean: {condition[0, 2].mean().item():.4f}")
+
         autocast = contextlib.nullcontext()
         if self.sampling_config['precision'] == 'fp16_amp':
           autocast = torch.amp.autocast('cuda', dtype=torch.float16)
