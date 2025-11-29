@@ -196,7 +196,27 @@ class Trainer:
       self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
-      self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
+
+      # IMPORTANT: Check if optimizer state contains NaN before loading
+      # If NaN is detected, skip loading optimizer state (reset momentum/variance)
+      optimizer_state_has_nan = False
+      for state in checkpoint['optimizer_state_dict']['state'].values():
+        if isinstance(state, dict):
+          for key, value in state.items():
+            if torch.is_tensor(value) and (torch.isnan(value).any() or torch.isinf(value).any()):
+              optimizer_state_has_nan = True
+              break
+        if optimizer_state_has_nan:
+          break
+
+      if optimizer_state_has_nan:
+        if self.is_main_process:
+          print('WARNING: Optimizer state in checkpoint contains NaN/Inf - resetting optimizer state')
+          print('Model weights will be loaded, but momentum/variance buffers will be reset to zero')
+        # Don't load optimizer state - keep fresh initialized state
+      else:
+        # Safe to load optimizer state
+        self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
       # CRITICAL: Synchronize ALL state across ranks in distributed training
       # This ensures all ranks have identical weights/buffers/optimizer state after loading
@@ -219,13 +239,25 @@ class Trainer:
 
         # CRITICAL: Also sync optimizer state (momentum, velocity buffers, etc.)
         # This is crucial - optimizer state must be identical across ranks
-        # Use broadcast_object_list to handle both CPU and GPU tensors
-        optimizer_state = [self.optim.state_dict() if self.is_main_process else None]
-        dist.broadcast_object_list(optimizer_state, src=0)
-
-        # Reload the synchronized optimizer state on non-main ranks
-        if not self.is_main_process:
-          self.optim.load_state_dict(optimizer_state[0])
+        # Broadcast optimizer state tensors directly to avoid pickle corruption
+        for param_group in self.optim.param_groups:
+          for param_id in param_group['params']:
+            if param_id in self.optim.state:
+              state = self.optim.state[param_id]
+              for key, value in state.items():
+                if torch.is_tensor(value):
+                  # Broadcast tensor directly (no pickle) - this avoids corruption
+                  dist.broadcast(value, src=0)
+                else:
+                  # For non-tensor values (rare, but handle for completeness)
+                  # Most optimizer state values are tensors, but handle scalars just in case
+                  if self.is_main_process:
+                    scalar_tensor = torch.tensor(float(value), dtype=torch.float32, device=self.device)
+                  else:
+                    scalar_tensor = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+                  dist.broadcast(scalar_tensor, src=0)
+                  if not self.is_main_process:
+                    self.optim.state[param_id][key] = scalar_tensor.item()
 
         # CRITICAL: Also sync LR scheduler state
         # The scheduler has internal state like last_epoch, step counts, etc.
