@@ -197,20 +197,40 @@ class Trainer:
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
-      # CRITICAL: Synchronize model weights across all ranks in distributed training
-      # This ensures all ranks have identical weights after loading checkpoint
+      # CRITICAL: Synchronize model state across all ranks in distributed training
+      # This ensures all ranks have identical weights/buffers after loading checkpoint
       if self.is_distributed:
-        # Broadcast model weights from rank 0 to all other ranks
-        for param in self.net_model.parameters():
+        # Get the unwrapped model (in case of DDP)
+        model_to_sync = self.model.module if hasattr(self.model, 'module') else self.model
+
+        # Broadcast all parameters and buffers from rank 0 to all other ranks
+        # This includes: model weights, batch norm stats, diffusion alphas, etc.
+        for param in model_to_sync.parameters():
           dist.broadcast(param.data, src=0)
+        for buffer in model_to_sync.buffers():
+          dist.broadcast(buffer.data, src=0)
+
+        # Also sync EMA model
         for param in self.ema_model.parameters():
           dist.broadcast(param.data, src=0)
+        for buffer in self.ema_model.buffers():
+          dist.broadcast(buffer.data, src=0)
 
         # Synchronize all ranks before continuing
         dist.barrier()
 
         if self.is_main_process:
-          print('Model weights synchronized across all ranks')
+          print('Model weights and buffers synchronized across all ranks')
+
+      # Debug: Check for NaN/Inf in loaded model weights on ALL ranks (not just main)
+      # This helps catch if synchronization failed
+      if self.is_distributed:
+        rank_str = f'[rank{self.rank}]'
+        has_nan = any(torch.isnan(p).any() or torch.isinf(p).any() for p in self.net_model.parameters())
+        if has_nan:
+          print(f'{rank_str} ERROR: NaN/Inf detected in model after loading checkpoint!')
+        else:
+          print(f'{rank_str} Model weights check: OK (no NaN/Inf)')
 
       # Debug: Check for NaN/Inf in loaded model weights
       if self.is_main_process:
