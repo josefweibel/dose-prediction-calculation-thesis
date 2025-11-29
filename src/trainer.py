@@ -227,20 +227,13 @@ class Trainer:
 
         # CRITICAL: Also sync LR scheduler state
         # The scheduler has internal state like last_epoch, step counts, etc.
-        # Get scheduler state dict and broadcast all tensor values
-        scheduler_state = self.lr_scheduler.state_dict()
-        for key, value in scheduler_state.items():
-          if torch.is_tensor(value):
-            dist.broadcast(value, src=0)
-          elif isinstance(value, (int, float)):
-            # Convert scalar to tensor, broadcast, then convert back
-            tensor_val = torch.tensor(value, device=self.device)
-            dist.broadcast(tensor_val, src=0)
-            scheduler_state[key] = tensor_val.item()
+        # Use broadcast_object_list to sync the entire state dict from rank 0
+        scheduler_state = [self.lr_scheduler.state_dict() if self.is_main_process else None]
+        dist.broadcast_object_list(scheduler_state, src=0)
 
         # Reload the synchronized scheduler state on non-main ranks
         if not self.is_main_process:
-          self.lr_scheduler.load_state_dict(scheduler_state)
+          self.lr_scheduler.load_state_dict(scheduler_state[0])
 
         # Synchronize all ranks before continuing
         dist.barrier()
