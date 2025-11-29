@@ -197,6 +197,21 @@ class Trainer:
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
+      # CRITICAL: Synchronize model weights across all ranks in distributed training
+      # This ensures all ranks have identical weights after loading checkpoint
+      if self.is_distributed:
+        # Broadcast model weights from rank 0 to all other ranks
+        for param in self.net_model.parameters():
+          dist.broadcast(param.data, src=0)
+        for param in self.ema_model.parameters():
+          dist.broadcast(param.data, src=0)
+
+        # Synchronize all ranks before continuing
+        dist.barrier()
+
+        if self.is_main_process:
+          print('Model weights synchronized across all ranks')
+
       # Debug: Check for NaN/Inf in loaded model weights
       if self.is_main_process:
         has_nan = False
