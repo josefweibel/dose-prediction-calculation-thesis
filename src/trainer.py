@@ -270,6 +270,11 @@ class Trainer:
         target = target.to(self.device, non_blocking=True)
         condition = structure # Training dataset already loads only conditioning groups, so structure IS the condition
 
+        # Debug: Print progress on ALL ranks for first few batches to see if there's a distributed training issue
+        if batch_idx < 3 and self.epoch <= 1:
+          rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
+          print(f'{rank_str} Processing batch {batch_idx}, target shape: {target.shape}, condition shape: {condition.shape}')
+
         # Debug: Print shapes on first batch of first epoch
         if self.epoch == 0 and batch_idx == 0 and self.is_main_process:
           print(f"\n[DEBUG] Training epoch 0, batch 0:")
@@ -290,18 +295,23 @@ class Trainer:
 
         # Debug: Check for NaN loss
         if torch.isnan(loss) or torch.isinf(loss):
-          if self.is_main_process:
-            print(f'\nNaN/Inf loss detected at epoch {self.epoch}, batch {batch_idx}')
-            print(f'Loss value: {loss.item()}')
-            print(f'Learning rate: {current_lr}')
-            print(f'Target stats - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
-            print(f'Condition stats - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
-            # Check model parameters for NaN
-            for name, param in self.net_model.named_parameters():
-              if torch.isnan(param).any() or torch.isinf(param).any():
-                print(f'  NaN/Inf in parameter: {name}')
-              if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                print(f'  NaN/Inf in gradient: {name}')
+          # Print on ALL ranks during debugging, not just main process
+          rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
+          print(f'\n{rank_str} NaN/Inf loss detected at epoch {self.epoch}, batch {batch_idx}')
+          print(f'{rank_str} Loss value: {loss.item()}')
+          print(f'{rank_str} Learning rate: {current_lr}')
+          print(f'{rank_str} Target stats - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
+          print(f'{rank_str} Condition stats - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
+          # Check model parameters for NaN
+          print(f'{rank_str} Checking parameters for NaN/Inf...')
+          nan_params = []
+          for name, param in self.net_model.named_parameters():
+            if torch.isnan(param).any() or torch.isinf(param).any():
+              nan_params.append(name)
+          if nan_params:
+            print(f'{rank_str} NaN/Inf found in {len(nan_params)} parameters (first 10): {nan_params[:10]}')
+          else:
+            print(f'{rank_str} No NaN/Inf in parameters - NaN occurred during forward pass!')
           raise ValueError(f'NaN/Inf loss detected at epoch {self.epoch}, batch {batch_idx}')
 
         if self.scaler is not None:
@@ -309,13 +319,14 @@ class Trainer:
           self.scaler.unscale_(self.optim)
 
           # Check gradients for NaN/Inf BEFORE clipping and stepping
-          if self.is_main_process and (self.epoch <= 1 or batch_idx < 5):
+          if self.epoch <= 1 or batch_idx < 5:  # Check on ALL ranks for debugging
+            rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
             for name, param in self.net_model.named_parameters():
               if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                print(f'\nERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
-                print(f'Parameter: {name}')
-                print(f'Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
-                print(f'NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
+                print(f'\n{rank_str} ERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
+                print(f'{rank_str} Parameter: {name}')
+                print(f'{rank_str} Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
+                print(f'{rank_str} NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
                 raise ValueError(f'NaN/Inf in gradients at epoch {self.epoch}, batch {batch_idx}, param {name}')
 
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
@@ -325,22 +336,36 @@ class Trainer:
           loss.backward()
 
           # Check gradients for NaN/Inf BEFORE clipping and stepping
-          if self.is_main_process and (self.epoch <= 1 or batch_idx < 5):
+          if self.epoch <= 1 or batch_idx < 5:  # Check on ALL ranks for debugging
+            rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
             for name, param in self.net_model.named_parameters():
               if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                print(f'\nERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
-                print(f'Parameter: {name}')
-                print(f'Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
-                print(f'NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
-                print(f'Input data stats:')
-                print(f'  Target - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
-                print(f'  Condition - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
+                print(f'\n{rank_str} ERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
+                print(f'{rank_str} Parameter: {name}')
+                print(f'{rank_str} Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
+                print(f'{rank_str} NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
+                print(f'{rank_str} Input data stats:')
+                print(f'{rank_str}   Target - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
+                print(f'{rank_str}   Condition - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
                 raise ValueError(f'NaN/Inf in gradients at epoch {self.epoch}, batch {batch_idx}, param {name}')
 
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
 
         self.lr_scheduler.step()
+
+        # Debug: Check if weights became NaN after optimizer step
+        if batch_idx < 5 and self.epoch <= 1:
+          rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
+          has_nan_after = any(torch.isnan(p).any() or torch.isinf(p).any() for p in self.net_model.parameters())
+          if has_nan_after:
+            print(f'{rank_str} WARNING: NaN detected in weights AFTER batch {batch_idx} optimizer step!')
+            # Find which parameters became NaN
+            for name, param in self.net_model.named_parameters():
+              if torch.isnan(param).any() or torch.isinf(param).any():
+                print(f'{rank_str}   - {name} has NaN/Inf')
+          else:
+            print(f'{rank_str} Batch {batch_idx} completed, weights OK')
 
         self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
 
