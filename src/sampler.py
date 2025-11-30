@@ -1,10 +1,12 @@
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
+import torch.distributed as dist
 import numpy as np
+from scripts.combine_slices import combine_slices_to_volumes
 
 from config import read_model_config
 from data import create_gdphmm_dataset, StructureSelector
-from evaluator import Evaluator
+from evaluator import Evaluator, compute_volume_metrics
 from mamba_model import remap_state_dict
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
@@ -96,6 +98,35 @@ class Sampler:
 
     self.ema_model.eval()
     _ = self.evaluator.evaluate(self.ema_model, dir=dir)
+
+    if self.is_distributed:
+      dist.barrier()
+
+    if self.is_main_process:
+      print('\nCombining slices into volumes...')
+      combine_slices_to_volumes(
+        model_name=self.model_name,
+        sampling_name=self.sampling_config['name'],
+        data_split=self.data_split,
+        epoch=self.epoch,
+        delete_slices=True
+      )
+
+      print('\nComputing volume metrics...')
+      volume_metrics = compute_volume_metrics(dir, self.dataset, self.device, rank=self.rank)
+
+      if len(volume_metrics) > 0:
+        overall_volume_metrics = volume_metrics.mean(numeric_only=True)
+
+        volume_metrics.to_csv(dir / '_volume_metrics.csv', index=False)
+        overall_volume_metrics.to_frame().T.to_csv(dir / '_overall_volume_metrics.csv', index=False)
+
+        print(f'Volume metrics saved to {dir}')
+      else:
+        print('No volume metrics computed')
+
+    if self.is_distributed:
+      dist.barrier()
 
   def finish(self):
     print('finishing sampler instance', flush=True)

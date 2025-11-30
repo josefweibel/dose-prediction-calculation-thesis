@@ -12,6 +12,7 @@ import contextlib
 from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE, VarianceOfLaplacian, RegionMaskedMetric, PTVPrescriptionMAE, PTVPrescriptionMeanDose
 from model_sampler import build_sampler
 from data import GDPHMM_OAR
+import numpy as np
 
 
 def compute_metrics(metrics, preds, target, structure, dataset):
@@ -58,13 +59,13 @@ def compute_metrics(metrics, preds, target, structure, dataset):
       metric.update(preds, target)
 
     result = metric.compute()
-    # Handle NaN values (when region is not present in slice)
     results[metric_name] = result.item() if not torch.isnan(result) else float('nan')
 
   return results
 
 
-def build_metrics(dataset, device, include_region_metrics=True):
+def build_slice_metrics(dataset, device, include_region_metrics=True):
+  """Build 2D metrics for slice-by-slice evaluation."""
   dose_range = dataset.dose_range[1] - dataset.dose_range[0]
   ms_ssim_kwargs = dict(
     data_range=dose_range,
@@ -130,6 +131,142 @@ def build_metrics(dataset, device, include_region_metrics=True):
   return {k: v.to(device) for k, v in metrics.items()}
 
 
+def build_volume_metrics(dataset, device, include_region_metrics=True):
+  """Build 3D volume metrics for whole-volume evaluation."""
+  # Volume-based metrics (no SSIM/MS-SSIM/PSNR as they are 2D metrics)
+  metrics = {
+    'vol_mse': MeanSquaredError(sync_on_compute=False),
+    'vol_rmse': MeanSquaredError(squared=False, sync_on_compute=False),
+    'vol_dvh': DVHScore(sync_on_compute=False),
+    'vol_dose_score': DoseScore(sync_on_compute=False),
+    'vol_homogeneity_index': HomogeneityIndex(sync_on_compute=False),
+
+    'vol_mse_body': BodyMaskedMetric(MeanSquaredError(sync_on_compute=False), sync_on_compute=False),
+    'vol_rmse_body': BodyMaskedMetric(MeanSquaredError(squared=False, sync_on_compute=False), sync_on_compute=False),
+    'vol_dose_score_body': BodyMaskedMetric(DoseScore(sync_on_compute=False), sync_on_compute=False),
+
+    'vol_mae_challenge': ChallengeMAE(sync_on_compute=False),
+
+    'vol_ptv70_prescription_mae': PTVPrescriptionMAE(ptv_level=70, sync_on_compute=False),
+    'vol_ptv63_prescription_mae': PTVPrescriptionMAE(ptv_level=63, sync_on_compute=False),
+    'vol_ptv56_prescription_mae': PTVPrescriptionMAE(ptv_level=56, sync_on_compute=False),
+    'vol_ptv70_mean_dose': PTVPrescriptionMeanDose(ptv_level=70, sync_on_compute=False),
+    'vol_ptv63_mean_dose': PTVPrescriptionMeanDose(ptv_level=63, sync_on_compute=False),
+    'vol_ptv56_mean_dose': PTVPrescriptionMeanDose(ptv_level=56, sync_on_compute=False),
+  }
+
+  if include_region_metrics:
+    # Build region list with indices for RegionMaskedMetric
+    ptv_start, _ = dataset.selector.get_channel_indices('ptv')
+    regions = [('PTV', ptv_start)]
+
+    for oar_name in GDPHMM_OAR:
+      oar_index = dataset.selector.get_oar_index(oar_name)
+      regions.append((oar_name, oar_index))
+
+    region_metric_configs = [
+      ('mse', lambda: MeanSquaredError(sync_on_compute=False)),
+      ('rmse', lambda: MeanSquaredError(squared=False, sync_on_compute=False)),
+      ('dvh', lambda: DVHScore(sync_on_compute=False)),
+      ('dose_score', lambda: DoseScore(sync_on_compute=False)),
+    ]
+
+    for region_name, region_index in regions:
+      for metric_name, metric_factory in region_metric_configs:
+        region_metric = RegionMaskedMetric(
+          base_metric=metric_factory(),
+          region_name=region_name,
+          region_index=region_index,
+          sync_on_compute=False
+        )
+        metrics[f'vol_{metric_name}/{region_name}'] = region_metric
+
+  return {k: v.to(device) for k, v in metrics.items()}
+
+
+def compute_volume_metrics(samples_path, dataset, device, rank=0):
+  """
+  Compute volume metrics for all combined volume files in a samples directory.
+
+  Args:
+    samples_path: Path to the samples directory containing combined .npy volume files
+    dataset: Dataset instance for accessing structure and target data
+    device: Device to run computations on
+    rank: Process rank for distributed computing
+
+  Returns:
+    DataFrame with volume metrics for each sample
+  """
+  samples_path = Path(samples_path)
+  volume_files = list(samples_path.glob('*.npy'))
+  # Exclude the _sample_metrics.csv and _overall_metrics.csv indicator files
+  volume_files = [f for f in volume_files if not f.stem.startswith('_')]
+
+  if len(volume_files) == 0:
+    print(f'No volume files found in {samples_path}')
+    return pd.DataFrame()
+
+  print(f'Computing volume metrics for {len(volume_files)} volumes...')
+
+  metrics = build_volume_metrics(dataset, device)
+  volume_metrics = []
+
+  for volume_file in tqdm(volume_files, desc='Computing volume metrics', disable=rank != 0):
+    # Load predicted volume: shape (1, H, W, D) where D is num_slices
+    pred_volume = np.load(volume_file)
+    pred_volume = torch.from_numpy(pred_volume).to(device)
+
+    # Get sample name from filename
+    sample_name = volume_file.stem + '.npz'
+
+    # Find all slices for this sample in the dataset
+    sample_rows = dataset.index[dataset.index['file_name'] == sample_name]
+
+    if len(sample_rows) == 0:
+      print(f'Warning: No slices found for {sample_name}')
+      continue
+
+    # Sort by slice index to ensure correct ordering
+    sample_rows = sample_rows.sort_values('index')
+    sample_indices = sample_rows.index.tolist()
+
+    # Load all slices to reconstruct structure and target volumes
+    structure_slices = []
+    target_slices = []
+
+    for idx in sample_indices:
+      structure, target, _ = dataset[idx]
+      structure_slices.append(structure)
+      target_slices.append(target)
+
+    # Stack slices along depth dimension: (C, H, W, D)
+    structure_volume = torch.stack(structure_slices, dim=-1).to(device)
+    target_volume = torch.stack(target_slices, dim=-1).to(device)
+
+    # Denormalize target
+    target_volume = dataset.denormalize_target(target_volume)
+
+    # Add batch dimension for metrics computation: (1, C, H, W, D)
+    structure_volume = structure_volume.unsqueeze(0)
+    target_volume = target_volume.unsqueeze(0)
+    pred_volume = pred_volume.unsqueeze(0)
+
+    metric_results = compute_metrics(
+      metrics,
+      pred_volume,
+      target_volume,
+      structure_volume,
+      dataset
+    )
+
+    volume_metrics.append({
+      'file_name': sample_name,
+      **metric_results
+    })
+
+  return pd.DataFrame(volume_metrics)
+
+
 class Evaluator:
   def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1):
     self.dataloader = dataloader
@@ -140,7 +277,7 @@ class Evaluator:
     self.world_size = world_size
     self.conditioning_groups = self.model_config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
 
-    self.metrics = build_metrics(dataloader.dataset, device)
+    self.metrics = build_slice_metrics(dataloader.dataset, device)
 
   def evaluate(self, model, dir=None):
     model.eval()
@@ -150,28 +287,12 @@ class Evaluator:
       sample_metrics = []
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
-      for batch_idx, (structure, target, info) in enumerate(pbar):
+      for structure, target, info in pbar:
         structure = structure.to(self.device)
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
-        body = self.dataloader.dataset.selector.get_body(structure)
 
         condition = self.dataloader.dataset.selector.select_channels(structure, self.conditioning_groups)
-
-        # Debug: Print shapes on first batch
-        if batch_idx == 0 and self.rank == 0:
-          print(f"\n[DEBUG] Evaluation batch 0:")
-          print(f"  structure.shape: {structure.shape}")
-          print(f"  condition.shape: {condition.shape}")
-          print(f"  conditioning_groups: {self.conditioning_groups}")
-          print(f"  validation dataset groups: {self.dataloader.dataset.selector.groups}")
-          print(f"  validation dataset total_channels: {self.dataloader.dataset.selector.total_channels}")
-
-          # Check condition data statistics
-          print(f"\n[DEBUG] Condition statistics (first sample in batch):")
-          print(f"  CT channel - min: {condition[0, 0].min().item():.4f}, max: {condition[0, 0].max().item():.4f}, mean: {condition[0, 0].mean().item():.4f}")
-          print(f"  PTV_SDM channel - min: {condition[0, 1].min().item():.4f}, max: {condition[0, 1].max().item():.4f}, mean: {condition[0, 1].mean().item():.4f}")
-          print(f"  OAR_SDM first channel - min: {condition[0, 2].min().item():.4f}, max: {condition[0, 2].max().item():.4f}, mean: {condition[0, 2].mean().item():.4f}")
 
         autocast = contextlib.nullcontext()
         if self.sampling_config['precision'] == 'fp16_amp':
