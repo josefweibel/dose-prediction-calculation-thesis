@@ -357,10 +357,10 @@ class Trainer:
           scale = (end_lr / start_lr) + (1 - progress) * (1 - end_lr / start_lr)
           return max(scale, end_lr / start_lr)
 
-      self.optim = torch.optim.AdamW(self.net_model.parameters(), lr=start_lr)
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=start_lr)
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=linear_lr_schedule)
     elif 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', '') == 'cosine_annealing':
-      self.optim = torch.optim.AdamW(self.net_model.parameters(), lr=self.config['lr_scheduler']['lr'])
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr_scheduler']['lr'])
       self.lr_scheduler = CosineAnnealingLR(
         self.optim,
         T_max=len(self.train_dataloader) * self.config['epochs'],
@@ -370,14 +370,14 @@ class Trainer:
       step_size = self.config['lr_scheduler']['step_size']
       gamma = self.config['lr_scheduler']['gamma']
 
-      self.optim = torch.optim.AdamW(self.net_model.parameters(), lr=initial_lr)
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=initial_lr)
       self.lr_scheduler = StepLR(
         self.optim,
         step_size=step_size * len(self.train_dataloader),
         gamma=gamma
       )
     else:
-      self.optim = torch.optim.AdamW(self.net_model.parameters(), lr=self.config['lr'])
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr'])
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=lambda step: 1.0)
 
   def __check_model_for_invalid_values(self, model):
