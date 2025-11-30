@@ -377,3 +377,145 @@ class RegionMaskedMetric(Metric):
     super().to(*args, **kwargs)
     self.base_metric = self.base_metric.to(*args, **kwargs)
     return self
+
+
+class PTVPrescriptionMAE(Metric):
+  """
+  Mean Absolute Error between predicted dose and prescribed dose for a specific PTV level.
+
+  This metric:
+  1. Calculates the exclusive region for the specified PTV level:
+     - PTV70: ptv70 mask (highest prescription)
+     - PTV63: ptv63 - ptv70 (medium prescription, excluding high)
+     - PTV56: ptv56 - ptv63 (lowest prescription, excluding medium and high)
+  2. Computes MAE between predicted doses and the prescription level in that region
+
+  Args:
+    ptv_level: The PTV prescription level (70, 63, or 56)
+  """
+  def __init__(self, ptv_level: int, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    if ptv_level not in [70, 63, 56]:
+      raise ValueError(f"ptv_level must be 70, 63, or 56, got {ptv_level}")
+
+    self.ptv_level = ptv_level
+    self.prescribed_dose = float(ptv_level)
+    self.add_state("total_error", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, ptv70_mask: torch.Tensor,
+             ptv63_mask: torch.Tensor, ptv56_mask: torch.Tensor):
+    """
+    Update the metric with new predictions.
+
+    Args:
+      preds: predicted doses in Gy, shape (batch_size, 1, H, W)
+      target: true doses in Gy (not used but kept for consistency), shape (batch_size, 1, H, W)
+      ptv70_mask: PTV70 binary mask, shape (batch_size, 1, H, W) or (batch_size, H, W)
+      ptv63_mask: PTV63 binary mask, shape (batch_size, 1, H, W) or (batch_size, H, W)
+      ptv56_mask: PTV56 binary mask, shape (batch_size, 1, H, W) or (batch_size, H, W)
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred = preds[i, 0]  # (H, W)
+
+      # Ensure masks are boolean and 2D
+      ptv70 = ptv70_mask[i].squeeze().to(torch.bool) if ptv70_mask[i].dim() > 2 else ptv70_mask[i].to(torch.bool)
+      ptv63 = ptv63_mask[i].squeeze().to(torch.bool) if ptv63_mask[i].dim() > 2 else ptv63_mask[i].to(torch.bool)
+      ptv56 = ptv56_mask[i].squeeze().to(torch.bool) if ptv56_mask[i].dim() > 2 else ptv56_mask[i].to(torch.bool)
+
+      # Calculate exclusive region for the specified PTV level
+      if self.ptv_level == 70:
+        region_mask = ptv70
+      elif self.ptv_level == 63:
+        region_mask = ptv63 & ~ptv70
+      else:  # 56
+        region_mask = ptv56 & ~ptv63
+
+      if region_mask.sum() == 0:
+        continue
+
+      # Get predicted dose values in this region
+      pred_doses = pred[region_mask]
+
+      # Calculate mean absolute error from prescribed dose
+      error = torch.abs(pred_doses - self.prescribed_dose).mean()
+
+      self.total_error += error
+      self.count += 1
+
+  def compute(self):
+    """Compute the average MAE for this PTV level."""
+    if self.count == 0:
+      return torch.tensor(float('nan'))
+    return self.total_error / self.count
+
+
+class PTVPrescriptionMeanDose(Metric):
+  """
+  Mean predicted dose in the exclusive region for a specific PTV level.
+
+  This metric calculates the mean predicted dose in the exclusive region of a PTV level,
+  allowing you to see how close predictions are to the prescription level.
+
+  Args:
+    ptv_level: The PTV prescription level (70, 63, or 56)
+  """
+  def __init__(self, ptv_level: int, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    if ptv_level not in [70, 63, 56]:
+      raise ValueError(f"ptv_level must be 70, 63, or 56, got {ptv_level}")
+
+    self.ptv_level = ptv_level
+    self.prescribed_dose = float(ptv_level)
+    self.add_state("total_dose", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, ptv70_mask: torch.Tensor,
+             ptv63_mask: torch.Tensor, ptv56_mask: torch.Tensor):
+    """
+    Update the metric with new predictions.
+
+    Args:
+      preds: predicted doses in Gy, shape (batch_size, 1, H, W)
+      target: true doses in Gy (not used but kept for consistency), shape (batch_size, 1, H, W)
+      ptv70_mask: PTV70 binary mask, shape (batch_size, 1, H, W) or (batch_size, H, W)
+      ptv63_mask: PTV63 binary mask, shape (batch_size, 1, H, W) or (batch_size, H, W)
+      ptv56_mask: PTV56 binary mask, shape (batch_size, 1, H, W) or (batch_size, H, W)
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred = preds[i, 0]  # (H, W)
+
+      # Ensure masks are boolean and 2D
+      ptv70 = ptv70_mask[i].squeeze().to(torch.bool) if ptv70_mask[i].dim() > 2 else ptv70_mask[i].to(torch.bool)
+      ptv63 = ptv63_mask[i].squeeze().to(torch.bool) if ptv63_mask[i].dim() > 2 else ptv63_mask[i].to(torch.bool)
+      ptv56 = ptv56_mask[i].squeeze().to(torch.bool) if ptv56_mask[i].dim() > 2 else ptv56_mask[i].to(torch.bool)
+
+      # Calculate exclusive region for the specified PTV level
+      if self.ptv_level == 70:
+        region_mask = ptv70
+      elif self.ptv_level == 63:
+        region_mask = ptv63 & ~ptv70
+      else:  # 56
+        region_mask = ptv56 & ~ptv63
+
+      if region_mask.sum() == 0:
+        continue
+
+      # Get predicted dose values in this region
+      pred_doses = pred[region_mask]
+
+      # Calculate mean dose
+      mean_dose = pred_doses.mean()
+
+      self.total_dose += mean_dose
+      self.count += 1
+
+  def compute(self):
+    """Compute the average mean dose for this PTV level."""
+    if self.count == 0:
+      return torch.tensor(float('nan'))
+    return self.total_dose / self.count

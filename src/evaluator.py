@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import contextlib
 
-from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE, VarianceOfLaplacian, RegionMaskedMetric
+from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE, VarianceOfLaplacian, RegionMaskedMetric, PTVPrescriptionMAE, PTVPrescriptionMeanDose
 from model_sampler import build_sampler
 from data import GDPHMM_OAR
 
@@ -36,7 +36,13 @@ def compute_metrics(metrics, preds, target, structure, dataset):
   for metric_name, metric in metrics.items():
     metric.reset()
 
-    if isinstance(metric, RegionMaskedMetric):
+    if isinstance(metric, (PTVPrescriptionMAE, PTVPrescriptionMeanDose)):
+      ptv_masks = dataset.selector.get_component(structure, 'ptv_masks')
+      ptv70_mask = ptv_masks[:, 0:1]  # (batch_size, 1, H, W)
+      ptv63_mask = ptv_masks[:, 1:2]
+      ptv56_mask = ptv_masks[:, 2:3]
+      metric.update(preds, target, ptv70_mask, ptv63_mask, ptv56_mask)
+    elif isinstance(metric, RegionMaskedMetric):
       metric.update(preds, target, structure)
     elif isinstance(metric, BodyMaskedMetric):
       body = dataset.selector.get_body(structure)
@@ -85,6 +91,13 @@ def build_metrics(dataset, device, include_region_metrics=True):
     'var_laplacian_pred': VarianceOfLaplacian(mode='preds', sync_on_compute=False),
     'var_laplacian_target': VarianceOfLaplacian(mode='target', sync_on_compute=False),
     'var_laplacian_diff': VarianceOfLaplacian(mode='diff', sync_on_compute=False),
+
+    'ptv70_prescription_mae': PTVPrescriptionMAE(ptv_level=70, sync_on_compute=False),
+    'ptv63_prescription_mae': PTVPrescriptionMAE(ptv_level=63, sync_on_compute=False),
+    'ptv56_prescription_mae': PTVPrescriptionMAE(ptv_level=56, sync_on_compute=False),
+    'ptv70_mean_dose': PTVPrescriptionMeanDose(ptv_level=70, sync_on_compute=False),
+    'ptv63_mean_dose': PTVPrescriptionMeanDose(ptv_level=63, sync_on_compute=False),
+    'ptv56_mean_dose': PTVPrescriptionMeanDose(ptv_level=56, sync_on_compute=False),
   }
 
   if include_region_metrics:
