@@ -19,13 +19,6 @@ from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_c
 from c3d_model import C3DLoss
 from models import build_model
 
-def extract(v, t, x_shape):
-  """
-  Extract some coefficients at specified timesteps, then reshape to
-  [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
-  """
-  return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
-
 
 class DiffusionModelTrainerModule(nn.Module):
   def __init__(self, denoising_model, beta_1, beta_T, T):
@@ -48,13 +41,20 @@ class DiffusionModelTrainerModule(nn.Module):
 
     noise = torch.randn_like(x_0)
     x_t = (
-      extract(self.sqrt_alphas_bar, t, x_0.shape) * x_0 +
-      extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape) * noise
+      self.__extract(self.sqrt_alphas_bar, t, x_0.shape) * x_0 +
+      self.__extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape) * noise
     )
 
     noise_pred = self.model(x_t, condition, t, self.cache)
 
     return F.mse_loss(noise_pred, noise, reduction='mean')
+
+  def __extract(self, v, t, x_shape):
+    """
+    Extract some coefficients at specified timesteps, then reshape to
+    [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
+    """
+    return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
 class MedNeXtUnetTrainerModule(nn.Module):
@@ -107,12 +107,6 @@ class Trainer:
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
       print('Validation dataset size', len(val_dataset))
-      print(f'\n[DEBUG] Dataset configuration:')
-      print(f'  Training dataset groups: {train_dataset.selector.groups}')
-      print(f'  Training dataset total_channels: {train_dataset.selector.total_channels}')
-      print(f'  Validation dataset groups: {val_dataset.selector.groups}')
-      print(f'  Validation dataset total_channels: {val_dataset.selector.total_channels}')
-      print(f'  Conditioning groups: {conditioning_groups}')
 
     self.train_sampler = None
     self.val_sampler = None
@@ -192,94 +186,17 @@ class Trainer:
       if self.is_main_process:
         print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
 
-      # Load state dicts on all ranks
       self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
       self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+      self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
-      # IMPORTANT: Check if optimizer state contains NaN before loading
-      # If NaN is detected, skip loading optimizer state (reset momentum/variance)
-      optimizer_state_has_nan = False
-      for state in checkpoint['optimizer_state_dict']['state'].values():
-        if isinstance(state, dict):
-          for key, value in state.items():
-            if torch.is_tensor(value) and (torch.isnan(value).any() or torch.isinf(value).any()):
-              optimizer_state_has_nan = True
-              break
-        if optimizer_state_has_nan:
-          break
-
-      if optimizer_state_has_nan:
-        if self.is_main_process:
-          print('WARNING: Optimizer state in checkpoint contains NaN/Inf - resetting optimizer state')
-          print('Model weights will be loaded, but momentum/variance buffers will be reset to zero')
-        # Don't load optimizer state - keep fresh initialized state
-      else:
-        # Safe to load optimizer state
-        self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
-
-      # All ranks loaded from the same checkpoint file, so they should have identical state
-      # No synchronization needed - just a barrier to ensure all ranks finish loading
       if self.is_distributed:
         dist.barrier()
 
-      # Debug: Check for NaN/Inf in loaded model weights on ALL ranks (not just main)
-      # This helps catch if synchronization failed
-      if self.is_distributed:
-        rank_str = f'[rank{self.rank}]'
-        has_nan = any(torch.isnan(p).any() or torch.isinf(p).any() for p in self.net_model.parameters())
-        if has_nan:
-          print(f'{rank_str} ERROR: NaN/Inf detected in model after loading checkpoint!')
-        else:
-          print(f'{rank_str} Model weights check: OK (no NaN/Inf)')
-
-        # Also check optimizer state for NaN
-        optimizer_has_nan = False
-        for state in self.optim.state.values():
-          if isinstance(state, dict):
-            for key, value in state.items():
-              if torch.is_tensor(value) and (torch.isnan(value).any() or torch.isinf(value).any()):
-                optimizer_has_nan = True
-                print(f'{rank_str} ERROR: NaN/Inf detected in optimizer state key: {key}')
-        if not optimizer_has_nan:
-          print(f'{rank_str} Optimizer state check: OK (no NaN/Inf)')
-
-        # Verify LR is the same across ranks
-        current_lr = self.optim.param_groups[0]['lr']
-        print(f'{rank_str} Learning rate after sync: {current_lr}')
-
-      # Debug: Check for NaN/Inf in loaded model weights
-      if self.is_main_process:
-        has_nan = False
-        has_inf = False
-        for name, param in self.net_model.named_parameters():
-          if torch.isnan(param).any():
-            print(f'WARNING: NaN detected in model parameter: {name}')
-            has_nan = True
-          if torch.isinf(param).any():
-            print(f'WARNING: Inf detected in model parameter: {name}')
-            has_inf = True
-        if not has_nan and not has_inf:
-          print('Model weights check: OK (no NaN/Inf)')
-
-        # Check optimizer state
-        for group_idx, group in enumerate(self.optim.param_groups):
-          print(f'Optimizer group {group_idx} LR: {group["lr"]}')
-
-        # Check optimizer state for NaN/Inf
-        optimizer_has_nan = False
-        for state_value in self.optim.state.values():
-          if isinstance(state_value, dict):
-            for key, val in state_value.items():
-              if torch.is_tensor(val):
-                if torch.isnan(val).any():
-                  print(f'WARNING: NaN detected in optimizer state: {key}')
-                  optimizer_has_nan = True
-                if torch.isinf(val).any():
-                  print(f'WARNING: Inf detected in optimizer state: {key}')
-                  optimizer_has_nan = True
-        if not optimizer_has_nan:
-          print('Optimizer state check: OK (no NaN/Inf)')
+      self.__check_model_for_invalid_values(self.net_model)
+      self.__check_model_for_invalid_values(self.ema_model)
+      self.__check_optimizer_for_invalid_values(self.optim)
 
       if self.scaler is not None and 'scaler_state_dict' in checkpoint:
         self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -321,102 +238,23 @@ class Trainer:
         target = target.to(self.device, non_blocking=True)
         condition = structure # Training dataset already loads only conditioning groups, so structure IS the condition
 
-        # Debug: Print progress on ALL ranks for first few batches to see if there's a distributed training issue
-        if batch_idx < 5:  # Always check first 5 batches
-          rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
-          print(f'{rank_str} Processing batch {batch_idx}, target shape: {target.shape}, condition shape: {condition.shape}')
-
-        # Debug: Print shapes on first batch of first epoch
-        if self.epoch == 0 and batch_idx == 0 and self.is_main_process:
-          print(f"\n[DEBUG] Training epoch 0, batch 0:")
-          print(f"  structure.shape: {structure.shape}")
-          print(f"  condition.shape: {condition.shape}")
-          print(f"  Expected model input channels: {self.net_model.in_channels if hasattr(self.net_model, 'in_channels') else 'unknown'}")
-
-          # Check condition data statistics
-          print(f"\n[DEBUG] Condition statistics (first sample in batch):")
-          print(f"  CT channel - min: {condition[0, 0].min().item():.4f}, max: {condition[0, 0].max().item():.4f}, mean: {condition[0, 0].mean().item():.4f}")
-          print(f"  PTV_SDM channel - min: {condition[0, 1].min().item():.4f}, max: {condition[0, 1].max().item():.4f}, mean: {condition[0, 1].mean().item():.4f}")
-          print(f"  OAR_SDM first channel - min: {condition[0, 2].min().item():.4f}, max: {condition[0, 2].max().item():.4f}, mean: {condition[0, 2].mean().item():.4f}")
-
         with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, condition)
 
         current_lr = self.optim.param_groups[0]['lr']
 
-        # Debug: Check for NaN loss
-        if torch.isnan(loss) or torch.isinf(loss):
-          # Print on ALL ranks during debugging, not just main process
-          rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
-          print(f'\n{rank_str} NaN/Inf loss detected at epoch {self.epoch}, batch {batch_idx}')
-          print(f'{rank_str} Loss value: {loss.item()}')
-          print(f'{rank_str} Learning rate: {current_lr}')
-          print(f'{rank_str} Target stats - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
-          print(f'{rank_str} Condition stats - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
-          # Check model parameters for NaN
-          print(f'{rank_str} Checking parameters for NaN/Inf...')
-          nan_params = []
-          for name, param in self.net_model.named_parameters():
-            if torch.isnan(param).any() or torch.isinf(param).any():
-              nan_params.append(name)
-          if nan_params:
-            print(f'{rank_str} NaN/Inf found in {len(nan_params)} parameters (first 10): {nan_params[:10]}')
-          else:
-            print(f'{rank_str} No NaN/Inf in parameters - NaN occurred during forward pass!')
-          raise ValueError(f'NaN/Inf loss detected at epoch {self.epoch}, batch {batch_idx}')
-
         if self.scaler is not None:
           self.scaler.scale(loss).backward()
           self.scaler.unscale_(self.optim)
-
-          # Check gradients for NaN/Inf BEFORE clipping and stepping
-          if batch_idx < 5:  # Always check first 5 batches
-            rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
-            for name, param in self.net_model.named_parameters():
-              if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                print(f'\n{rank_str} ERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
-                print(f'{rank_str} Parameter: {name}')
-                print(f'{rank_str} Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
-                print(f'{rank_str} NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
-                raise ValueError(f'NaN/Inf in gradients at epoch {self.epoch}, batch {batch_idx}, param {name}')
-
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.scaler.step(self.optim)
           self.scaler.update()
         else:
           loss.backward()
-
-          # Check gradients for NaN/Inf BEFORE clipping and stepping
-          if batch_idx < 5:  # Always check first 5 batches
-            rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
-            for name, param in self.net_model.named_parameters():
-              if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                print(f'\n{rank_str} ERROR: NaN/Inf gradient detected at epoch {self.epoch}, batch {batch_idx}')
-                print(f'{rank_str} Parameter: {name}')
-                print(f'{rank_str} Grad stats - min: {param.grad.min().item()}, max: {param.grad.max().item()}')
-                print(f'{rank_str} NaN count: {torch.isnan(param.grad).sum().item()}, Inf count: {torch.isinf(param.grad).sum().item()}')
-                print(f'{rank_str} Input data stats:')
-                print(f'{rank_str}   Target - min: {target.min().item()}, max: {target.max().item()}, mean: {target.mean().item()}')
-                print(f'{rank_str}   Condition - min: {condition.min().item()}, max: {condition.max().item()}, mean: {condition.mean().item()}')
-                raise ValueError(f'NaN/Inf in gradients at epoch {self.epoch}, batch {batch_idx}, param {name}')
-
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
 
         self.lr_scheduler.step()
-
-        # Debug: Check if weights became NaN after optimizer step
-        if batch_idx < 5:  # Always check first 5 batches
-          rank_str = f'[rank{self.rank}]' if self.is_distributed else ''
-          has_nan_after = any(torch.isnan(p).any() or torch.isinf(p).any() for p in self.net_model.parameters())
-          if has_nan_after:
-            print(f'{rank_str} WARNING: NaN detected in weights AFTER batch {batch_idx} optimizer step!')
-            # Find which parameters became NaN
-            for name, param in self.net_model.named_parameters():
-              if torch.isnan(param).any() or torch.isinf(param).any():
-                print(f'{rank_str}   - {name} has NaN/Inf')
-          else:
-            print(f'{rank_str} Batch {batch_idx} completed, weights OK')
 
         self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
 
@@ -541,3 +379,56 @@ class Trainer:
     else:
       self.optim = torch.optim.AdamW(self.net_model.parameters(), lr=self.config['lr'])
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=lambda step: 1.0)
+
+  def __check_model_for_invalid_values(self, model):
+    """
+    Check model parameters for NaN/Inf values.
+
+    Args:
+      model: PyTorch model to check
+
+    Returns:
+      bool: True if invalid values found, False otherwise
+    """
+    prefix = f'[rank{self.rank}] ' if self.is_distributed else ''
+    has_invalid = False
+    for name, param in model.named_parameters():
+      if torch.isnan(param).any():
+        print(f'{prefix}ERROR: NaN detected in model parameter: {name}')
+        has_invalid = True
+      if torch.isinf(param).any():
+        print(f'{prefix}ERROR: Inf detected in model parameter: {name}')
+        has_invalid = True
+
+    if not has_invalid:
+      print(f'{prefix}Model weights check: OK (no NaN/Inf)')
+
+    return has_invalid
+
+  def __check_optimizer_for_invalid_values(self, optimizer):
+    """
+    Check optimizer state for NaN/Inf values.
+
+    Args:
+      optimizer: PyTorch optimizer to check
+
+    Returns:
+      bool: True if invalid values found, False otherwise
+    """
+    prefix = f'[rank{self.rank}] ' if self.is_distributed else ''
+    has_invalid = False
+    for state in optimizer.state.values():
+      if isinstance(state, dict):
+        for key, value in state.items():
+          if torch.is_tensor(value):
+            if torch.isnan(value).any():
+              print(f'{prefix}ERROR: NaN detected in optimizer state key: {key}')
+              has_invalid = True
+            if torch.isinf(value).any():
+              print(f'{prefix}ERROR: Inf detected in optimizer state key: {key}')
+              has_invalid = True
+
+    if not has_invalid:
+      print(f'{prefix}Optimizer state check: OK (no NaN/Inf)')
+
+    return has_invalid

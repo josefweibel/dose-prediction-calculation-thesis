@@ -39,7 +39,6 @@ class MetricsRecalculator:
       structure = structure.unsqueeze(0).to(self.device)
       target = target.unsqueeze(0).to(self.device)
       target = self.dataset.denormalize_target(target)
-      body = self.dataset.selector.get_body(structure).to(self.device)
 
       file_name = info['file_name']
       slice_idx = info['index']
@@ -59,7 +58,7 @@ class MetricsRecalculator:
           pred,
           target,
           structure,
-          body
+          self.dataset
         )
         sample_row.update(metric_results)
 

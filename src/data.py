@@ -140,10 +140,7 @@ class StructureSelector:
     Returns:
       component: (B, C_group, H, W) or (C_group, H, W) tensor for the requested group
     """
-    if group_name not in self._index_map:
-      raise ValueError(f"Group '{group_name}' not in selected groups: {self.groups}")
-
-    start, end = self._index_map[group_name]
+    start, end = self.get_channel_indices(group_name)
 
     # Handle both batched and unbatched tensors
     if structure.ndim == 4:  # (B, C, H, W)

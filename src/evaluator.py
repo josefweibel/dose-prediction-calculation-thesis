@@ -14,7 +14,7 @@ from model_sampler import build_sampler
 from data import GDPHMM_OAR
 
 
-def compute_metrics(metrics, preds, target, structure, body, dataset):
+def compute_metrics(metrics, preds, target, structure, dataset):
   """
   Update all metrics with predictions and targets.
 
@@ -26,7 +26,6 @@ def compute_metrics(metrics, preds, target, structure, body, dataset):
     preds: Predicted doses, shape (batch_size, 1, H, W)
     target: True doses, shape (batch_size, 1, H, W)
     structure: Structure tensor, shape (batch_size, n_channels, H, W)
-    body: Body mask, shape (batch_size, 1, H, W)
     dataset: Dataset with selector attribute
 
   Returns:
@@ -40,13 +39,14 @@ def compute_metrics(metrics, preds, target, structure, body, dataset):
     if isinstance(metric, RegionMaskedMetric):
       metric.update(preds, target, structure)
     elif isinstance(metric, BodyMaskedMetric):
+      body = dataset.selector.get_body(structure)
       metric.update(preds, target, body)
     elif isinstance(metric, HomogeneityIndex):
-      # Get PTV channel using selector
       ptv_channel = dataset.selector.get_ptv(structure)
       metric.update(preds, target, ptv_channel[:, 0])  # Remove channel dim
     elif isinstance(metric, ChallengeMAE):
       ptv_channel = dataset.selector.get_ptv(structure)
+      body = dataset.selector.get_body(structure)
       metric.update(preds, target, ptv_channel[:, 0], body[0])  # Remove channel dim
     else:
       metric.update(preds, target)
@@ -192,7 +192,6 @@ class Evaluator:
             sample_pred,
             sample_target,
             structure[i:i+1],
-            body[i:i+1],
             self.dataloader.dataset
           )
           sample_row.update(metric_results)
