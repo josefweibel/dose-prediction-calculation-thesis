@@ -4,7 +4,6 @@ import numpy as np
 from typing import Optional, List
 import re
 
-from mamba_lib import VisionMamba
 from model_cache import DeepCache
 
 
@@ -77,6 +76,8 @@ class MambaUnet(nn.Module):
       depths: List of depths for each layer. If None, uses default pattern
     """
     super(MambaUnet, self).__init__()
+
+    from mamba_lib import VisionMamba
 
     self.num_layers = num_layers
 
