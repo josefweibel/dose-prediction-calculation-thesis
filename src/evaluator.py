@@ -9,7 +9,18 @@ from pathlib import Path
 import pandas as pd
 import contextlib
 
-from metrics import DVHScore, DoseScore, HomogeneityIndex, BodyMaskedMetric, ChallengeMAE, VarianceOfLaplacian, RegionMaskedMetric, PTVPrescriptionMAE, PTVPrescriptionMeanDose
+from metrics import (
+	DVHScore,
+  DoseScore,
+  HomogeneityIndex,
+  BodyMaskedMetric,
+  ChallengeMAE,
+  VarianceOfLaplacian,
+  RegionMaskedMetric,
+  PTVPrescriptionMAE,
+  PTVPrescriptionMeanDose,
+  GammaIndex
+)
 from model_sampler import build_sampler
 from data import GDPHMM_OAR
 import numpy as np
@@ -24,9 +35,9 @@ def compute_metrics(metrics, preds, target, structure, dataset):
 
   Args:
     metrics: Dictionary of metric name to metric instance
-    preds: Predicted doses, shape (batch_size, 1, H, W)
-    target: True doses, shape (batch_size, 1, H, W)
-    structure: Structure tensor, shape (batch_size, n_channels, H, W)
+    preds: Predicted doses, shape (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
+    target: True doses, shape (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
+    structure: Structure tensor, shape (batch_size, n_channels, H, W) or (batch_size, n_channels, H, W, D)
     dataset: Dataset with selector attribute
 
   Returns:
@@ -39,7 +50,7 @@ def compute_metrics(metrics, preds, target, structure, dataset):
 
     if isinstance(metric, (PTVPrescriptionMAE, PTVPrescriptionMeanDose)):
       ptv_masks = dataset.selector.get_component(structure, 'ptv_masks')
-      ptv70_mask = ptv_masks[:, 0:1]  # (batch_size, 1, H, W)
+      ptv70_mask = ptv_masks[:, 0:1]  # (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
       ptv63_mask = ptv_masks[:, 1:2]
       ptv56_mask = ptv_masks[:, 2:3]
       metric.update(preds, target, ptv70_mask, ptv63_mask, ptv56_mask)
@@ -59,7 +70,14 @@ def compute_metrics(metrics, preds, target, structure, dataset):
       metric.update(preds, target)
 
     result = metric.compute()
-    results[metric_name] = result.item() if not torch.isnan(result) else float('nan')
+
+    # Handle metrics that return dictionaries (e.g., GammaIndex3D)
+    if isinstance(result, dict):
+      for sub_key, sub_value in result.items():
+        full_key = f"{metric_name}_{sub_key}"
+        results[full_key] = sub_value.item() if not torch.isnan(sub_value) else float('nan')
+    else:
+      results[metric_name] = result.item() if not torch.isnan(result) else float('nan')
 
   return results
 
@@ -153,6 +171,11 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     'vol_ptv70_mean_dose': PTVPrescriptionMeanDose(ptv_level=70, sync_on_compute=False),
     'vol_ptv63_mean_dose': PTVPrescriptionMeanDose(ptv_level=63, sync_on_compute=False),
     'vol_ptv56_mean_dose': PTVPrescriptionMeanDose(ptv_level=56, sync_on_compute=False),
+
+    'vol_gamma_5_5': GammaIndex(dose_tolerance=5.0, distance_tolerance=5.0, sync_on_compute=False),
+    'vol_gamma_3_3': GammaIndex(dose_tolerance=3.0, distance_tolerance=3.0, sync_on_compute=False),
+    'vol_gamma_2_2': GammaIndex(dose_tolerance=2.0, distance_tolerance=2.0, sync_on_compute=False),
+    'vol_gamma_1_1': GammaIndex(dose_tolerance=1.0, distance_tolerance=1.0, sync_on_compute=False),
   }
 
   if include_region_metrics:

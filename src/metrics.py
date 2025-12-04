@@ -519,3 +519,207 @@ class PTVPrescriptionMeanDose(Metric):
     if self.count == 0:
       return torch.tensor(float('nan'))
     return self.total_dose / self.count
+
+
+class GammaIndex(Metric):
+  """
+  3D Gamma Index metric for comparing dose distributions in radiotherapy.
+
+  The gamma index combines dose difference and distance-to-agreement (DTA) criteria
+  to evaluate the similarity between two dose distributions. A gamma value <= 1
+  indicates agreement within the specified tolerances.
+
+  The metric computes:
+  - Gamma pass rate: percentage of voxels with gamma <= 1
+  - Mean gamma: average gamma value across all evaluated voxels
+  - Median gamma: median gamma value
+
+  Args:
+    dose_tolerance: Dose difference criterion in % (e.g., 3 for 3%)
+    distance_tolerance: Distance-to-agreement criterion in mm (e.g., 3 for 3mm)
+    dose_threshold: Minimum dose threshold in % of max dose (default: 10%)
+                    Only voxels above this threshold are evaluated
+    voxel_spacing: Physical spacing between voxels in mm (x, y, z). Default: (2.5, 2.5, 2.0)
+    global_normalization: If True, normalize by global max dose. If False, use local dose (default: True)
+    search_radius: Maximum search radius in mm for finding minimum gamma (default: 2x distance_tolerance)
+  """
+  def __init__(
+    self,
+    dose_tolerance: float = 3.0,
+    distance_tolerance: float = 3.0,
+    dose_threshold: float = 10.0,
+    voxel_spacing: tuple = (2.5, 2.5, 2.0),
+    global_normalization: bool = True,
+    search_radius: float = None,
+    *args,
+    **kwargs
+  ):
+    super().__init__(*args, **kwargs)
+
+    self.dose_tolerance = dose_tolerance / 100.0  # Convert percentage to fraction
+    self.distance_tolerance = distance_tolerance
+    self.dose_threshold = dose_threshold / 100.0  # Convert percentage to fraction
+    self.voxel_spacing = torch.tensor(voxel_spacing)
+    self.global_normalization = global_normalization
+    self.search_radius = search_radius if search_radius is not None else 2 * distance_tolerance
+
+    # Compute search window size in voxels for each dimension
+    self.search_window = tuple(
+      int(torch.ceil(torch.tensor(self.search_radius / s)).item())
+      for s in voxel_spacing
+    )
+
+    self.add_state("total_pass_rate", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("total_mean_gamma", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("total_median_gamma", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def _compute_gamma_for_point(
+    self,
+    ref_dose_point: torch.Tensor,
+    eval_dose_region: torch.Tensor,
+    distances: torch.Tensor,
+    normalization_dose: float
+  ) -> torch.Tensor:
+    """
+    Compute gamma value for a single reference point by searching in evaluation dose region.
+
+    Args:
+      ref_dose_point: Reference dose at the point (scalar)
+      eval_dose_region: Evaluation doses in search region (tensor)
+      distances: Physical distances to each point in search region (tensor, same shape as eval_dose_region)
+      normalization_dose: Dose value for normalization
+
+    Returns:
+      Minimum gamma value found in the search region
+    """
+    # Dose difference component
+    dose_diff = torch.abs(eval_dose_region - ref_dose_point) / (self.dose_tolerance * normalization_dose)
+
+    # Distance component
+    distance_component = distances / self.distance_tolerance
+
+    # Gamma calculation: sqrt((dose_diff/tolerance)^2 + (distance/tolerance)^2)
+    gamma = torch.sqrt(dose_diff**2 + distance_component**2)
+
+    # Return minimum gamma in the search region
+    return torch.min(gamma)
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor):
+    """
+    Update the gamma index metric with new predictions and targets.
+
+    Args:
+      preds: predicted doses, shape (batch_size, 1, H, W, D) or (batch_size, H, W, D)
+      target: reference doses, shape (batch_size, 1, H, W, D) or (batch_size, H, W, D)
+    """
+    # Handle both (B, 1, H, W, D) and (B, H, W, D) shapes
+    if preds.dim() == 4:
+      preds = preds.unsqueeze(1)
+    if target.dim() == 4:
+      target = target.unsqueeze(1)
+
+    batch_size = preds.shape[0]
+    self.voxel_spacing = self.voxel_spacing.to(preds.device)
+
+    for b in range(batch_size):
+      pred_vol = preds[b, 0]  # (H, W, D)
+      ref_vol = target[b, 0]  # (H, W, D)
+
+      # Determine normalization dose
+      if self.global_normalization:
+        normalization_dose = torch.max(ref_vol)
+      else:
+        normalization_dose = None  # Will use local dose for each point
+
+      # Create mask for voxels above dose threshold
+      max_dose = torch.max(ref_vol)
+      dose_mask = ref_vol >= (self.dose_threshold * max_dose)
+
+      # Get coordinates of voxels to evaluate
+      eval_coords = torch.nonzero(dose_mask, as_tuple=False)  # (N, 3) where N is number of voxels above threshold
+
+      if eval_coords.shape[0] == 0:
+        continue
+
+      gamma_values = []
+
+      # For each reference point above threshold
+      for coord in eval_coords:
+        x, y, z = coord[0].item(), coord[1].item(), coord[2].item()
+        ref_dose_point = ref_vol[x, y, z]
+
+        # Use local normalization if specified
+        local_norm = ref_dose_point if not self.global_normalization else normalization_dose
+
+        # Define search region bounds
+        x_min = max(0, x - self.search_window[0])
+        x_max = min(ref_vol.shape[0], x + self.search_window[0] + 1)
+        y_min = max(0, y - self.search_window[1])
+        y_max = min(ref_vol.shape[1], y + self.search_window[1] + 1)
+        z_min = max(0, z - self.search_window[2])
+        z_max = min(ref_vol.shape[2], z + self.search_window[2] + 1)
+
+        # Extract evaluation dose region
+        eval_dose_region = pred_vol[x_min:x_max, y_min:y_max, z_min:z_max]
+
+        # Compute distances from reference point to all points in search region
+        x_coords = torch.arange(x_min, x_max, device=preds.device).float()
+        y_coords = torch.arange(y_min, y_max, device=preds.device).float()
+        z_coords = torch.arange(z_min, z_max, device=preds.device).float()
+
+        # Create meshgrid for distances
+        zz, yy, xx = torch.meshgrid(z_coords, y_coords, x_coords, indexing='ij')
+
+        # Transpose to match (x, y, z) order
+        xx = xx.permute(2, 1, 0)
+        yy = yy.permute(2, 1, 0)
+        zz = zz.permute(2, 1, 0)
+
+        # Calculate physical distances
+        dx = (xx - x) * self.voxel_spacing[0]
+        dy = (yy - y) * self.voxel_spacing[1]
+        dz = (zz - z) * self.voxel_spacing[2]
+        distances = torch.sqrt(dx**2 + dy**2 + dz**2)
+
+        # Compute gamma for this reference point
+        gamma = self._compute_gamma_for_point(
+          ref_dose_point,
+          eval_dose_region,
+          distances,
+          local_norm
+        )
+        gamma_values.append(gamma)
+
+      # Convert to tensor
+      gamma_values = torch.stack(gamma_values)
+
+      # Compute statistics
+      pass_rate = (gamma_values <= 1.0).float().mean() * 100.0  # Percentage
+      mean_gamma = gamma_values.mean()
+      median_gamma = torch.median(gamma_values)
+
+      self.total_pass_rate += pass_rate
+      self.total_mean_gamma += mean_gamma
+      self.total_median_gamma += median_gamma
+      self.count += 1
+
+  def compute(self):
+    """
+    Compute the average gamma index statistics across all samples.
+
+    Returns:
+      Dictionary with pass_rate, mean_gamma, and median_gamma
+    """
+    if self.count == 0:
+      return {
+        'pass_rate': torch.tensor(float('nan')),
+        'mean_gamma': torch.tensor(float('nan')),
+        'median_gamma': torch.tensor(float('nan'))
+      }
+
+    return {
+      'pass_rate': self.total_pass_rate / self.count,
+      'mean_gamma': self.total_mean_gamma / self.count,
+      'median_gamma': self.total_median_gamma / self.count
+    }
