@@ -15,6 +15,7 @@ from metrics import (
   DoseScore,
   HomogeneityIndex,
   ConformityIndex,
+  GradientIndex,
   BodyMaskedMetric,
   ChallengeMAE,
   VarianceOfLaplacian,
@@ -50,7 +51,7 @@ def compute_metrics(metrics, preds, target, structure, dataset):
   for metric_name, metric in metrics.items():
     metric.reset()
 
-    if isinstance(metric, (PTVPrescriptionMAE, PTVPrescriptionMeanDose, ConformityIndex)):
+    if isinstance(metric, (PTVPrescriptionMAE, PTVPrescriptionMeanDose, ConformityIndex, GradientIndex)):
       ptv_masks = dataset.selector.get_component(structure, 'ptv_masks')
       ptv70_mask = ptv_masks[:, 0:1]  # (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
       ptv63_mask = ptv_masks[:, 1:2]
@@ -125,6 +126,10 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
     'ptv70_conformity_index': ConformityIndex(ptv_level=70, sync_on_compute=False),
     'ptv63_conformity_index': ConformityIndex(ptv_level=63, sync_on_compute=False),
     'ptv56_conformity_index': ConformityIndex(ptv_level=56, sync_on_compute=False),
+
+    'ptv70_gradient_index': GradientIndex(ptv_level=70, sync_on_compute=False),
+    'ptv63_gradient_index': GradientIndex(ptv_level=63, sync_on_compute=False),
+    'ptv56_gradient_index': GradientIndex(ptv_level=56, sync_on_compute=False),
   }
 
   if include_region_metrics:
@@ -187,6 +192,10 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     'vol_ptv70_conformity_index': ConformityIndex(ptv_level=70, sync_on_compute=False),
     'vol_ptv63_conformity_index': ConformityIndex(ptv_level=63, sync_on_compute=False),
     'vol_ptv56_conformity_index': ConformityIndex(ptv_level=56, sync_on_compute=False),
+
+    'vol_ptv70_gradient_index': GradientIndex(ptv_level=70, sync_on_compute=False),
+    'vol_ptv63_gradient_index': GradientIndex(ptv_level=63, sync_on_compute=False),
+    'vol_ptv56_gradient_index': GradientIndex(ptv_level=56, sync_on_compute=False),
 
     'vol_gamma_5_5': GammaIndex(dose_tolerance=5.0, distance_tolerance=5.0, sync_on_compute=False),
     'vol_gamma_3_3': GammaIndex(dose_tolerance=3.0, distance_tolerance=3.0, sync_on_compute=False),

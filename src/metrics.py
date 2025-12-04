@@ -7,6 +7,7 @@ __all__ = [
   'DVHAUC',
   'HomogeneityIndex',
   'ConformityIndex',
+  'GradientIndex',
   'BodyMaskedMetric',
   'ChallengeMAE',
   'VarianceOfLaplacian',
@@ -191,6 +192,102 @@ class ConformityIndex(Metric):
     if self.count == 0:
       return torch.tensor(float('nan'))
     return self.total_ci / self.count
+
+
+class GradientIndex(Metric):
+  """
+  Paddick Gradient Index (GI) for measuring dose falloff steepness outside the target.
+
+  The Gradient Index quantifies the dose gradient by computing the ratio of the volume
+  receiving half the prescription dose to the volume receiving the prescription dose:
+
+  GI = V(half_prescription_dose) / V(prescription_dose)
+
+  A lower GI indicates a steeper dose falloff (better), while a higher GI indicates
+  a more gradual falloff (worse). The GI complements conformity indices by specifically
+  measuring how quickly the dose decreases outside the target volume.
+
+  Reference:
+    Paddick I, Lippitz B. "A simple dose gradient measurement tool to complement
+    the conformity index." J Neurosurg. 2006;105(Suppl):194-201.
+
+  This metric computes GI for each PTV level (70, 63, 56) separately in their exclusive regions.
+
+  Args:
+    ptv_level: The PTV prescription level (70, 63, or 56)
+
+  Works with both 2D slices and 3D volumes.
+  """
+  def __init__(self, ptv_level: int, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    if ptv_level not in [70, 63, 56]:
+      raise ValueError(f"ptv_level must be 70, 63, or 56, got {ptv_level}")
+
+    self.ptv_level = ptv_level
+    self.prescribed_dose = float(ptv_level)
+    self.half_prescribed_dose = self.prescribed_dose / 2.0
+
+    self.add_state("total_gi", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, ptv70_mask: torch.Tensor,
+             ptv63_mask: torch.Tensor, ptv56_mask: torch.Tensor):
+    """
+    Update the metric with new predictions.
+
+    Args:
+      preds: predicted doses in Gy, shape (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
+      target: true doses in Gy (not used but kept for consistency), shape (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
+      ptv70_mask: PTV70 binary mask, shape (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
+      ptv63_mask: PTV63 binary mask, shape (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
+      ptv56_mask: PTV56 binary mask, shape (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred = preds[i, 0]  # (H, W) or (H, W, D)
+
+      # Ensure masks are boolean and remove channel dimension if present
+      ptv70 = ptv70_mask[i].squeeze().to(torch.bool) if ptv70_mask[i].dim() > pred.dim() else ptv70_mask[i].to(torch.bool)
+      ptv63 = ptv63_mask[i].squeeze().to(torch.bool) if ptv63_mask[i].dim() > pred.dim() else ptv63_mask[i].to(torch.bool)
+      ptv56 = ptv56_mask[i].squeeze().to(torch.bool) if ptv56_mask[i].dim() > pred.dim() else ptv56_mask[i].to(torch.bool)
+
+      # Calculate exclusive region for the specified PTV level
+      if self.ptv_level == 70:
+        region_mask = ptv70
+      elif self.ptv_level == 63:
+        region_mask = ptv63 & ~ptv70
+      else:  # 56
+        region_mask = ptv56 & ~ptv63
+
+      # Skip if PTV region is empty
+      if region_mask.sum() == 0:
+        continue
+
+      # Calculate V_prescription: volume receiving at least the prescribed dose
+      prescription_mask = pred >= self.prescribed_dose
+      v_prescription = prescription_mask.sum().float()
+
+      # Skip if no voxels receive the prescription dose
+      if v_prescription == 0:
+        continue
+
+      # Calculate V_half_prescription: volume receiving at least half the prescribed dose
+      half_prescription_mask = pred >= self.half_prescribed_dose
+      v_half_prescription = half_prescription_mask.sum().float()
+
+      # Calculate Gradient Index: GI = V(half_Rx) / V(Rx)
+      gi = v_half_prescription / v_prescription
+
+      self.total_gi += gi
+      self.count += 1
+
+  def compute(self):
+    """Compute the average gradient index for this PTV level."""
+    if self.count == 0:
+      return torch.tensor(float('nan'))
+    return self.total_gi / self.count
+
 
 class BodyMaskedMetric(Metric):
   def __init__(self, base_metric: Metric, *args, **kwargs):
