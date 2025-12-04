@@ -1,6 +1,20 @@
 import torch
 from torchmetrics import Metric
 
+__all__ = [
+  'DoseScore',
+  'DVHScore',
+  'DVHAUC',
+  'HomogeneityIndex',
+  'BodyMaskedMetric',
+  'ChallengeMAE',
+  'VarianceOfLaplacian',
+  'RegionMaskedMetric',
+  'PTVPrescriptionMAE',
+  'PTVPrescriptionMeanDose',
+  'GammaIndex',
+]
+
 
 class DoseScore(Metric):
   def __init__(self, *args, **kwargs):
@@ -519,6 +533,129 @@ class PTVPrescriptionMeanDose(Metric):
     if self.count == 0:
       return torch.tensor(float('nan'))
     return self.total_dose / self.count
+
+
+class DVHAUC(Metric):
+  """
+  Area Under the Curve (AUC) for Dose-Volume Histogram (DVH).
+
+  This metric computes the AUC of the DVH curve, which represents the integral
+  of the volume percentage as a function of dose. A higher AUC indicates that
+  more volume receives higher doses.
+
+  The DVH curve shows what percentage of the volume receives at least a certain dose.
+  The AUC is computed using the trapezoidal rule for numerical integration.
+
+  Works with both 2D slices and 3D volumes.
+
+  Args:
+    num_bins: Number of dose bins for DVH computation (default: 100)
+    normalize: If True, normalize AUC by the maximum possible area (default: True)
+    dose_range: Tuple of (min_dose, max_dose) to use for binning. If None, uses per-sample min/max (default: None)
+  """
+  def __init__(self, num_bins: int = 100, normalize: bool = True, dose_range: tuple = None, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.num_bins = num_bins
+    self.normalize = normalize
+    self.dose_range = dose_range  # (min_dose, max_dose) or None
+
+    self.add_state("total_auc_pred", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("total_auc_target", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("total_auc_diff", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def _compute_dvh_auc(self, dose_volume: torch.Tensor) -> torch.Tensor:
+    """
+    Compute AUC for a single dose volume.
+
+    Args:
+      dose_volume: Dose values, shape (...) - can be any shape, will be flattened
+
+    Returns:
+      AUC value as scalar tensor
+    """
+    doses = dose_volume.flatten()
+
+    if doses.numel() == 0:
+      return torch.tensor(0.0, device=doses.device)
+
+    # Get min and max dose for binning
+    if self.dose_range is not None:
+      # Use fixed dose range from dataset
+      min_dose = torch.tensor(self.dose_range[0], device=doses.device, dtype=doses.dtype)
+      max_dose = torch.tensor(self.dose_range[1], device=doses.device, dtype=doses.dtype)
+    else:
+      # Use per-sample min/max
+      min_dose = doses.min()
+      max_dose = doses.max()
+
+    # Handle case where all doses are the same (only relevant for per-sample mode)
+    if max_dose - min_dose < 1e-10:
+      # If all doses are the same, DVH is a step function
+      # AUC = dose_value * 1.0 (100% volume receives this dose)
+      return max_dose if not self.normalize else torch.tensor(1.0, device=doses.device)
+
+    # Create dose bins
+    dose_bins = torch.linspace(min_dose, max_dose, self.num_bins, device=doses.device)
+
+    # Compute cumulative DVH: for each dose level, what % of volume receives >= that dose
+    dvh_values = torch.zeros(self.num_bins, device=doses.device)
+    for i, dose_level in enumerate(dose_bins):
+      dvh_values[i] = (doses >= dose_level).float().mean() * 100.0  # Percentage
+
+    # Compute AUC using trapezoidal rule
+    # AUC = integral of volume(dose) over dose range
+    # Trapezoidal rule: sum of (dose[i+1] - dose[i]) * (volume[i] + volume[i+1]) / 2
+    dose_diffs = dose_bins[1:] - dose_bins[:-1]
+    volume_avgs = (dvh_values[1:] + dvh_values[:-1]) / 2.0
+    auc = torch.sum(dose_diffs * volume_avgs)
+
+    if self.normalize:
+      # Normalize by maximum possible area: max_dose * 100 (if 100% volume received max dose)
+      max_area = (max_dose - min_dose) * 100.0
+      auc = auc / max_area if max_area > 1e-10 else torch.tensor(0.0, device=doses.device)
+
+    return auc
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor):
+    """
+    Update the metric with new predictions and targets.
+
+    Args:
+      preds: predicted doses, shape (batch_size, ...) - works with 2D or 3D
+      target: reference doses, shape (batch_size, ...) - works with 2D or 3D
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred_auc = self._compute_dvh_auc(preds[i])
+      target_auc = self._compute_dvh_auc(target[i])
+
+      self.total_auc_pred += pred_auc
+      self.total_auc_target += target_auc
+      self.total_auc_diff += torch.abs(pred_auc - target_auc)
+      self.count += 1
+
+  def compute(self):
+    """
+    Compute the average DVH AUC statistics across all samples.
+
+    Returns:
+      Dictionary with pred_auc (avg predicted AUC), target_auc (avg target AUC),
+      and auc_diff (avg absolute difference between predicted and target AUC)
+    """
+    if self.count == 0:
+      return {
+        'pred': torch.tensor(float('nan')),
+        'target': torch.tensor(float('nan')),
+        'diff': torch.tensor(float('nan'))
+      }
+
+    return {
+      'pred': self.total_auc_pred / self.count,
+      'target': self.total_auc_target / self.count,
+      'diff': self.total_auc_diff / self.count
+    }
 
 
 class GammaIndex(Metric):

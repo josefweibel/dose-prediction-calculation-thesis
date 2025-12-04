@@ -11,6 +11,7 @@ import contextlib
 
 from metrics import (
 	DVHScore,
+  DVHAUC,
   DoseScore,
   HomogeneityIndex,
   BodyMaskedMetric,
@@ -85,6 +86,7 @@ def compute_metrics(metrics, preds, target, structure, dataset):
 def build_slice_metrics(dataset, device, include_region_metrics=True):
   """Build 2D metrics for slice-by-slice evaluation."""
   dose_range = dataset.dose_range[1] - dataset.dose_range[0]
+  dose_min_max = dataset.dose_range  # (min, max) tuple
   ms_ssim_kwargs = dict(
     data_range=dose_range,
     betas=(0.0448, 0.2856, 0.3001, 0.2363), # only 4 values since image size is 160x176
@@ -97,6 +99,7 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
     'ssim': StructuralSimilarityIndexMeasure(data_range=dose_range, sync_on_compute=False),
     'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(**ms_ssim_kwargs, sync_on_compute=False),
     'dvh': DVHScore(sync_on_compute=False),
+    'dvh_auc': DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False),
     'dose_score': DoseScore(sync_on_compute=False),
     'homogeneity_index': HomogeneityIndex(sync_on_compute=False),
 
@@ -133,6 +136,7 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
       ('rmse', lambda: MeanSquaredError(squared=False, sync_on_compute=False)),
       ('psnr', lambda: PeakSignalNoiseRatio(data_range=dose_range, sync_on_compute=False)),
       ('dvh', lambda: DVHScore(sync_on_compute=False)),
+      ('dvh_auc', lambda: DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False)),
       ('dose_score', lambda: DoseScore(sync_on_compute=False)),
     ]
 
@@ -151,11 +155,14 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
 
 def build_volume_metrics(dataset, device, include_region_metrics=True):
   """Build 3D volume metrics for whole-volume evaluation."""
+  dose_min_max = dataset.dose_range  # (min, max) tuple
+
   # Volume-based metrics (no SSIM/MS-SSIM/PSNR as they are 2D metrics)
   metrics = {
     'vol_mse': MeanSquaredError(sync_on_compute=False),
     'vol_rmse': MeanSquaredError(squared=False, sync_on_compute=False),
     'vol_dvh': DVHScore(sync_on_compute=False),
+    'vol_dvh_auc': DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False),
     'vol_dose_score': DoseScore(sync_on_compute=False),
     'vol_homogeneity_index': HomogeneityIndex(sync_on_compute=False),
 
@@ -191,6 +198,7 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
       ('mse', lambda: MeanSquaredError(sync_on_compute=False)),
       ('rmse', lambda: MeanSquaredError(squared=False, sync_on_compute=False)),
       ('dvh', lambda: DVHScore(sync_on_compute=False)),
+      ('dvh_auc', lambda: DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False)),
       ('dose_score', lambda: DoseScore(sync_on_compute=False)),
     ]
 
