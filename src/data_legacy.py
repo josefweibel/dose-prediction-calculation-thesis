@@ -9,6 +9,8 @@ from multiprocessing import shared_memory
 import time
 from scipy.ndimage import distance_transform_edt
 
+from data import StructureSelector
+
 GDPHMM_DATA_BASE_PATH = Path(__file__).parents[1] / 'data'
 
 GDPHMM_IMG_MIN = -1024
@@ -86,6 +88,7 @@ class GDPHMMSlicesDataset(Dataset):
     split,
     img_size,
     cache,
+    structure_groups=None,
     limit=None,
     skip=0,
     voxel_spacing=(1.0, 1.0, 1.0),
@@ -95,6 +98,8 @@ class GDPHMMSlicesDataset(Dataset):
     self.img_size = img_size
     self.cache = cache
     self.voxel_spacing = voxel_spacing
+
+    self.selector = StructureSelector(groups=structure_groups)
 
     dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
     self.index_map = pd.read_csv(dir / '_index.csv')
@@ -137,7 +142,7 @@ class GDPHMMSlicesDataset(Dataset):
       PadToFixedSize(img_size, fill=0, padding_mode='constant'),
     ])
 
-    self.n_structures = len(GDPHMM_OAR) + 1 + 1
+    self.n_structures = self.selector.total_channels
     self.dose_range = (GDPHMM_DOSE_MIN, GDPHMM_DOSE_MAX)
 
   def __len__(self):
@@ -148,13 +153,17 @@ class GDPHMMSlicesDataset(Dataset):
 
     dose_vol, dose_shm = self.cache.get(file.name + ':dose')
     ptv_vol, ptv_shm = self.cache.get(file.name + ':ptv')
+    ptv70_vol, ptv70_shm = self.cache.get(file.name + ':ptv70')
+    ptv63_vol, ptv63_shm = self.cache.get(file.name + ':ptv63')
+    ptv56_vol, ptv56_shm = self.cache.get(file.name + ':ptv56')
     ct_vol, ct_shm = self.cache.get(file.name + ':ct')
     oar_sdm, oar_sdm_shm = self.cache.get(file.name + ':oar_sdm')
     ptv_sdm, ptv_sdm_shm = self.cache.get(file.name + ':ptv_sdm')
     body_vol, body_shm = self.cache.get(file.name + ':body')
 
     # If any volume is missing, load all from disk and cache them
-    if dose_vol is None or ptv_vol is None or ct_vol is None or oar_sdm is None or ptv_sdm is None or body_vol is None:
+    if (dose_vol is None or ptv_vol is None or ptv70_vol is None or ptv63_vol is None or
+        ptv56_vol is None or ct_vol is None or oar_sdm is None or ptv_sdm is None or body_vol is None):
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
 
       dose_vol = (vol['dose'] * vol['dose_scale'] * vol['Body'])
@@ -162,6 +171,13 @@ class GDPHMMSlicesDataset(Dataset):
         [vol[name].astype(np.uint8) if name in vol else np.zeros_like(vol['dose'].astype(np.uint8)) for name in GDPHMM_OAR],
         axis=0
       )
+
+      # Create individual PTV masks
+      ptv70_vol = vol['PTV70'].astype(np.uint8) if 'PTV70' in vol else np.zeros_like(vol['dose'].astype(np.uint8))
+      ptv63_vol = vol['PTV63'].astype(np.uint8) if 'PTV63' in vol else np.zeros_like(vol['dose'].astype(np.uint8))
+      ptv56_vol = vol['PTV56'].astype(np.uint8) if 'PTV56' in vol else np.zeros_like(vol['dose'].astype(np.uint8))
+
+      # Combined PTV with dose levels
       ptv_vol = np.maximum.reduce(
         [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
       )
@@ -169,19 +185,22 @@ class GDPHMMSlicesDataset(Dataset):
       body_vol = vol['Body']
       oar_sdm, ptv_sdm = self.compute_sdms(oar_vol, ptv_vol)
 
-      ct_cache, dose_cache, ptv_cache, body_cache, oar_sdm_cache, ptv_sdm_cache = self.pack_for_cache(
-        ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm
+      ct_cache, dose_cache, ptv_cache, ptv70_cache, ptv63_cache, ptv56_cache, body_cache, oar_sdm_cache, ptv_sdm_cache = self.pack_for_cache(
+        ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm
       )
 
       self.cache.put(file.name + ':dose', dose_cache)
       self.cache.put(file.name + ':ptv', ptv_cache)
+      self.cache.put(file.name + ':ptv70', ptv70_cache)
+      self.cache.put(file.name + ':ptv63', ptv63_cache)
+      self.cache.put(file.name + ':ptv56', ptv56_cache)
       self.cache.put(file.name + ':ct', ct_cache)
       self.cache.put(file.name + ':oar_sdm', oar_sdm_cache)
       self.cache.put(file.name + ':ptv_sdm', ptv_sdm_cache)
       self.cache.put(file.name + ':body', body_cache)
     else:
-      ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm = self.unpack_from_cache(
-        ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm
+      ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm = self.unpack_from_cache(
+        ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm
       )
 
     oar_vol = (oar_sdm > 0).astype(np.uint8)
@@ -189,6 +208,9 @@ class GDPHMMSlicesDataset(Dataset):
     sample = {
       'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
       'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
+      'ptv70': self.oar_transforms(ptv70_vol[:, :, slice_idx]),
+      'ptv63': self.oar_transforms(ptv63_vol[:, :, slice_idx]),
+      'ptv56': self.oar_transforms(ptv56_vol[:, :, slice_idx]),
       'ct': self.ct_transforms(ct_vol[:, :, slice_idx]),
       'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
       'body': self.oar_transforms(body_vol[:, :, slice_idx]),
@@ -202,19 +224,13 @@ class GDPHMMSlicesDataset(Dataset):
       }
     }
 
-    for shm in [dose_shm, ptv_shm, ct_shm, oar_sdm_shm, ptv_sdm_shm, body_shm]:
+    for shm in [dose_shm, ptv_shm, ptv70_shm, ptv63_shm, ptv56_shm, ct_shm, oar_sdm_shm, ptv_sdm_shm, body_shm]:
       if shm is not None:
         shm.close()
 
-    structure = torch.cat([
-      sample['ct'],
-      sample['ptv'],
-      sample['oar'],
-      sample['ptv_sdm'],
-      sample['oar_sdm']
-    ], dim=0)
+    structure = self.selector.build_structure(sample)
 
-    return structure, sample['dose'], sample['body'], sample['info']
+    return structure, sample['dose'], sample['info']
 
   def denormalize_target(self, x):
     return x * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
@@ -233,26 +249,32 @@ class GDPHMMSlicesDataset(Dataset):
 
     return oar_sdm, ptv_sdm
 
-  def pack_for_cache(self, ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm):
+  def pack_for_cache(self, ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm):
     ct_pack = np.clip(ct_vol, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX).astype(np.float16)
     dose_norm = (dose_vol - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
     dose_pack = np.clip(dose_norm * 65535, 0, 65535).astype(np.uint16)
     ptv_pack = np.clip(ptv_vol * 65535, 0, 65535).astype(np.uint16)
+    ptv70_pack = ptv70_vol.astype(np.uint8)
+    ptv63_pack = ptv63_vol.astype(np.uint8)
+    ptv56_pack = ptv56_vol.astype(np.uint8)
     body_pack = body_vol.astype(np.uint8)
     oar_sdm = oar_sdm.astype(np.float16)
     ptv_sdm = ptv_sdm.astype(np.float16)
 
-    return ct_pack, dose_pack, ptv_pack, body_pack, oar_sdm, ptv_sdm
+    return ct_pack, dose_pack, ptv_pack, ptv70_pack, ptv63_pack, ptv56_pack, body_pack, oar_sdm, ptv_sdm
 
-  def unpack_from_cache(self, ct_pack, dose_pack, ptv_pack, body_pack, oar_sdm, ptv_sdm):
+  def unpack_from_cache(self, ct_pack, dose_pack, ptv_pack, ptv70_pack, ptv63_pack, ptv56_pack, body_pack, oar_sdm, ptv_sdm):
     ct_vol = ct_pack.astype(np.float32)
     dose_vol = (dose_pack.astype(np.float32) / 65535.0) * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
     ptv_vol = ptv_pack.astype(np.float32) / 65535.0
+    ptv70_vol = ptv70_pack.astype(np.uint8)
+    ptv63_vol = ptv63_pack.astype(np.uint8)
+    ptv56_vol = ptv56_pack.astype(np.uint8)
     body_vol = body_pack.astype(np.uint8)
     oar_sdm = oar_sdm.astype(np.float32)
     ptv_sdm = ptv_sdm.astype(np.float32)
 
-    return ct_vol, dose_vol, ptv_vol, body_vol, oar_sdm, ptv_sdm
+    return ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm
 
 
 class PadToFixedSize:
@@ -496,6 +518,44 @@ class SharedCache:
 
       self.data.clear()
       self.nbytes.value = 0
+
+class LRUCache:
+  """
+  Simple cache for numpy arrays stored in local memory (not shared).
+  No size limit - stores all entries until manually cleared.
+  Each instance maintains its own isolated cache.
+  """
+
+  def __init__(self):
+    self.data = {}
+
+  def get(self, key):
+    """
+    Return (np.ndarray, None) or (None, None).
+    Second return value is None for compatibility with shared cache interface.
+    """
+    if key not in self.data:
+      return None, None
+    return self.data[key], None
+
+  def put(self, key, value: np.ndarray):
+    """Store a numpy array in local memory."""
+    assert isinstance(value, np.ndarray), "LRUCacheBytes only supports numpy arrays"
+    self.data[key] = value.copy()
+
+  def __contains__(self, key):
+    return key in self.data
+
+  def __len__(self):
+    return len(self.data)
+
+  def keys(self):
+    return list(self.data.keys())
+
+  def clear(self):
+    """Remove all entries."""
+    self.data.clear()
+
 
 class SharedLRUCacheBytes:
   """

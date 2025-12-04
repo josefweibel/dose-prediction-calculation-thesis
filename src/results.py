@@ -6,7 +6,8 @@ from typing import List
 from itertools import cycle
 from pathlib import Path
 
-from data import create_gdphmm_dataset, GDPHMM_OAR, GDPHMM_DOSE_MAX
+from data import GDPHMM_OAR, GDPHMM_DOSE_MAX
+from data_legacy import GDPHMMSlicesDataset, LRUCache
 
 
 SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
@@ -54,16 +55,22 @@ DEFAULT_METRICS = [
 HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body', 'var_laplacian_diff']
 
 def build_dataset(dataset_split='test'):
-  # Create a config dict for the factory function
-  config = {
-    'data': {
-      'dataset_strategy': 'original',  # Use original dataset for backwards compatibility
-      'dataset_name': 'gdphmm-hn-vmat',
-      'img_size': [176, 160],
-    }
-  }
+  # Create an LRUCache instance for the dataset
+  cache = LRUCache()
 
-  return create_gdphmm_dataset(config, dataset_split)
+  # Create the dataset using the legacy class
+  dataset = GDPHMMSlicesDataset(
+    dataset_name='gdphmm-hn-vmat',
+    split=dataset_split,
+    img_size=[176, 160],
+    cache=cache,
+    structure_groups=None,
+    limit=None,
+    skip=0,
+    voxel_spacing=[2.5, 2.5, 2.0]
+  )
+
+  return dataset
 
 
 def compute_dvh(dose, mask, bins):
