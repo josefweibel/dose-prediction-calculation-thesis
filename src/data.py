@@ -415,7 +415,7 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     # Metadata
     info = {
       'file_path': str(slice_path),
-      'file_name': row['file'],
+      'file_name': slice_path.parent.with_suffix('.npz').name,
       'volume': row['volume'],
       'index': row['slice_idx']
     }
