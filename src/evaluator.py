@@ -13,6 +13,7 @@ from metrics import (
 	DVHScore,
   DVHAUC,
   DoseScore,
+  DoseLevelMetricBase,
   HomogeneityIndex,
   ConformityIndex,
   GradientIndex,
@@ -51,7 +52,7 @@ def compute_metrics(metrics, preds, target, structure, dataset):
   for metric_name, metric in metrics.items():
     metric.reset()
 
-    if isinstance(metric, (PTVPrescriptionMAE, PTVPrescriptionMeanDose, ConformityIndex, GradientIndex)):
+    if isinstance(metric, DoseLevelMetricBase):
       ptv_masks = dataset.selector.get_component(structure, 'ptv_masks')
       ptv70_mask = ptv_masks[:, 0:1]  # (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
       ptv63_mask = ptv_masks[:, 1:2]
@@ -62,9 +63,6 @@ def compute_metrics(metrics, preds, target, structure, dataset):
     elif isinstance(metric, BodyMaskedMetric):
       body = dataset.selector.get_body(structure)
       metric.update(preds, target, body)
-    elif isinstance(metric, HomogeneityIndex):
-      ptv_channel = dataset.selector.get_ptv(structure)
-      metric.update(preds, target, ptv_channel[:, 0])  # Remove channel dim
     elif isinstance(metric, ChallengeMAE):
       ptv_channel = dataset.selector.get_ptv(structure)
       body = dataset.selector.get_body(structure)
