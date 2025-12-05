@@ -11,7 +11,6 @@ This file contains both 3D and 2D implementations:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class RegularConvBlock(nn.Module):
@@ -39,16 +38,18 @@ class DownsamplingBlock(nn.Module):
 
 
 class UpsamplingBlock(nn.Module):
-  """Up-sampling block: Trilinear upsampling -> 3x3x3 Conv (stride=1) -> ReLU"""
+  """Up-sampling block: Trilinear upsampling -> 3x3x3 Conv (stride=1) -> IN -> ReLU"""
   def __init__(self, in_channels, out_channels):
     super().__init__()
     self.upsample = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
     self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+    self.norm = nn.InstanceNorm3d(out_channels)
     self.relu = nn.ReLU(inplace=True)
 
   def forward(self, x):
     x = self.upsample(x)
     x = self.conv(x)
+    x = self.norm(x)
     return self.relu(x)
 
 
@@ -337,16 +338,18 @@ class DownsamplingBlock2D(nn.Module):
 
 
 class UpsamplingBlock2D(nn.Module):
-  """Up-sampling 2D block: Bilinear upsampling -> 3x3 Conv (stride=1) -> ReLU"""
+  """Up-sampling 2D block: Bilinear upsampling -> 3x3 Conv (stride=1) -> IN -> ReLU"""
   def __init__(self, in_channels, out_channels):
     super().__init__()
     self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
     self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+    self.norm = nn.InstanceNorm2d(out_channels)
     self.relu = nn.ReLU(inplace=True)
 
   def forward(self, x):
     x = self.upsample(x)
     x = self.conv(x)
+    x = self.norm(x)
     return self.relu(x)
 
 

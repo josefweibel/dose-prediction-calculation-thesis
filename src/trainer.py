@@ -1,4 +1,5 @@
 import contextlib
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -360,11 +361,31 @@ class Trainer:
       self.optim = torch.optim.AdamW(self.model.parameters(), lr=start_lr)
       self.lr_scheduler = LambdaLR(self.optim, lr_lambda=linear_lr_schedule)
     elif 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', '') == 'cosine_annealing':
-      self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr_scheduler']['lr'])
-      self.lr_scheduler = CosineAnnealingLR(
-        self.optim,
-        T_max=len(self.train_dataloader) * self.config['epochs'],
-      )
+      target_lr = self.config['lr_scheduler']['lr']
+      warmup_epochs = self.config['lr_scheduler'].get('warmup_epochs', 0)
+      total_steps = len(self.train_dataloader) * self.config['epochs']
+      warmup_steps = len(self.train_dataloader) * warmup_epochs
+
+      self.optim = torch.optim.AdamW(self.model.parameters(), lr=target_lr)
+
+      if warmup_steps > 0:
+        # Cosine annealing with linear warmup
+        def lr_lambda(step):
+          if step < warmup_steps:
+            # Linear warmup from 0 to 1
+            return float(step) / float(max(1, warmup_steps))
+          else:
+            # Cosine annealing after warmup
+            progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        self.lr_scheduler = LambdaLR(self.optim, lr_lambda=lr_lambda)
+      else:
+        # Standard cosine annealing without warmup
+        self.lr_scheduler = CosineAnnealingLR(
+          self.optim,
+          T_max=total_steps,
+        )
     elif 'lr_scheduler' in self.config and self.config['lr_scheduler'].get('type', '') == 'step_decay':
       initial_lr = self.config['lr_scheduler']['initial_lr']
       step_size = self.config['lr_scheduler']['step_size']
