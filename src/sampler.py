@@ -2,7 +2,6 @@ import torch
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 import numpy as np
-from scripts.combine_slices import combine_slices_to_volumes
 
 from config import read_model_config
 from data import create_gdphmm_dataset, StructureSelector
@@ -12,6 +11,7 @@ from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
 from models import build_model
+from slice_combinator import SliceCombinator
 
 
 class Sampler:
@@ -104,13 +104,17 @@ class Sampler:
 
     if self.is_main_process:
       print('\nCombining slices into volumes...')
-      combine_slices_to_volumes(
+      combinator = SliceCombinator(
         model_name=self.model_name,
         sampling_name=self.sampling_config['name'],
         data_split=self.data_split,
         epoch=self.epoch,
-        delete_slices=True
+        delete_slices=True,
+        rank=self.rank,
+        world_size=self.world_size,
       )
+      combinator.combine()
+      combinator.finish()
 
       print('\nComputing volume metrics...')
       volume_metrics = compute_volume_metrics(dir, self.dataset, self.device, rank=self.rank)
