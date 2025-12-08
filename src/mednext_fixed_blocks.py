@@ -55,6 +55,9 @@ class MedNeXtUpBlock(MedNeXtBlock):
 
 
   def forward(self, x, dummy_tensor=None):
+    # Store original input for residual connection
+    x_orig = x
+
     # Upsample FIRST using bilinear interpolation
     if self.dim == '2d':
       x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
@@ -68,11 +71,11 @@ class MedNeXtUpBlock(MedNeXtBlock):
     # The output size is already correct
 
     if self.resample_do_res:
-      # Upsample residual connection too
+      # Upsample residual connection from ORIGINAL input
       if self.dim == '2d':
-        res = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+        res = F.interpolate(x_orig, scale_factor=2, mode='bilinear', align_corners=False)
       elif self.dim == '3d':
-        res = F.interpolate(x, scale_factor=2, mode='trilinear', align_corners=False)
+        res = F.interpolate(x_orig, scale_factor=2, mode='trilinear', align_corners=False)
       res = self.res_conv(res)
       x1 = x1 + res
 
