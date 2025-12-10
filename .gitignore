@@ -219,6 +219,9 @@ data/gdphmm-hn/incoming/valid_metadata.csv
 data/gdphmm-hn-vmat/train
 data/gdphmm-hn-vmat/valid
 data/gdphmm-hn-vmat/test
+data/gdphmm-hn-vmat_slices/train
+data/gdphmm-hn-vmat_slices/valid
+data/gdphmm-hn-vmat_slices/test
 checkpoints/
 !checkpoints/.gitkeep
 wandb/
