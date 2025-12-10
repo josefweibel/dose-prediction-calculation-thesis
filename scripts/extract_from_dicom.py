@@ -28,7 +28,6 @@ def determine_treatment_modality(beams: List[Dict]) -> Dict[str, str]:
     return {'modality': 'UNKNOWN', 'technique': 'UNKNOWN'}
 
   beam_types = set()
-  has_vmat = False
   total_control_points = 0
   gantry_rotations = []
   all_gantry_angles = []
@@ -42,9 +41,6 @@ def determine_treatment_modality(beams: List[Dict]) -> Dict[str, str]:
     rotation_dir = beam.get('gantry_rotation_direction', '')
     if rotation_dir:
       rotation_directions.add(rotation_dir)
-      # Only CW (clockwise) or CC (counter-clockwise) indicate true arc therapy (VMAT)
-      if rotation_dir in ['CW', 'CC']:
-        has_vmat = True
 
     if beam.get('control_points'):
       control_points = beam['control_points']
@@ -60,12 +56,12 @@ def determine_treatment_modality(beams: List[Dict]) -> Dict[str, str]:
         if any(change > 5 for change in angle_changes):
           gantry_rotations.append(max(gantry_angles) - min(gantry_angles))
 
-    if 'DYNAMIC' in beam_type.upper():
-      has_vmat = True
-
   # Determine modality based on multiple factors
-  # VMAT: Must have continuous rotation (CW/CC) OR significant arc rotation with many control points
-  if has_vmat:
+  # VMAT detection using GDP-HMM method: check if rotation directions contain 'CC' or 'CW'
+  # isVMAT = len(set(['CC', 'CW']) & set(GantryRotation)) > 0
+  is_vmat = len(set(['CC', 'CW']) & rotation_directions) > 0
+
+  if is_vmat:
     modality = 'VMAT'
     technique = 'Volumetric Modulated Arc Therapy'
   elif total_control_points > 10:
