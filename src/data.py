@@ -60,6 +60,8 @@ class StructureSelector:
     - 'oar_v2': OAR binary masks without last 3 (30 channels)
     - 'oar_v2_sdm': OAR signed distance maps without last 3 (30 channels)
     - 'ptv_sdm': PTV signed distance map (1 channel)
+    - 'beam_plate': Beam configuration plate (1 channel)
+    - 'angle_plate': Angle configuration plate (1 channel)
   """
 
   # Define all available structure groups and their channel counts
@@ -73,6 +75,8 @@ class StructureSelector:
     'oar_v2': len(GDPHMM_OAR_V2),  # 30 (without last 3)
     'oar_v2_sdm': len(GDPHMM_OAR_V2),  # 30 (without last 3)
     'ptv_sdm': 1,
+    'beam_plate': 1,  # beam configuration plate
+    'angle_plate': 1,  # angle configuration plate (3D around isocenter)
   }
 
   def __init__(self, groups=None):
@@ -108,7 +112,8 @@ class StructureSelector:
     Build structure tensor from preprocessed data dict.
 
     Args:
-      data: Dict with keys 'ct', 'body', 'ptv', 'ptv70', 'ptv63', 'ptv56', 'oar', 'oar_sdm', 'ptv_sdm'
+      data: Dict with keys 'ct', 'body', 'ptv', 'ptv70', 'ptv63', 'ptv56', 'oar', 'oar_sdm', 'ptv_sdm',
+            'beam_plate', 'angle_plate'
             Each value should be a torch.Tensor or numpy array
 
     Returns:
@@ -137,6 +142,10 @@ class StructureSelector:
         components.append(data['oar_sdm'][:-3])
       elif group == 'ptv_sdm':
         components.append(data['ptv_sdm'])
+      elif group == 'beam_plate':
+        components.append(data['beam_plate'])
+      elif group == 'angle_plate':
+        components.append(data['angle_plate'])
 
     # Concatenate all components
     structure = torch.cat(components, dim=0)
@@ -438,6 +447,8 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
       'oar': torch.from_numpy(data_np['oar']),  # uint8 {0, 1}
       'oar_sdm': torch.from_numpy(data_np['oar_sdm']).float(),  # float16 → float32
       'ptv_sdm': torch.from_numpy(data_np['ptv_sdm']).float(),  # float16 → float32
+      'beam_plate': torch.from_numpy(data_np['beam_plate']),  # float32, continuous values
+      'angle_plate': torch.from_numpy(data_np['angle_plate']),  # uint8 {0, 1}, binary
     }
 
     # Use selector to build structure with only selected groups

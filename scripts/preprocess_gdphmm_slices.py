@@ -31,6 +31,8 @@ Each slice contains:
   - oar: (N_OAR, H, W) uint8 - binary OAR masks
   - oar_sdm: (N_OAR, H, W) float16 - signed distance maps for OARs
   - ptv_sdm: (1, H, W) float16 - signed distance map for combined PTV
+  - beam_plate: (1, H, W) float32 - beam configuration plate
+  - angle_plate: (1, H, W) uint8 - angle configuration plate (binary, 3D around isocenter)
 """
 
 import numpy as np
@@ -38,7 +40,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 import argparse
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, zoom
 from multiprocessing import Pool, cpu_count
 import sys
 
@@ -53,6 +55,42 @@ from data import (
   GDPHMM_OAR,
   GDPHMM_PTV,
 )
+
+def process_angle_plate(angle_plate_2d, img_shape, isocenter, z_range=5):
+  """
+  Convert 2D angle plate to 3D volume around the isocenter.
+
+  Based on GDP-HMM implementation: creates a 3D volume by replicating the 2D binary angle plate
+  within a range around the isocenter (±z_range slices).
+
+  Args:
+    angle_plate_2d: (H, W) 2D binary angle plate array
+    img_shape: (H, W, D) shape of the target volume
+    isocenter: (z, y, x) coordinates of the isocenter
+    z_range: number of slices above and below isocenter to fill (default: 5)
+
+  Returns:
+    angle_plate_3d: (H, W, D) 3D binary volume with angle plate around isocenter
+  """
+  # Initialize empty 3D volume
+  angle_plate_3d = np.zeros(img_shape, dtype=np.uint8)
+
+  # Determine z-range around isocenter
+  z_begin = max(0, int(isocenter[0]) - z_range)
+  z_end = min(img_shape[2], int(isocenter[0]) + z_range)
+
+  # Resize angle_plate to match img_shape if needed (order=0 preserves binary values)
+  if angle_plate_2d.shape[0] != img_shape[0] or angle_plate_2d.shape[1] != img_shape[1]:
+    zoom_factors = (img_shape[0] / angle_plate_2d.shape[0],
+                    img_shape[1] / angle_plate_2d.shape[1])
+    angle_plate_2d = zoom(angle_plate_2d, zoom_factors, order=0)
+
+  # Replicate the 2D plate across the z-range
+  for z in range(z_begin, z_end):
+    angle_plate_3d[:, :, z] = angle_plate_2d
+
+  return angle_plate_3d
+
 
 def compute_sdm(mask: np.ndarray, voxel_spacing: tuple = (1.0, 1.0, 1.0)) -> np.ndarray:
   """
@@ -107,7 +145,7 @@ def compute_sdms(oar_vol, ptv_vol, voxel_spacing):
   return oar_sdm, ptv_sdm
 
 
-def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, pad_size=None):
+def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, beam_plate_vol, angle_plate_vol, pad_size=None):
   """
   Apply all transformations to match the GDPHMMSlicesDataset behavior.
 
@@ -118,6 +156,8 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56
     - PTV70/63/56: binary masks stored as uint8
     - Body: convert to uint8
     - OAR: convert to uint8
+    - Beam plate: keep as float32 (continuous values)
+    - Angle plate: convert to uint8 (binary)
     - Padding: optionally pad to fixed size (saves runtime padding)
 
   Args:
@@ -129,6 +169,8 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56
     ptv56_vol: (H, W, D) - binary mask for PTV56
     body_vol: (H, W, D) - body mask
     oar_vol: (N_OAR, H, W, D) - OAR binary masks
+    beam_plate_vol: (H, W, D) - beam configuration plate
+    angle_plate_vol: (H, W, D) - angle configuration plate
     pad_size: optional (H, W) to pad all slices to this size
 
   Returns:
@@ -157,6 +199,12 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56
 
   # OAR: convert to uint8
   oar_transformed = oar_vol.astype(np.uint8)
+
+  # Beam plate: keep as float32 (continuous values)
+  beam_plate_transformed = beam_plate_vol.astype(np.float32)
+
+  # Angle plate: convert to uint8 (binary mask)
+  angle_plate_transformed = angle_plate_vol.astype(np.uint8)
 
   # Optionally pad all volumes to fixed size using np.pad (much simpler and faster!)
   if pad_size is not None:
@@ -188,8 +236,10 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56
     ptv56_transformed = np.pad(ptv56_transformed, pad_2d, mode='constant', constant_values=0)
     body_transformed = np.pad(body_transformed, pad_2d, mode='constant', constant_values=0)
     oar_transformed = np.pad(oar_transformed, pad_3d, mode='constant', constant_values=0)
+    beam_plate_transformed = np.pad(beam_plate_transformed, pad_2d, mode='constant', constant_values=0)
+    angle_plate_transformed = np.pad(angle_plate_transformed, pad_2d, mode='constant', constant_values=0)
 
-  return ct_transformed, dose_transformed, ptv_transformed, ptv70_transformed, ptv63_transformed, ptv56_transformed, body_transformed, oar_transformed
+  return ct_transformed, dose_transformed, ptv_transformed, ptv70_transformed, ptv63_transformed, ptv56_transformed, body_transformed, oar_transformed, beam_plate_transformed, angle_plate_transformed
 
 
 def process_volume(args):
@@ -230,10 +280,18 @@ def process_volume(args):
     ptv63_vol = vol.get('PTV63', np.zeros_like(vol['dose'])).astype(np.uint8)
     ptv56_vol = vol.get('PTV56', np.zeros_like(vol['dose'])).astype(np.uint8)
 
+    # Extract beam_plate (3D), angle_plate (2D), and isocenter
+    beam_plate_vol = vol['beam_plate']
+    angle_plate_2d = vol['angle_plate']
+    isocenter = vol['isocenter']
+
+    # Process angle_plate from 2D to 3D volume around isocenter
+    angle_plate_vol = process_angle_plate(angle_plate_2d, ct_vol.shape, isocenter, z_range=5)
+
     # Apply all transformations (clipping, normalization, type conversion, padding)
     # NOTE: Padding is applied BEFORE SDM computation to avoid 0-valued edges in distance maps
-    ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol = apply_transformations(
-      ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, pad_size=pad_size
+    ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, beam_plate_vol, angle_plate_vol = apply_transformations(
+      ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, beam_plate_vol, angle_plate_vol, pad_size=pad_size
     )
 
     # Compute signed distance maps AFTER padding so distances are correct at edges
@@ -262,6 +320,8 @@ def process_volume(args):
         'oar': oar_vol[:, :, :, slice_idx],  # (N_OAR, H, W)
         'oar_sdm': oar_sdm[:, :, :, slice_idx],  # (N_OAR, H, W)
         'ptv_sdm': ptv_sdm[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'beam_plate': beam_plate_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'angle_plate': angle_plate_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
       }
 
       slice_path = volume_dir / f"slice_{slice_idx:04d}.npz"
