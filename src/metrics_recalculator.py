@@ -74,7 +74,7 @@ class MetricsRecalculator:
     overall_metrics = sample_metrics.mean(numeric_only=True)
 
     sample_metrics.to_csv(self.samples_path / '_sample_metrics.csv', index=False)
-    overall_metrics.to_frame().T.to_csv(self.samples_path / '_overall_metrics.csv', index=False)
+    overall_metrics.to_frame().to_csv(self.samples_path / '_overall_metrics.csv', index=False)
 
     # Recalculate volume metrics
     print('\nRecalculating volume metrics...')
@@ -92,7 +92,7 @@ class MetricsRecalculator:
 
       # Save volume metrics
       volume_metrics.to_csv(self.samples_path / '_volume_metrics.csv', index=False)
-      overall_volume_metrics.to_frame().T.to_csv(self.samples_path / '_overall_volume_metrics.csv', index=False)
+      overall_volume_metrics.to_frame().to_csv(self.samples_path / '_overall_volume_metrics.csv', index=False)
 
       print(f'Volume metrics saved to {self.samples_path}')
     else:

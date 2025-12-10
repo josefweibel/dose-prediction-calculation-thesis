@@ -123,7 +123,7 @@ class Sampler:
         overall_volume_metrics = volume_metrics.mean(numeric_only=True)
 
         volume_metrics.to_csv(dir / '_volume_metrics.csv', index=False)
-        overall_volume_metrics.to_frame().T.to_csv(dir / '_overall_volume_metrics.csv', index=False)
+        overall_volume_metrics.to_frame().to_csv(dir / '_overall_volume_metrics.csv', index=False)
 
         print(f'Volume metrics saved to {dir}')
       else:
