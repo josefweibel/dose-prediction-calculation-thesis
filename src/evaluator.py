@@ -264,17 +264,17 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0):
     pred_volume = torch.from_numpy(pred_volume).to(device)
 
     # Get sample name from filename
-    sample_name = volume_file.stem + '.npz'
+    sample_name = volume_file.stem
 
     # Find all slices for this sample in the dataset
-    sample_rows = dataset.index[dataset.index['file_name'] == sample_name]
+    sample_rows = dataset.index[dataset.index['volume'] == sample_name]
 
     if len(sample_rows) == 0:
       print(f'Warning: No slices found for {sample_name}')
       continue
 
     # Sort by slice index to ensure correct ordering
-    sample_rows = sample_rows.sort_values('index')
+    sample_rows = sample_rows.sort_values('slice_idx')
     sample_indices = sample_rows.index.tolist()
 
     # Load all slices to reconstruct structure and target volumes
