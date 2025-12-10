@@ -38,12 +38,13 @@ def determine_treatment_modality(beams: List[Dict]) -> Dict[str, str]:
     beam_type = beam.get('beam_type', '')
     beam_types.add(beam_type)
 
-    # Check for gantry rotation direction (CW/CC indicates VMAT)
+    # Check for gantry rotation direction (CW/CC indicates VMAT, NONE indicates IMRT/3D-CRT)
     rotation_dir = beam.get('gantry_rotation_direction', '')
     if rotation_dir:
       rotation_directions.add(rotation_dir)
-    if rotation_dir in ['CW', 'CC']:
-      has_vmat = True
+      # Only CW (clockwise) or CC (counter-clockwise) indicate true arc therapy (VMAT)
+      if rotation_dir in ['CW', 'CC']:
+        has_vmat = True
 
     if beam.get('control_points'):
       control_points = beam['control_points']
@@ -63,13 +64,14 @@ def determine_treatment_modality(beams: List[Dict]) -> Dict[str, str]:
       has_vmat = True
 
   # Determine modality based on multiple factors
-  if has_vmat or (gantry_rotations and total_control_points > 50):
+  # VMAT: Must have continuous rotation (CW/CC) OR significant arc rotation with many control points
+  if has_vmat:
     modality = 'VMAT'
     technique = 'Volumetric Modulated Arc Therapy'
   elif total_control_points > 10:
     modality = 'IMRT'
     technique = 'Intensity Modulated Radiation Therapy'
-  elif total_control_points <= 10:
+  elif total_control_points > 0 and total_control_points <= 10:
     modality = '3D-CRT'
     technique = '3D Conformal Radiation Therapy'
   else:
@@ -124,16 +126,19 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
 
     # Fractionation
     if hasattr(ds, 'FractionGroupSequence'):
-      total_fractions = sum(
-        int(fg.NumberOfFractionsPlanned)
-        for fg in ds.FractionGroupSequence
-        if hasattr(fg, 'NumberOfFractionsPlanned')
-      )
-      info['total_fractions'] = total_fractions
+      fraction_counts = []
+      for fg in ds.FractionGroupSequence:
+        if hasattr(fg, 'NumberOfFractionsPlanned'):
+          fraction_counts.append(int(fg.NumberOfFractionsPlanned))
+
+      info['total_fractions'] = sum(fraction_counts) if fraction_counts else None
       info['fraction_groups'] = len(ds.FractionGroupSequence)
+      # Store individual fraction counts for analysis (e.g., "35" or "30,5" for boost)
+      info['fraction_pattern'] = ','.join(map(str, fraction_counts)) if fraction_counts else None
     else:
       info['total_fractions'] = None
       info['fraction_groups'] = None
+      info['fraction_pattern'] = None
 
     # Prescription dose
     if hasattr(ds, 'DoseReferenceSequence'):
@@ -142,15 +147,29 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
         if hasattr(dr, 'TargetPrescriptionDose'):
           prescriptions.append(float(dr.TargetPrescriptionDose))
 
-      info['prescription_dose_gy'] = prescriptions[0] if prescriptions else None
-      info['num_prescription_targets'] = len(prescriptions)
+      # Sort prescriptions in descending order (highest dose first)
+      prescriptions_sorted = sorted(prescriptions, reverse=True) if prescriptions else []
 
-      if prescriptions and info.get('total_fractions'):
-        info['dose_per_fraction_gy'] = prescriptions[0] / info['total_fractions']
+      info['prescription_dose_gy'] = prescriptions_sorted[0] if prescriptions_sorted else None
+      info['num_prescription_targets'] = len(prescriptions_sorted)
+      # Store all prescription doses as comma-separated values (e.g., "70.0,63.0,56.0")
+      info['prescription_doses_all'] = ','.join(map(str, prescriptions_sorted)) if prescriptions_sorted else None
+
+      if prescriptions_sorted and info.get('total_fractions'):
+        # Calculate dose per fraction for the highest dose level
+        info['dose_per_fraction_gy'] = prescriptions_sorted[0] / info['total_fractions']
+        # Also store all dose per fraction values
+        doses_per_fx = [dose / info['total_fractions'] for dose in prescriptions_sorted]
+        info['dose_per_fraction_all'] = ','.join(f"{d:.2f}" for d in doses_per_fx)
+      else:
+        info['dose_per_fraction_gy'] = None
+        info['dose_per_fraction_all'] = None
     else:
       info['prescription_dose_gy'] = None
       info['num_prescription_targets'] = None
+      info['prescription_doses_all'] = None
       info['dose_per_fraction_gy'] = None
+      info['dose_per_fraction_all'] = None
 
     # Beam information
     if hasattr(ds, 'BeamSequence'):
@@ -162,6 +181,9 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
       beams_for_modality = []
 
       isocenters = []
+      collimator_angles = []
+      couch_angles = []
+      beam_names = []
 
       for beam in ds.BeamSequence:
         # Machine info
@@ -170,6 +192,10 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
         if hasattr(beam, 'Manufacturer'):
           if 'manufacturer' not in info:
             info['manufacturer'] = str(beam.Manufacturer)
+
+        # Beam identification
+        if hasattr(beam, 'BeamName'):
+          beam_names.append(str(beam.BeamName))
 
         beam_type = str(beam.BeamType) if hasattr(beam, 'BeamType') else None
         if beam_type:
@@ -204,6 +230,14 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
               isocenter = [float(x) for x in cp.IsocenterPosition]
               isocenters.append(isocenter)
 
+            # Collimator angle (from first control point)
+            if i == 0 and hasattr(cp, 'BeamLimitingDeviceAngle'):
+              collimator_angles.append(float(cp.BeamLimitingDeviceAngle))
+
+            # Patient support (couch/table) angle (from first control point)
+            if i == 0 and hasattr(cp, 'PatientSupportAngle'):
+              couch_angles.append(float(cp.PatientSupportAngle))
+
             # Gantry angle for modality
             cp_dict = {
               'gantry_angle': float(cp.GantryAngle) if hasattr(cp, 'GantryAngle') else None,
@@ -222,6 +256,7 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
 
       # Store beam information
       info['number_of_beams'] = len(ds.BeamSequence)
+      info['beam_names'] = ','.join(beam_names) if beam_names else None
       info['beam_energies_mv'] = ','.join(map(str, sorted(energies))) if energies else None
       info['num_unique_energies'] = len(energies)
       info['machine_name'] = ','.join(machine_names) if machine_names else None
@@ -238,6 +273,23 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
         info['mlc_leaves'] = mlc_info[0]  # Take first
       else:
         info['mlc_leaves'] = None
+
+      # Store collimator and couch angles
+      if collimator_angles:
+        unique_collimator = sorted(set(collimator_angles))
+        info['collimator_angles'] = ','.join(map(str, unique_collimator))
+        info['num_unique_collimator_angles'] = len(unique_collimator)
+      else:
+        info['collimator_angles'] = None
+        info['num_unique_collimator_angles'] = None
+
+      if couch_angles:
+        unique_couch = sorted(set(couch_angles))
+        info['couch_angles'] = ','.join(map(str, unique_couch))
+        info['num_unique_couch_angles'] = len(unique_couch)
+      else:
+        info['couch_angles'] = None
+        info['num_unique_couch_angles'] = None
 
       # Store isocenter information
       if isocenters:
