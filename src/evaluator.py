@@ -26,7 +26,7 @@ from metrics import (
   GammaIndex
 )
 from model_sampler import build_sampler
-from data import GDPHMM_OAR
+from data import GDPHMM_OAR_V2
 import numpy as np
 
 
@@ -135,7 +135,7 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
     ptv_start, _ = dataset.selector.get_channel_indices('ptv')
     regions = [('PTV', ptv_start)]
 
-    for oar_name in GDPHMM_OAR:
+    for oar_name in GDPHMM_OAR_V2:
       oar_index = dataset.selector.get_oar_index(oar_name)
       regions.append((oar_name, oar_index))
 
@@ -206,7 +206,7 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     ptv_start, _ = dataset.selector.get_channel_indices('ptv')
     regions = [('PTV', ptv_start)]
 
-    for oar_name in GDPHMM_OAR:
+    for oar_name in GDPHMM_OAR_V2:
       oar_index = dataset.selector.get_oar_index(oar_name)
       regions.append((oar_name, oar_index))
 

@@ -21,6 +21,9 @@ GDPHMM_OAR = [
   'Pituitary', 'OralCavity', 'Submandibular', # additional
 ]
 
+# Version 2: Remove last three values (Pituitary, OralCavity, Submandibular)
+GDPHMM_OAR_V2 = GDPHMM_OAR[:-3]
+
 GDPHMM_PTV = {
   70: 'PTV70',
   63: 'PTV63',
@@ -54,6 +57,8 @@ class StructureSelector:
     - 'ptv_masks': Individual PTV masks for 70/63/56 Gy (3 channels)
     - 'oar': OAR binary masks (33 channels)
     - 'oar_sdm': OAR signed distance maps (33 channels)
+    - 'oar_v2': OAR binary masks without last 3 (30 channels)
+    - 'oar_v2_sdm': OAR signed distance maps without last 3 (30 channels)
     - 'ptv_sdm': PTV signed distance map (1 channel)
   """
 
@@ -65,6 +70,8 @@ class StructureSelector:
     'ptv_masks': 3,  # ptv70, ptv63, ptv56
     'oar': len(GDPHMM_OAR),  # 33
     'oar_sdm': len(GDPHMM_OAR),  # 33
+    'oar_v2': len(GDPHMM_OAR_V2),  # 30 (without last 3)
+    'oar_v2_sdm': len(GDPHMM_OAR_V2),  # 30 (without last 3)
     'ptv_sdm': 1,
   }
 
@@ -122,6 +129,12 @@ class StructureSelector:
         components.append(data['oar'])
       elif group == 'oar_sdm':
         components.append(data['oar_sdm'])
+      elif group == 'oar_v2':
+        # Remove last 3 channels from oar
+        components.append(data['oar'][:-3])
+      elif group == 'oar_v2_sdm':
+        # Remove last 3 channels from oar_sdm
+        components.append(data['oar_sdm'][:-3])
       elif group == 'ptv_sdm':
         components.append(data['ptv_sdm'])
 
@@ -167,16 +180,21 @@ class StructureSelector:
     Get the channel index for a specific OAR within the OAR group.
 
     Args:
-      oar_name: Name of the OAR (from GDPHMM_OAR list)
+      oar_name: Name of the OAR (from GDPHMM_OAR or GDPHMM_OAR_V2 list)
 
     Returns:
       Global channel index in the concatenated structure tensor
     """
-    if 'oar' not in self._index_map:
-      raise ValueError("'oar' group not in selected groups")
+    # Support both 'oar' and 'oar_v2' groups
+    if 'oar_v2' in self._index_map:
+      oar_idx = GDPHMM_OAR_V2.index(oar_name)
+      oar_start, _ = self._index_map['oar_v2']
+    elif 'oar' in self._index_map:
+      oar_idx = GDPHMM_OAR.index(oar_name)
+      oar_start, _ = self._index_map['oar']
+    else:
+      raise ValueError("Neither 'oar' nor 'oar_v2' group in selected groups")
 
-    oar_idx = GDPHMM_OAR.index(oar_name)
-    oar_start, _ = self._index_map['oar']
     return oar_start + oar_idx
 
   def get_oar_sdm_index(self, oar_name):
@@ -184,16 +202,21 @@ class StructureSelector:
     Get the channel index for a specific OAR SDM within the OAR SDM group.
 
     Args:
-      oar_name: Name of the OAR (from GDPHMM_OAR list)
+      oar_name: Name of the OAR (from GDPHMM_OAR or GDPHMM_OAR_V2 list)
 
     Returns:
       Global channel index in the concatenated structure tensor
     """
-    if 'oar_sdm' not in self._index_map:
-      raise ValueError("'oar_sdm' group not in selected groups")
+    # Support both 'oar_sdm' and 'oar_v2_sdm' groups
+    if 'oar_v2_sdm' in self._index_map:
+      oar_idx = GDPHMM_OAR_V2.index(oar_name)
+      oar_sdm_start, _ = self._index_map['oar_v2_sdm']
+    elif 'oar_sdm' in self._index_map:
+      oar_idx = GDPHMM_OAR.index(oar_name)
+      oar_sdm_start, _ = self._index_map['oar_sdm']
+    else:
+      raise ValueError("Neither 'oar_sdm' nor 'oar_v2_sdm' group in selected groups")
 
-    oar_idx = GDPHMM_OAR.index(oar_name)
-    oar_sdm_start, _ = self._index_map['oar_sdm']
     return oar_sdm_start + oar_idx
 
   def select_channels(self, structure, groups):
@@ -267,16 +290,21 @@ class StructureSelector:
 
     Args:
       structure: (B, C, H, W) or (C, H, W) structure tensor
-      oar_name: Name of the OAR (from GDPHMM_OAR list)
+      oar_name: Name of the OAR (from GDPHMM_OAR or GDPHMM_OAR_V2 list)
 
     Returns:
       OAR channel: (B, 1, H, W) or (1, H, W)
     """
-    if 'oar' not in self._index_map:
-      raise ValueError("'oar' group not in selected groups")
+    # Support both 'oar' and 'oar_v2' groups
+    if 'oar_v2' in self._index_map:
+      oar_idx = GDPHMM_OAR_V2.index(oar_name)
+      oar_start, _ = self._index_map['oar_v2']
+    elif 'oar' in self._index_map:
+      oar_idx = GDPHMM_OAR.index(oar_name)
+      oar_start, _ = self._index_map['oar']
+    else:
+      raise ValueError("Neither 'oar' nor 'oar_v2' group in selected groups")
 
-    oar_idx = GDPHMM_OAR.index(oar_name)
-    oar_start, _ = self._index_map['oar']
     global_idx = oar_start + oar_idx
 
     # Handle both batched and unbatched

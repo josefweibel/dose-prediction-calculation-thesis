@@ -28,6 +28,9 @@ GDPHMM_OAR = [
   'Pituitary', 'OralCavity', 'Submandibular', # additional
 ]
 
+# Version 2: Remove last three values (Pituitary, OralCavity, Submandibular)
+GDPHMM_OAR_V2 = GDPHMM_OAR[:-3]
+
 GDPHMM_PTV = {
   70: 'PTV70',
   63: 'PTV63',
