@@ -26,7 +26,8 @@ sbatch <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim
-#SBATCH --time 24:00:00
+#SBATCH --account=invest
+#SBATCH --time 36:00:00
 #SBATCH --mem 180G
 #SBATCH --gpus h100:2
 #SBATCH --ntasks=2

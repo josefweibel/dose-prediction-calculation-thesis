@@ -31,10 +31,12 @@ sbatch <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim
-#SBATCH --time 4:00:00
+#SBATCH --account=invest
+#SBATCH --time 8:00:00
 #SBATCH --mem 189G
 #SBATCH --gpus rtx4090:8
 #SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-sample-%j.log
 #SBATCH --job-name=s-${MODEL_NAME}-${CONFIG_NAME}

@@ -40,10 +40,12 @@ fi
 sbatch <<EOF
 #!/bin/bash
 #SBATCH -p epyc2
-#SBATCH -q job_cpu
+#SBATCH -q job_gratis
+#SBATCH --account=gratis
 #SBATCH --time 0:30:00
 #SBATCH --mem 64G
 #SBATCH --ntasks=1
+#SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-combine-%j.log
 #SBATCH --job-name=c-${MODEL_NAME}-${SAMPLING_NAME}
