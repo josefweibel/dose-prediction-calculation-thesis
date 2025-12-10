@@ -147,16 +147,19 @@ class StructureSelector:
     Extract a specific component from the concatenated structure tensor.
 
     Args:
-      structure: (B, C, H, W) or (C, H, W) concatenated structure tensor
+      structure: Concatenated structure tensor with one of the following shapes:
+        - (C, H, W): Unbatched 2D slice
+        - (B, C, H, W): Batched 2D slices
+        - (B, C, H, W, D): Batched 3D volumes
       group_name: Name of group to extract (e.g., 'ct', 'oar')
 
     Returns:
-      component: (B, C_group, H, W) or (C_group, H, W) tensor for the requested group
+      component: Tensor for the requested group with same batch/spatial dims as input
     """
     start, end = self.get_channel_indices(group_name)
 
     # Handle both batched and unbatched tensors
-    if structure.ndim == 4:  # (B, C, H, W)
+    if structure.ndim >= 4:  # (B, C, H, W) or (B, C, H, W, D)
       return structure[:, start:end]
     else:  # (C, H, W)
       return structure[start:end]
@@ -253,10 +256,10 @@ class StructureSelector:
     Get PTV channel from structure tensor.
 
     Args:
-      structure: (B, C, H, W) or (C, H, W) structure tensor
+      structure: Structure tensor - (C, H, W), (B, C, H, W), or (B, C, H, W, D)
 
     Returns:
-      PTV channel(s): (B, 1, H, W) or (1, H, W)
+      PTV channel(s): (1, H, W), (B, 1, H, W), or (B, 1, H, W, D)
     """
     return self.get_component(structure, 'ptv')
 
@@ -265,10 +268,10 @@ class StructureSelector:
     Get CT channel from structure tensor.
 
     Args:
-      structure: (B, C, H, W) or (C, H, W) structure tensor
+      structure: Structure tensor - (C, H, W), (B, C, H, W), or (B, C, H, W, D)
 
     Returns:
-      CT channel(s): (B, 1, H, W) or (1, H, W)
+      CT channel(s): (1, H, W), (B, 1, H, W), or (B, 1, H, W, D)
     """
     return self.get_component(structure, 'ct')
 
@@ -277,10 +280,10 @@ class StructureSelector:
     Get body mask channel from structure tensor.
 
     Args:
-      structure: (B, C, H, W) or (C, H, W) structure tensor
+      structure: Structure tensor - (C, H, W), (B, C, H, W), or (B, C, H, W, D)
 
     Returns:
-      Body mask channel(s): (B, 1, H, W) or (1, H, W)
+      Body mask channel(s): (1, H, W), (B, 1, H, W), or (B, 1, H, W, D)
     """
     return self.get_component(structure, 'body')
 
@@ -289,11 +292,14 @@ class StructureSelector:
     Get specific OAR channel from structure tensor.
 
     Args:
-      structure: (B, C, H, W) or (C, H, W) structure tensor
+      structure: Structure tensor with one of the following shapes:
+        - (C, H, W): Unbatched 2D slice
+        - (B, C, H, W): Batched 2D slices
+        - (B, C, H, W, D): Batched 3D volumes
       oar_name: Name of the OAR (from GDPHMM_OAR or GDPHMM_OAR_V2 list)
 
     Returns:
-      OAR channel: (B, 1, H, W) or (1, H, W)
+      OAR channel: (1, H, W), (B, 1, H, W), or (B, 1, H, W, D)
     """
     # Support both 'oar' and 'oar_v2' groups
     if 'oar_v2' in self._index_map:
@@ -307,8 +313,8 @@ class StructureSelector:
 
     global_idx = oar_start + oar_idx
 
-    # Handle both batched and unbatched
-    if structure.ndim == 4:  # (B, C, H, W)
+    # Handle both batched and unbatched tensors
+    if structure.ndim >= 4:  # (B, C, H, W) or (B, C, H, W, D)
       return structure[:, global_idx:global_idx+1]
     else:  # (C, H, W)
       return structure[global_idx:global_idx+1]
