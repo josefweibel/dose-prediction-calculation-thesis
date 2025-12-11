@@ -39,7 +39,7 @@ sbatch <<EOF
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-metrics-%j.log
-#SBATCH --job-name=m-${MODEL_NAME}
+#SBATCH --job-name=${MODEL_NAME}-metrics
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 

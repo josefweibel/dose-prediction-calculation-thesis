@@ -48,7 +48,7 @@ sbatch <<EOF
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-combine-%j.log
-#SBATCH --job-name=c-${MODEL_NAME}-${SAMPLING_NAME}
+#SBATCH --job-name=${MODEL_NAME}-combine
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 

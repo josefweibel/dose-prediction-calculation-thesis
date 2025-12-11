@@ -42,7 +42,7 @@ sbatch <<EOF
 #SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-sample-%j.log
-#SBATCH --job-name=s-${MODEL_NAME}-${CONFIG_NAME}
+#SBATCH --job-name=${MODEL_NAME}-sample
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
