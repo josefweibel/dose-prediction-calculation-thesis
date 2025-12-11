@@ -132,18 +132,24 @@ class GDPHMMSlicesDataset(Dataset):
     limit=None,
     skip=0,
     voxel_spacing=(1.0, 1.0, 1.0),
+    mode='2d',
   ):
     self.dataset_name = dataset_name
     self.split = split
     self.img_size = img_size
     self.cache = cache
     self.voxel_spacing = voxel_spacing
+    self.mode = mode
 
     self.selector = StructureSelector(groups=structure_groups)
 
     dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
     self.index_map = pd.read_csv(dir / '_index.csv')
     self.index_map['file'] = self.index_map['file'].apply(lambda f: dir / f)
+
+    if mode == '3d':
+      self.index_map = self.index_map.drop_duplicates('file').reset_index(drop=True)
+
     self.index_map = self.index_map[skip:]
     if limit is not None:
       indices = np.linspace(0, len(self.index_map) - 1, limit, dtype=int)
@@ -151,47 +157,47 @@ class GDPHMMSlicesDataset(Dataset):
     self.index_map = self.index_map.to_numpy().tolist()
 
     self.ct_transforms = T.Compose([
-      T.ToTensor(),
+      T.Lambda(to_plain_tensor),
       T.Lambda(to_float),
       T.Lambda(clip_gdphmm_img),
       T.Lambda(normalize_gdphmm_img),
-      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
 
     self.oar_transforms = T.Compose([
       T.Lambda(to_plain_tensor),
       T.Lambda(to_byte),
-      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
     self.ptv_transforms = T.Compose([
       T.Lambda(to_plain_tensor),
       T.Lambda(to_float),
-      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
 
     self.dose_transforms = T.Compose([
-      T.ToTensor(),
+      T.Lambda(to_plain_tensor),
       T.Lambda(to_float),
       T.Lambda(normalize_gdphmm_dose),
-      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
 
     self.sdm_transforms = T.Compose([
       T.Lambda(to_plain_tensor),
       T.Lambda(to_float),
-      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
 
     self.angle_plate_transforms = T.Compose([
       T.Lambda(to_plain_tensor),
       T.Lambda(to_byte),
-      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
 
     self.beam_plate_transforms = T.Compose([
       T.Lambda(to_plain_tensor),
       T.Lambda(to_float),
-      PadToFixedSize(img_size, fill=0, padding_mode='constant'),
+      PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
 
     self.n_structures = self.selector.total_channels
@@ -268,26 +274,47 @@ class GDPHMMSlicesDataset(Dataset):
 
     oar_vol = (oar_sdm > 0).astype(np.uint8)
 
-    sample = {
-      'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
-      'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
-      'ptv70': self.oar_transforms(ptv70_vol[:, :, slice_idx]),
-      'ptv63': self.oar_transforms(ptv63_vol[:, :, slice_idx]),
-      'ptv56': self.oar_transforms(ptv56_vol[:, :, slice_idx]),
-      'ct': self.ct_transforms(ct_vol[:, :, slice_idx]),
-      'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
-      'body': self.oar_transforms(body_vol[:, :, slice_idx]),
-      'oar_sdm': self.sdm_transforms(oar_sdm[:, :, :, slice_idx]),
-      'ptv_sdm': self.sdm_transforms(ptv_sdm[:, :, slice_idx]),
-      'beam_plate': self.beam_plate_transforms(beam_plate_vol[:, :, slice_idx]),
-      'angle_plate': self.angle_plate_transforms(angle_plate_vol[:, :, slice_idx]),
-      'info': {
-        'file_path': str(file),
-        'file_name': file.name,
-        'volume': file.stem,
-        'index': slice_idx
+    if self.mode == '2d':
+      sample = {
+        'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
+        'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
+        'ptv70': self.oar_transforms(ptv70_vol[:, :, slice_idx]),
+        'ptv63': self.oar_transforms(ptv63_vol[:, :, slice_idx]),
+        'ptv56': self.oar_transforms(ptv56_vol[:, :, slice_idx]),
+        'ct': self.ct_transforms(ct_vol[:, :, slice_idx]),
+        'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
+        'body': self.oar_transforms(body_vol[:, :, slice_idx]),
+        'oar_sdm': self.sdm_transforms(oar_sdm[:, :, :, slice_idx]),
+        'ptv_sdm': self.sdm_transforms(ptv_sdm[:, :, slice_idx]),
+        'beam_plate': self.beam_plate_transforms(beam_plate_vol[:, :, slice_idx]),
+        'angle_plate': self.angle_plate_transforms(angle_plate_vol[:, :, slice_idx]),
+        'info': {
+          'file_path': str(file),
+          'file_name': file.name,
+          'volume': file.stem,
+          'index': slice_idx
+        }
       }
-    }
+    else:
+      sample = {
+        'dose': self.dose_transforms(dose_vol),
+        'ptv': self.ptv_transforms(ptv_vol),
+        'ptv70': self.oar_transforms(ptv70_vol),
+        'ptv63': self.oar_transforms(ptv63_vol),
+        'ptv56': self.oar_transforms(ptv56_vol),
+        'ct': self.ct_transforms(ct_vol),
+        'oar': self.oar_transforms(oar_vol),
+        'body': self.oar_transforms(body_vol),
+        'oar_sdm': self.sdm_transforms(oar_sdm),
+        'ptv_sdm': self.sdm_transforms(ptv_sdm),
+        'beam_plate': self.beam_plate_transforms(beam_plate_vol),
+        'angle_plate': self.angle_plate_transforms(angle_plate_vol),
+        'info': {
+          'file_path': str(file),
+          'file_name': file.name,
+          'volume': file.stem,
+        }
+      }
 
     for shm in [dose_shm, ptv_shm, ptv70_shm, ptv63_shm, ptv56_shm, ct_shm, oar_sdm_shm, ptv_sdm_shm, body_shm, beam_plate_shm, angle_plate_shm]:
       if shm is not None:
@@ -347,7 +374,7 @@ class GDPHMMSlicesDataset(Dataset):
 
 
 class PadToFixedSize:
-  def __init__(self, target_size, fill=0, padding_mode='constant'):
+  def __init__(self, target_size, fill=0, padding_mode='constant', mode='2d'):
     """
     Pads an image to the target size.
 
@@ -362,30 +389,37 @@ class PadToFixedSize:
       self.target_size = target_size
     self.fill = fill
     self.padding_mode = padding_mode
+    self.mode = mode
 
   def __call__(self, img):
     """
     Args:
-        img (PIL.Image or torch.Tensor): Input image of shape (C,H,W) or (H,W) for grayscale.
+        img (PIL.Image or torch.Tensor): Input image of shape (C,H,W), (H,W) for grayscale, or (C,H,W,D) for 4D volumes.
     Returns:
-        Padded image to self.target_size
+        Padded image to self.target_size. For 4D volumes, only H and W dimensions are padded (last D dimension is not padded).
     """
-    if isinstance(img, torch.Tensor):
-      # Ensure shape is (C,H,W)
+    if self.mode == '2d':
       if img.ndim == 2:
+        h, w = img.shape
         img = img.unsqueeze(0)
-      h, w = img.shape[-2:]
-    elif isinstance(img, Image.Image):
-      w, h = img.size
-    else:
-      raise TypeError(f"Unsupported type {type(img)}")
+      elif img.ndim == 3:
+        _, h, w = img.shape
+    elif self.mode == '3d':
+      if img.ndim == 3:
+        h, w, _ = img.shape
+        img = img.unsqueeze(0)
+      elif img.ndim == 4:
+        _, h, w, _ = img.shape
 
     pad_h = max(self.target_size[0] - h, 0)
     pad_w = max(self.target_size[1] - w, 0)
-    # Pad equally on both sides: (left, top, right, bottom)
-    padding = (pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2)
+    # Pad equally on both sides: (left, right, top, bottom)
+    padding = (pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2)
 
-    y = T.functional.pad(img, padding, fill=self.fill, padding_mode=self.padding_mode)
+    if self.mode == '3d':
+      padding = (0, 0) + padding  # (D_left, D_right, W_left, W_right, H_left, H_right)
+
+    y = torch.nn.functional.pad(img, padding, value=self.fill, mode=self.padding_mode)
     return y
 
   def __repr__(self):

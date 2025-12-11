@@ -67,7 +67,8 @@ def build_dataset(dataset_split='test'):
     structure_groups=None,
     limit=None,
     skip=0,
-    voxel_spacing=[2.5, 2.5, 2.0]
+    voxel_spacing=[2.5, 2.5, 2.0],
+    mode='3d',
   )
 
   return dataset
@@ -151,15 +152,15 @@ class BaseResults:
         orig_min, orig_max = np.min(y_orig_means), np.max(y_orig_means)
         ax.axvspan(orig_min, orig_max, color='blue', alpha=0.1)
 
-    # Plot each model's prediction (reuse cached structures)
+    # Plot each model's prediction
     for result, label in zip(self.results_list, self.result_labels):
       color = next(colors)
       y_pred_all = []
       y_pred_means = []
 
       for file_name in result.slice_metrics['file_name'].unique():
-        sample_results = result.for_sample(file_name.replace('.npz', ''))
-        structure = orig_volumes_cache[file_name][0]  # Reuse cached structure
+        sample_results = first_result.for_sample(file_name.replace('.npz', ''))
+        structure, _ = sample_results.load_orig_volume()
         pred_dose = sample_results.load_pred_volume()
 
         mask = structure[structure_index]
@@ -351,19 +352,13 @@ class SampleResults(BaseResults):
     return self
 
   def load_orig_volume(self):
-    original_idx = {i: slice_index for i, (file, slice_index) in enumerate(self.dataset.index_map) if file.stem == self.sample}
+    original_idx = [i for i, (file, _) in enumerate(self.dataset.index_map) if file.stem == self.sample][0]
 
-    vol_structure = np.zeros((self.dataset.n_structures, 176, 160, len(original_idx)))
-    vol_dose = np.zeros((176, 160, len(original_idx)))
+    structure, dose, _ = self.dataset[original_idx]
+    structure = structure.numpy()
+    dose = self.dataset.denormalize_target(dose)[0].numpy()
 
-    for i, slice_index in original_idx.items():
-      structure, dose, _ = self.dataset[i]
-      dose = self.dataset.denormalize_target(dose)[0].numpy()
-
-      vol_structure[:, :, :, slice_index] = structure.numpy()
-      vol_dose[:, :, slice_index] = dose
-
-    return vol_structure, vol_dose
+    return structure, dose
 
 
   def load_pred_volume(self):
@@ -404,28 +399,21 @@ class SampleResults(BaseResults):
     if ax is None:
       fig, ax = plt.subplots(1, 4, figsize=(20, 5))
 
+    structure_vol, original_dose_vol = self.load_orig_volume()
+    pred_dose_vol = self.load_pred_volume()
+
     if axis == "sagittal":
-      original_idx = {i: slice_index for i, (file, slice_index) in enumerate(self.dataset.index_map) if file.stem == self.sample}
-      if slice_index not in original_idx.values():
-        raise ValueError(f'Slice index {slice_index} not found for sample {self.sample}.')
-
-      idx = [i for i, s_idx in original_idx.items() if s_idx == slice_index][0]
-      structure, original_dose, _ = self.dataset[idx]
-      original_dose = self.dataset.denormalize_target(original_dose)[0].numpy()
-      pred_dose_vol = self.load_pred_volume()
+      structure = structure_vol[:, :, :, slice_index]
+      original_dose = original_dose_vol[:, :, slice_index]
       pred_dose = pred_dose_vol[:, :, slice_index]
-    elif axis == "axial" or axis == "coronal":
-      structure_vol, original_dose_vol = self.load_orig_volume()
-      pred_dose_vol = self.load_pred_volume()
-
-      if axis == "axial":
-        structure = structure_vol[:, slice_index, :, :]
-        original_dose = original_dose_vol[slice_index, :, :]
-        pred_dose = pred_dose_vol[slice_index, :, :]
-      else:  # coronal
-        structure = np.flip(structure_vol[:, :, slice_index, :], 1)
-        original_dose = np.flip(original_dose_vol[:, slice_index, :], 0)
-        pred_dose = np.flip(pred_dose_vol[:, slice_index, :], 0)
+    elif axis == "axial":
+      structure = structure_vol[:, slice_index, :, :]
+      original_dose = original_dose_vol[slice_index, :, :]
+      pred_dose = pred_dose_vol[slice_index, :, :]
+    elif axis == "coronal":
+      structure = np.flip(structure_vol[:, :, slice_index, :], 1)
+      original_dose = np.flip(original_dose_vol[:, slice_index, :], 0)
+      pred_dose = np.flip(pred_dose_vol[:, slice_index, :], 0)
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
@@ -720,23 +708,17 @@ class ModelComparison(BaseResults):
 
     first_result = self.results_list[0]
     sample_results = first_result.for_sample(sample)
+    structure_vol, original_dose_vol = sample_results.load_orig_volume()
+
     if axis == "sagittal":
-      original_idx = {i: slice_index for i, (file, slice_index) in enumerate(first_result.dataset.index_map) if file.stem == sample}
-      if slice_index not in original_idx.values():
-        raise ValueError(f'Slice index {slice_index} not found for sample {sample}.')
-
-      idx = [i for i, s_idx in original_idx.items() if s_idx == slice_index][0]
-      structure, original_dose, _ = first_result.dataset[idx]
-      original_dose = first_result.dataset.denormalize_target(original_dose)[0].numpy()
-    elif axis == "axial" or axis == "coronal":
-      structure_vol, original_dose_vol = sample_results.load_orig_volume()
-
-      if axis == "axial":
-        structure = structure_vol[:, slice_index, :, :]
-        original_dose = original_dose_vol[slice_index, :, :]
-      else:  # coronal
-        structure = np.flip(structure_vol[:, :, slice_index, :], 1)
-        original_dose = np.flip(original_dose_vol[:, slice_index, :], 0)
+      structure = structure_vol[:, :, :, slice_index]
+      original_dose = original_dose_vol[:, :, slice_index]
+    elif axis == "axial":
+      structure = structure_vol[:, slice_index, :, :]
+      original_dose = original_dose_vol[slice_index, :, :]
+    elif axis == "coronal":
+      structure = np.flip(structure_vol[:, :, slice_index, :], 1)
+      original_dose = np.flip(original_dose_vol[:, slice_index, :], 0)
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
