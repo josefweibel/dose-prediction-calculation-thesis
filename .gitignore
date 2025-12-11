@@ -211,11 +211,16 @@ __marimo__/
 data/gdphmm-hn/train
 data/gdphmm-hn/valid
 data/gdphmm-hn/test
+data/gdphmm-hn_slices/train
+data/gdphmm-hn_slices/valid
+data/gdphmm-hn_slices/test
 data/gdphmm-hn/incoming/train
 data/gdphmm-hn/incoming/valid
 data/gdphmm-hn/incoming/metadata.csv
 data/gdphmm-hn/incoming/train_metadata.csv
 data/gdphmm-hn/incoming/valid_metadata.csv
+data/gdphmm-hn/incoming/dicom_metadata.csv
+data/gdphmm-hn/incoming/patient-metadata
 data/gdphmm-hn-vmat/train
 data/gdphmm-hn-vmat/valid
 data/gdphmm-hn-vmat/test
@@ -227,5 +232,3 @@ checkpoints/
 wandb/
 samples/
 .claude/
-
-data/gdphmm-hn_slices
