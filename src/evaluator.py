@@ -339,6 +339,7 @@ class Evaluator:
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
 
+        body = self.dataloader.dataset.selector.get_body(structure)
         condition = self.dataloader.dataset.selector.select_channels(structure, self.conditioning_groups)
 
         autocast = contextlib.nullcontext()
@@ -360,6 +361,9 @@ class Evaluator:
         for i in range(target.shape[0]):
           sample_pred = pred[i:i+1]  # Keep batch dimension
           sample_target = target[i:i+1]
+          sample_body = body[i:i+1]
+
+          sample_pred = sample_pred * sample_body
 
           sample_row = {
             'file_name': info['file_name'][i],
