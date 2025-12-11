@@ -32,8 +32,10 @@ fi
 
 sbatch <<EOF
 #!/bin/bash
-#SBATCH -p epyc2
-#SBATCH -q job_cpu
+#SBATCH -p gpu
+#SBATCH -q job_gpu
+#SBATCH --account=invest
+#SBATCH --gres=gpu:rtx4090:1
 #SBATCH --time 0:30:00
 #SBATCH --mem 64G
 #SBATCH --ntasks=1
