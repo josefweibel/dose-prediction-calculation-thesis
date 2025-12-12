@@ -23,10 +23,14 @@ from metrics import (
   RegionMaskedMetric,
   PTVPrescriptionMAE,
   PTVPrescriptionMeanDose,
-  GammaIndex
+  GammaIndex,
+  ConstraintSatisfactionRate,
+  ConstraintAgreementScore,
+  PerOrganConstraintCompliance,
 )
 from model_sampler import build_sampler
-from data import GDPHMM_OAR_V2
+from data import GDPHMM_OAR_V2, GDPHMM_OAR
+from constraints import FractionationType, ConstraintGrade
 import numpy as np
 
 
@@ -52,7 +56,14 @@ def compute_metrics(metrics, preds, target, structure, dataset):
   for metric_name, metric in metrics.items():
     metric.reset()
 
-    if isinstance(metric, DoseLevelMetricBase):
+    if isinstance(metric, (ConstraintSatisfactionRate, ConstraintAgreementScore, PerOrganConstraintCompliance)):
+      # Build organ masks dictionary for constraint metrics
+      organ_masks = {}
+      for oar_name in GDPHMM_OAR_V2:
+        oar_index = dataset.selector.get_oar_index(oar_name)
+        organ_masks[oar_name] = structure[:, oar_index]  # (batch_size, H, W) or (batch_size, H, W, D)
+      metric.update(preds, target, organ_masks)
+    elif isinstance(metric, DoseLevelMetricBase):
       ptv_masks = dataset.selector.get_component(structure, 'ptv_masks')
       ptv70_mask = ptv_masks[:, 0:1]  # (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
       ptv63_mask = ptv_masks[:, 1:2]
@@ -72,11 +83,14 @@ def compute_metrics(metrics, preds, target, structure, dataset):
 
     result = metric.compute()
 
-    # Handle metrics that return dictionaries (e.g., GammaIndex3D)
+    # Handle metrics that return dictionaries
     if isinstance(result, dict):
       for sub_key, sub_value in result.items():
         full_key = f"{metric_name}_{sub_key}"
-        results[full_key] = sub_value.item() if not torch.isnan(sub_value) else float('nan')
+        if torch.is_tensor(sub_value):
+          results[full_key] = sub_value.item() if not torch.isnan(sub_value) else float('nan')
+        else:
+          results[full_key] = float(sub_value)
     else:
       results[metric_name] = result.item() if not torch.isnan(result) else float('nan')
 
@@ -158,6 +172,55 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
         )
         metrics[f'{metric_name}/{region_name}'] = region_metric
 
+  # Add constraint-based metrics
+  metrics['csr_all'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V2,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['csr_mandatory'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V2,
+    grade_filter=ConstraintGrade.MANDATORY,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['csr_recommended'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V2,
+    grade_filter=ConstraintGrade.RECOMMENDED,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['csr_optimal'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V2,
+    grade_filter=ConstraintGrade.OPTIMAL,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['csr_acceptable'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V2,
+    grade_filter=ConstraintGrade.ACCEPTABLE,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['agreement'] = ConstraintAgreementScore(
+    organ_names=GDPHMM_OAR_V2,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+
+  # Add per-region PerOrganConstraintCompliance metrics
+  if include_region_metrics:
+    for region_name, region_index in regions:
+      if region_name == 'PTV':
+        continue
+
+      region_compliance = PerOrganConstraintCompliance(
+        organ_name=region_name,
+        fractionation=FractionationType.CONVENTIONAL,
+        sync_on_compute=False
+      )
+      metrics[f'compliance/{region_name}'] = region_compliance
+
   return {k: v.to(device) for k, v in metrics.items()}
 
 
@@ -227,6 +290,36 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
           sync_on_compute=False
         )
         metrics[f'vol_{metric_name}/{region_name}'] = region_metric
+
+  # Add constraint-based metrics
+  metrics['vol_csr_all'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V2,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['vol_csr_mandatory'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V2,
+    grade_filter=ConstraintGrade.MANDATORY,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['vol_agreement'] = ConstraintAgreementScore(
+    organ_names=GDPHMM_OAR_V2,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+
+  if include_region_metrics:
+    for region_name, region_index in regions:
+      if region_name == 'PTV':
+        continue
+
+      region_compliance = PerOrganConstraintCompliance(
+        organ_name=region_name,
+        fractionation=FractionationType.CONVENTIONAL,
+        sync_on_compute=False
+      )
+      metrics[f'vol_compliance/{region_name}'] = region_compliance
 
   return {k: v.to(device) for k, v in metrics.items()}
 

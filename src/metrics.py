@@ -1,5 +1,13 @@
 import torch
 from torchmetrics import Metric
+import numpy as np
+from typing import Dict, Optional
+
+from constraints import (
+    ConstraintEvaluator, ConstraintLibrary,
+    FractionationType, ConstraintGrade,
+    GDPHMM_TO_CONSTRAINT_ORGAN
+)
 
 __all__ = [
   'DoseScore',
@@ -16,6 +24,9 @@ __all__ = [
   'PTVPrescriptionMAE',
   'PTVPrescriptionMeanDose',
   'GammaIndex',
+  'ConstraintSatisfactionRate',
+  'ConstraintAgreementScore',
+  'PerOrganConstraintCompliance',
 ]
 
 
@@ -1096,3 +1107,492 @@ class GammaIndex(Metric):
     return {
       'pass_rate': self.total_pass_rate / self.count
     }
+
+
+class ConstraintSatisfactionRate(Metric):
+  """
+  Constraint Satisfaction Rate (CSR) - ratio of satisfied constraints (between 0 and 1).
+
+  Computes CSR separately for predicted and target dose distributions, allowing
+  comparison of how well each satisfies clinical constraints.
+
+  Args:
+    organ_names: List of organ names from GDPHMM_OAR
+    voxel_spacing: Voxel spacing in mm (x, y, z). Default: (2.5, 2.5, 2.0)
+    fractionation: Fractionation type. Default: CONVENTIONAL
+    grade_filter: Optional constraint grade filter (e.g., MANDATORY). If None, uses all constraints.
+  """
+  def __init__(
+    self,
+    organ_names: list,
+    voxel_spacing: tuple = (2.5, 2.5, 2.0),
+    fractionation: FractionationType = FractionationType.CONVENTIONAL,
+    grade_filter: Optional[ConstraintGrade] = None,
+    *args,
+    **kwargs
+  ):
+    super().__init__(*args, **kwargs)
+
+    self.organ_names = organ_names
+    self.voxel_spacing = voxel_spacing
+    self.voxel_volume_cc = np.prod(voxel_spacing) / 1000.0  # Convert mm³ to cm³
+    self.fractionation = fractionation
+    self.grade_filter = grade_filter
+
+    # Initialize constraint library and evaluator
+    library = ConstraintLibrary()
+    if grade_filter:
+      # Filter constraints by grade
+      filtered_constraints = [c for c in library.constraints if c.grade == grade_filter]
+      self.evaluator = ConstraintEvaluator(filtered_constraints)
+    else:
+      self.evaluator = ConstraintEvaluator(library.constraints)
+
+    self.add_state("total_csr_pred", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("total_csr_target", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, organ_masks: Dict[str, torch.Tensor]):
+    """
+    Update metric with new predictions and targets.
+
+    Args:
+      preds: Predicted dose, shape (batch_size, 1, H, W, D) or (batch_size, 1, H, W)
+      target: Target dose, shape (batch_size, 1, H, W, D) or (batch_size, 1, H, W)
+      organ_masks: Dict mapping organ names to binary masks, each shape (batch_size, H, W, D) or (batch_size, H, W)
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      # Extract single sample
+      pred_dose = preds[i, 0].cpu().numpy()
+      target_dose = target[i, 0].cpu().numpy()
+
+      # Prepare organ masks dict for this sample
+      sample_organ_masks = {}
+      for organ_name in self.organ_names:
+        if organ_name in organ_masks:
+          mask = organ_masks[organ_name][i].cpu().numpy()
+          # Map to constraint organ name
+          constraint_organ = GDPHMM_TO_CONSTRAINT_ORGAN.get(organ_name)
+          if constraint_organ:
+            sample_organ_masks[constraint_organ] = mask
+
+      if len(sample_organ_masks) == 0:
+        continue
+
+      # Evaluate constraints for predicted dose
+      pred_results = self.evaluator.evaluate_all_constraints(
+        pred_dose, sample_organ_masks, self.voxel_volume_cc, self.fractionation
+      )
+
+      # Evaluate constraints for target dose
+      target_results = self.evaluator.evaluate_all_constraints(
+        target_dose, sample_organ_masks, self.voxel_volume_cc, self.fractionation
+      )
+
+      # Count satisfied constraints
+      pred_satisfied = sum(
+        sum(1 for r in organ_results if r['satisfied'])
+        for organ_results in pred_results.values()
+      )
+      pred_total = sum(len(organ_results) for organ_results in pred_results.values())
+
+      target_satisfied = sum(
+        sum(1 for r in organ_results if r['satisfied'])
+        for organ_results in target_results.values()
+      )
+      target_total = sum(len(organ_results) for organ_results in target_results.values())
+
+      # Compute CSR (between 0 and 1)
+      if pred_total > 0:
+        csr_pred = pred_satisfied / pred_total
+        self.total_csr_pred += csr_pred
+
+      if target_total > 0:
+        csr_target = target_satisfied / target_total
+        self.total_csr_target += csr_target
+
+      if pred_total > 0 and target_total > 0:
+        self.count += 1
+
+  def compute(self):
+    """Compute average CSR for predictions and targets."""
+    if self.count == 0:
+      return {
+        'csr_pred': torch.tensor(float('nan')),
+        'csr_target': torch.tensor(float('nan')),
+        'csr_diff_abs': torch.tensor(float('nan'))
+      }
+
+    csr_pred = self.total_csr_pred / self.count
+    csr_target = self.total_csr_target / self.count
+
+    return {
+      'csr_pred': csr_pred,
+      'csr_target': csr_target,
+      'csr_diff_abs': torch.abs(csr_pred - csr_target)
+    }
+
+
+class ConstraintAgreementScore(Metric):
+  """
+  Constraint Agreement Score - ratio of constraints where pred and target have same satisfaction status.
+
+  This metric measures how often the prediction and target agree on whether a constraint
+  is satisfied or violated. A score of 1.0 means perfect agreement, 0.0 means no agreement.
+
+  Can be computed overall or filtered by constraint grade (mandatory, optimal, etc.).
+
+  Args:
+    organ_names: List of organ names from GDPHMM_OAR
+    voxel_spacing: Voxel spacing in mm (x, y, z). Default: (2.5, 2.5, 2.0)
+    fractionation: Fractionation type. Default: CONVENTIONAL
+    grade_filter: Optional constraint grade filter. If None, computes for all grades separately.
+  """
+  def __init__(
+    self,
+    organ_names: list,
+    voxel_spacing: tuple = (2.5, 2.5, 2.0),
+    fractionation: FractionationType = FractionationType.CONVENTIONAL,
+    grade_filter: Optional[ConstraintGrade] = None,
+    *args,
+    **kwargs
+  ):
+    super().__init__(*args, **kwargs)
+
+    self.organ_names = organ_names
+    self.voxel_spacing = voxel_spacing
+    self.voxel_volume_cc = np.prod(voxel_spacing) / 1000.0
+    self.fractionation = fractionation
+    self.grade_filter = grade_filter
+
+    # Initialize constraint library and evaluator
+    library = ConstraintLibrary()
+    self.evaluator = ConstraintEvaluator(library.constraints)
+
+    # Track agreement for all grades if no filter
+    if grade_filter is None:
+      self.add_state("total_agreement_mandatory", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("count_mandatory", default=torch.tensor(0), dist_reduce_fx="sum")
+      self.add_state("total_agreement_recommended", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("count_recommended", default=torch.tensor(0), dist_reduce_fx="sum")
+      self.add_state("total_agreement_optimal", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("count_optimal", default=torch.tensor(0), dist_reduce_fx="sum")
+      self.add_state("total_agreement_all", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("count_all", default=torch.tensor(0), dist_reduce_fx="sum")
+    else:
+      self.add_state("total_agreement", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, organ_masks: Dict[str, torch.Tensor]):
+    """
+    Update metric with new predictions and targets.
+
+    Args:
+      preds: Predicted dose
+      target: Target dose
+      organ_masks: Dict mapping organ names to binary masks
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred_dose = preds[i, 0].cpu().numpy()
+      target_dose = target[i, 0].cpu().numpy()
+
+      # Prepare organ masks
+      sample_organ_masks = {}
+      for organ_name in self.organ_names:
+        if organ_name in organ_masks:
+          mask = organ_masks[organ_name][i].cpu().numpy()
+          constraint_organ = GDPHMM_TO_CONSTRAINT_ORGAN.get(organ_name)
+          if constraint_organ:
+            sample_organ_masks[constraint_organ] = mask
+
+      if len(sample_organ_masks) == 0:
+        continue
+
+      # Evaluate constraints
+      pred_results = self.evaluator.evaluate_all_constraints(
+        pred_dose, sample_organ_masks, self.voxel_volume_cc, self.fractionation
+      )
+      target_results = self.evaluator.evaluate_all_constraints(
+        target_dose, sample_organ_masks, self.voxel_volume_cc, self.fractionation
+      )
+
+      # Compare satisfaction status for each constraint
+      if self.grade_filter is None:
+        # Track by grade
+        agreements = {
+          ConstraintGrade.MANDATORY: [],
+          ConstraintGrade.RECOMMENDED: [],
+          ConstraintGrade.OPTIMAL: [],
+          'all': []
+        }
+
+        for organ_name in pred_results.keys():
+          if organ_name not in target_results:
+            continue
+
+          pred_organ = pred_results[organ_name]
+          target_organ = target_results[organ_name]
+
+          # Match constraints by type and threshold
+          for pred_result in pred_organ:
+            constraint = pred_result['constraint']
+            # Find matching constraint in target results
+            for target_result in target_organ:
+              target_constraint = target_result['constraint']
+              if (constraint.constraint_type == target_constraint.constraint_type and
+                  constraint.threshold_value == target_constraint.threshold_value and
+                  constraint.limit_value == target_constraint.limit_value):
+                # Check if satisfaction status agrees
+                agree = pred_result['satisfied'] == target_result['satisfied']
+                agreements['all'].append(agree)
+                if constraint.grade:
+                  agreements[constraint.grade].append(agree)
+                break
+
+        # Update states
+        if len(agreements['all']) > 0:
+          agreement_rate_all = sum(agreements['all']) / len(agreements['all'])
+          self.total_agreement_all += agreement_rate_all
+          self.count_all += 1
+
+        if len(agreements[ConstraintGrade.MANDATORY]) > 0:
+          agreement_rate = sum(agreements[ConstraintGrade.MANDATORY]) / len(agreements[ConstraintGrade.MANDATORY])
+          self.total_agreement_mandatory += agreement_rate
+          self.count_mandatory += 1
+
+        if len(agreements[ConstraintGrade.RECOMMENDED]) > 0:
+          agreement_rate = sum(agreements[ConstraintGrade.RECOMMENDED]) / len(agreements[ConstraintGrade.RECOMMENDED])
+          self.total_agreement_recommended += agreement_rate
+          self.count_recommended += 1
+
+        if len(agreements[ConstraintGrade.OPTIMAL]) > 0:
+          agreement_rate = sum(agreements[ConstraintGrade.OPTIMAL]) / len(agreements[ConstraintGrade.OPTIMAL])
+          self.total_agreement_optimal += agreement_rate
+          self.count_optimal += 1
+
+      else:
+        # Single grade filter
+        agreements = []
+        for organ_name in pred_results.keys():
+          if organ_name not in target_results:
+            continue
+
+          pred_organ = pred_results[organ_name]
+          target_organ = target_results[organ_name]
+
+          for pred_result in pred_organ:
+            constraint = pred_result['constraint']
+            if constraint.grade == self.grade_filter:
+              for target_result in target_organ:
+                target_constraint = target_result['constraint']
+                if (constraint.constraint_type == target_constraint.constraint_type and
+                    constraint.threshold_value == target_constraint.threshold_value and
+                    constraint.limit_value == target_constraint.limit_value):
+                  agree = pred_result['satisfied'] == target_result['satisfied']
+                  agreements.append(agree)
+                  break
+
+        if len(agreements) > 0:
+          agreement_rate = sum(agreements) / len(agreements)
+          self.total_agreement += agreement_rate
+          self.count += 1
+
+  def compute(self):
+    """Compute agreement scores."""
+    if self.grade_filter is None:
+      # Return scores for all grades
+      results = {}
+
+      if self.count_all > 0:
+        results['agreement_all'] = self.total_agreement_all / self.count_all
+      else:
+        results['agreement_all'] = torch.tensor(float('nan'))
+
+      if self.count_mandatory > 0:
+        results['agreement_mandatory'] = self.total_agreement_mandatory / self.count_mandatory
+      else:
+        results['agreement_mandatory'] = torch.tensor(float('nan'))
+
+      if self.count_recommended > 0:
+        results['agreement_recommended'] = self.total_agreement_recommended / self.count_recommended
+      else:
+        results['agreement_recommended'] = torch.tensor(float('nan'))
+
+      if self.count_optimal > 0:
+        results['agreement_optimal'] = self.total_agreement_optimal / self.count_optimal
+      else:
+        results['agreement_optimal'] = torch.tensor(float('nan'))
+
+      return results
+    else:
+      # Return single score for filtered grade
+      if self.count > 0:
+        return self.total_agreement / self.count
+      else:
+        return torch.tensor(float('nan'))
+
+
+class PerOrganConstraintCompliance(Metric):
+  """
+  Per-organ constraint compliance - satisfaction rate for a single organ with breakdown by grade.
+
+  Computes CSR for each grade level and compares pred vs target.
+  This metric is designed to be instantiated once per organ/region.
+
+  Args:
+    organ_name: Single organ name from GDPHMM_OAR
+    voxel_spacing: Voxel spacing in mm (x, y, z). Default: (2.5, 2.5, 2.0)
+    fractionation: Fractionation type. Default: CONVENTIONAL
+  """
+  def __init__(
+    self,
+    organ_name: str,
+    voxel_spacing: tuple = (2.5, 2.5, 2.0),
+    fractionation: FractionationType = FractionationType.CONVENTIONAL,
+    *args,
+    **kwargs
+  ):
+    super().__init__(*args, **kwargs)
+
+    self.organ_name = organ_name
+    self.voxel_spacing = voxel_spacing
+    self.voxel_volume_cc = np.prod(voxel_spacing) / 1000.0
+    self.fractionation = fractionation
+
+    # Initialize constraint library and evaluator
+    library = ConstraintLibrary()
+    self.evaluator = ConstraintEvaluator(library.constraints)
+
+    # Track per-grade statistics
+    # Structure: {grade: {pred_satisfied: [], pred_total: [], target_satisfied: [], target_total: []}}
+    self.grade_results = {}
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor, organ_masks: Dict[str, torch.Tensor]):
+    """
+    Update metric with new predictions and targets.
+
+    Args:
+      preds: Predicted dose
+      target: Target dose
+      organ_masks: Dict mapping organ names to binary masks
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred_dose = preds[i, 0].cpu().numpy()
+      target_dose = target[i, 0].cpu().numpy()
+
+      # Check if this organ is in the organ_masks
+      if self.organ_name not in organ_masks:
+        continue
+
+      # Get the mask for this organ
+      mask = organ_masks[self.organ_name][i].cpu().numpy()
+      constraint_organ = GDPHMM_TO_CONSTRAINT_ORGAN.get(self.organ_name)
+
+      if not constraint_organ:
+        continue
+
+      # Prepare organ masks dict with single organ
+      sample_organ_masks = {constraint_organ: mask}
+
+      # Evaluate constraints
+      pred_results = self.evaluator.evaluate_all_constraints(
+        pred_dose, sample_organ_masks, self.voxel_volume_cc, self.fractionation
+      )
+      target_results = self.evaluator.evaluate_all_constraints(
+        target_dose, sample_organ_masks, self.voxel_volume_cc, self.fractionation
+      )
+
+      # Get results for this organ
+      if constraint_organ not in pred_results or constraint_organ not in target_results:
+        continue
+
+      pred_organ_results = pred_results[constraint_organ]
+      target_organ_results = target_results[constraint_organ]
+
+      # Group results by grade
+      grade_stats = {}
+
+      # Count constraints by grade for predictions
+      for pred_result in pred_organ_results:
+        constraint = pred_result['constraint']
+        grade = constraint.grade if constraint.grade else 'ungraded'
+
+        if grade not in grade_stats:
+          grade_stats[grade] = {
+            'pred_satisfied': 0,
+            'pred_total': 0,
+            'target_satisfied': 0,
+            'target_total': 0
+          }
+
+        grade_stats[grade]['pred_satisfied'] += 1 if pred_result['satisfied'] else 0
+        grade_stats[grade]['pred_total'] += 1
+
+      # Count constraints by grade for targets
+      for target_result in target_organ_results:
+        constraint = target_result['constraint']
+        grade = constraint.grade if constraint.grade else 'ungraded'
+
+        if grade not in grade_stats:
+          grade_stats[grade] = {
+            'pred_satisfied': 0,
+            'pred_total': 0,
+            'target_satisfied': 0,
+            'target_total': 0
+          }
+
+        grade_stats[grade]['target_satisfied'] += 1 if target_result['satisfied'] else 0
+        grade_stats[grade]['target_total'] += 1
+
+      # Store results for each grade
+      for grade, stats in grade_stats.items():
+        if grade not in self.grade_results:
+          self.grade_results[grade] = {
+            'pred_satisfied': [],
+            'pred_total': [],
+            'target_satisfied': [],
+            'target_total': []
+          }
+
+        self.grade_results[grade]['pred_satisfied'].append(stats['pred_satisfied'])
+        self.grade_results[grade]['pred_total'].append(stats['pred_total'])
+        self.grade_results[grade]['target_satisfied'].append(stats['target_satisfied'])
+        self.grade_results[grade]['target_total'].append(stats['target_total'])
+
+  def compute(self):
+    """Compute per-grade CSR and differences for this organ."""
+    results = {}
+
+    # Compute CSR for each grade
+    for grade, grade_data in self.grade_results.items():
+      if len(grade_data['pred_total']) == 0:
+        continue
+
+      # Compute average CSR across all samples for this grade
+      pred_csr_values = [
+        s / t if t > 0 else 0.0
+        for s, t in zip(grade_data['pred_satisfied'], grade_data['pred_total'])
+      ]
+      target_csr_values = [
+        s / t if t > 0 else 0.0
+        for s, t in zip(grade_data['target_satisfied'], grade_data['target_total'])
+      ]
+
+      pred_csr_mean = torch.tensor(np.mean(pred_csr_values))
+      target_csr_mean = torch.tensor(np.mean(target_csr_values))
+
+      # Convert grade enum to string for key names
+      grade_key = grade.value if isinstance(grade, ConstraintGrade) else str(grade)
+
+      # Flatten the results with grade suffix
+      results[f'csr_pred_{grade_key}'] = pred_csr_mean
+      results[f'csr_target_{grade_key}'] = target_csr_mean
+      results[f'csr_abs_diff_{grade_key}'] = torch.abs(pred_csr_mean - target_csr_mean)
+
+    return results

@@ -2,12 +2,17 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import List
+from typing import List, Dict, Optional
 from itertools import cycle
 from pathlib import Path
 
 from data import GDPHMM_OAR, GDPHMM_DOSE_MAX
 from data_legacy import GDPHMMSlicesDataset, LRUCache
+from constraints import (
+    ConstraintLibrary, ConstraintEvaluator,
+    FractionationType, ConstraintType, ConstraintGrade,
+    GDPHMM_TO_CONSTRAINT_ORGAN
+)
 
 
 SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
@@ -95,6 +100,33 @@ class BaseResults:
     self.base_path = SAMPLES_PATH / model_name / sampling_name / f'{dataset_split}_{epoch}'
 
     self.dataset = dataset
+
+    # Initialize constraint library and evaluator
+    self.constraint_library = ConstraintLibrary()
+    self.constraint_evaluator = ConstraintEvaluator(self.constraint_library.constraints)
+    self.fractionation = FractionationType.CONVENTIONAL  # Default fractionation
+
+  def get_organ_constraints(self, organ_name: str, constraint_type: Optional[ConstraintType] = None) -> List:
+    """
+    Get constraints for a specific organ from the constraint library.
+
+    Args:
+        organ_name: Name of the organ from GDPHMM_OAR list
+        constraint_type: Optional filter for specific constraint type
+
+    Returns:
+        List of constraints for the organ
+    """
+    # Map GDPHMM organ name to constraint library organ name
+    constraint_organ = GDPHMM_TO_CONSTRAINT_ORGAN.get(organ_name)
+    if constraint_organ is None:
+      return []
+
+    return self.constraint_library.get_constraints(
+      organ=constraint_organ,
+      fractionation=self.fractionation,
+      constraint_type=constraint_type
+    )
 
   def plot_quality_over_slice_index(self, metric, ax=None):
     if ax is None:
@@ -185,116 +217,97 @@ class BaseResults:
 
     return ax
 
-  def plot_organ_dvh(self, organ_name, ax=None, max_dose=None):
+  def plot_organ_dvh(self, organ_name, ax=None, max_dose=None, show_constraints=True):
+    """
+    Plot DVH for a specific organ with optional constraint visualization.
+
+    Args:
+        organ_name: Name of the organ from GDPHMM_OAR list
+        ax: Matplotlib axes to plot on
+        max_dose: Optional maximum dose for x-axis
+        show_constraints: Whether to show constraint lines from library
+
+    Returns:
+        Matplotlib axes
+    """
     structure_index = self.dataset.selector.get_oar_index(organ_name)
     ax = self.plot_dvh(structure_index, ax, max_dose)
     ax.set_title(f'{organ_name} DVH Comparison')
+
+    # Add constraint lines from library
+    if show_constraints:
+      constraints = self.get_organ_constraints(organ_name)
+      colors = ['orange', 'red', 'darkred', 'purple']
+      linestyles = {
+        ConstraintGrade.OPTIMAL: ':',
+        ConstraintGrade.RECOMMENDED: '--',
+        ConstraintGrade.MANDATORY: '-',
+        ConstraintGrade.ACCEPTABLE: '-.',
+        None: '-'
+      }
+
+      # Track which constraint types we've added to legend
+      legend_added = set()
+
+      for i, constraint in enumerate(constraints):
+        color = colors[i % len(colors)]
+        linestyle = linestyles.get(constraint.grade, '-')
+
+        # Only plot D_MAX and D_MEAN constraints as vertical lines
+        if constraint.constraint_type == ConstraintType.D_MAX:
+          label = f'D_MAX {constraint.comparison} {constraint.limit_value} Gy'
+          if constraint.grade:
+            label += f' ({constraint.grade.value})'
+          ax.axvline(x=constraint.limit_value, color=color, linestyle=linestyle, alpha=0.7, label=label)
+
+        elif constraint.constraint_type == ConstraintType.D_MEAN:
+          label = f'D_MEAN {constraint.comparison} {constraint.limit_value} Gy'
+          if constraint.grade:
+            label += f' ({constraint.grade.value})'
+          ax.axvline(x=constraint.limit_value, color=color, linestyle=linestyle, alpha=0.7, label=label)
+
+      ax.legend()
+
     return ax
 
   def plot_eye_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Eyes', ax, max_dose=45)
-
-    ax.axvline(x=45, color='orange', linestyle='-', label=r'$D_{MAX} < 45$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Eyes', ax, max_dose=50)
 
   def plot_cochlea_l_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Cochlea_L', ax, max_dose=45)
-
-    ax.axvline(x=45, color='orange', linestyle='--', label=r'$D_{MEAN} < 45$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Cochlea_L', ax, max_dose=50)
 
   def plot_cochlea_r_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Cochlea_R', ax, max_dose=45)
-
-    ax.axvline(x=45, color='orange', linestyle='--', label=r'$D_{MEAN} < 45$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Cochlea_R', ax, max_dose=50)
 
   def plot_brain_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Brain', ax, max_dose=72)
-
-    ax.axvline(x=72, color='orange', linestyle='-', label=r'$D_{MAX} < 72$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Brain', ax, max_dose=80)
 
   def plot_brainstem_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('BrainStem_03', ax, max_dose=54)
-
-    ax.axvline(x=54, color='orange', linestyle='-', label=r'$D_{MAX} < 54$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('BrainStem_03', ax, max_dose=60)
 
   def plot_lungs_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Lungs', ax, max_dose=20)
-
-    ax.axvline(x=20, color='orange', linestyle='--', label=r'$D_{MEAN} < 20$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Lungs', ax, max_dose=50)
 
   def plot_lens_l_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Lens_L', ax, max_dose=4)
-
-    ax.axvline(x=4, color='orange', linestyle='-', label=r'$D_{MAX} < 4$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Lens_L', ax, max_dose=10)
 
   def plot_lens_r_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Lens_R', ax, max_dose=4)
-
-    ax.axvline(x=4, color='orange', linestyle='-', label=r'$D_{MAX} < 4$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Lens_R', ax, max_dose=10)
 
   def plot_spinal_cord_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('SpinalCord_05', ax, max_dose=50)
-
-    ax.axvline(x=50, color='orange', linestyle='-', label=r'$D_{MAX} < 50$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('SpinalCord_05', ax, max_dose=60)
 
   def plot_optic_nerve_l_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('OpticNerve_L', ax, max_dose=55)
-
-    ax.axvline(x=55, color='orange', linestyle='-', label=r'$D_{MAX} < 55$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('OpticNerve_L', ax, max_dose=60)
 
   def plot_optic_nerve_r_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('OpticNerve_R', ax, max_dose=55)
-
-    ax.axvline(x=55, color='orange', linestyle='-', label=r'$D_{MAX} < 55$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('OpticNerve_R', ax, max_dose=60)
 
   def plot_lips_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Lips', ax, max_dose=50)
-
-    ax.axvline(x=30, color='orange', linestyle='--', label=r'$D_{MEAN} < 30$ Gy Optimal Constraint')
-    ax.axvline(x=50, color='orange', linestyle='--', label=r'$D_{MEAN} < 50$ Gy Mandatory Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Lips', ax, max_dose=60)
 
   def plot_chiasm_dvh(self, ax=None):
-    ax = self.plot_organ_dvh('Chiasm', ax, max_dose=55)
-
-    ax.axvline(x=55, color='orange', linestyle='-', label=r'$D_{MAX} < 55$ Gy Constraint')
-    ax.legend()
-
-    return ax
+    return self.plot_organ_dvh('Chiasm', ax, max_dose=60)
 
   def plot_ptv_dvh(self, ax=None):
     # For DVH plotting, we still need the index
