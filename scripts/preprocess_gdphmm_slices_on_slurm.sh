@@ -17,10 +17,12 @@ fi
 sbatch <<EOF
 #!/bin/bash
 #SBATCH -p epyc2
-#SBATCH -q job_cpu
+#SBATCH -q job_gratis
+#SBATCH --account=gratis
 #SBATCH --time 4:00:00
 #SBATCH --mem 128G
 #SBATCH --ntasks=1
+#SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --out=${HOME_PATH}/logs/preprocess-${DATASET}-%j.log
 #SBATCH --job-name=preprocess-${DATASET}

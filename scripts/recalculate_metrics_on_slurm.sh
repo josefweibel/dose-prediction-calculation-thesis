@@ -32,13 +32,14 @@ fi
 
 sbatch <<EOF
 #!/bin/bash
-#SBATCH -p gpu
-#SBATCH -q job_gpu
+#SBATCH -p gpu-invest
+#SBATCH -q job_gpu_caim
 #SBATCH --account=invest
 #SBATCH --gres=gpu:rtx4090:1
-#SBATCH --time 0:30:00
+#SBATCH --time 8:00:00
 #SBATCH --mem 64G
 #SBATCH --ntasks=1
+#SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-metrics-%j.log
 #SBATCH --job-name=${MODEL_NAME}-metrics
@@ -57,10 +58,10 @@ if [ "${COPY_TO_TMPDIR}" = "true" ]; then
 
   function clean_up {
     rm -rf "\${SCRATCH_BASE_DIR:?}"/*
-    if [ "\$(squeue -w \$(hostname) -h -o '%i' | wc -l)" -eq 1 ]; then
+    # if [ "\$(squeue -w \$(hostname) -h -o '%i' | wc -l)" -eq 1 ]; then
       # echo 'Deleting shared memory of user'
       # find /dev/shm -user "\$USER" -delete
-    fi
+    # fi
     echo "Cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
   }
   trap clean_up EXIT
