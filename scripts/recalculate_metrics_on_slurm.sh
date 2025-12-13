@@ -35,16 +35,21 @@ sbatch <<EOF
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim
 #SBATCH --account=invest
-#SBATCH --gres=gpu:rtx4090:1
 #SBATCH --time 8:00:00
-#SBATCH --mem 64G
-#SBATCH --ntasks=1
-#SBATCH --nodes=1
+#SBATCH --mem 189G
+#SBATCH --gpus rtx4090:8
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-metrics-%j.log
 #SBATCH --job-name=${MODEL_NAME}-metrics
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
+
+export NCCL_P2P_DISABLE=1
+
+export MASTER_ADDR=\$(scontrol show hostname \${SLURM_NODELIST} | head -n 1)
+export MASTER_PORT=$((12000 + RANDOM % 1000))
 
 echo "SLURM_JOB_ID=\$SLURM_JOB_ID"
 echo "TMPDIR=\$TMPDIR"
@@ -58,10 +63,7 @@ if [ "${COPY_TO_TMPDIR}" = "true" ]; then
 
   function clean_up {
     rm -rf "\${SCRATCH_BASE_DIR:?}"/*
-    # if [ "\$(squeue -w \$(hostname) -h -o '%i' | wc -l)" -eq 1 ]; then
-      # echo 'Deleting shared memory of user'
-      # find /dev/shm -user "\$USER" -delete
-    # fi
+    # find /dev/shm -user "\$USER" -delete
     echo "Cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
   }
   trap clean_up EXIT
@@ -73,12 +75,20 @@ srun bash -c '
   SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
 
   if [ "${COPY_TO_TMPDIR}" = "true" ]; then
-    echo "[\$(hostname)] copying dataset..."
-    rm -rf "\${SCRATCH_BASE_DIR:?}"/*
-    mkdir -p "\${SCRATCH_BASE_DIR}/data"
-    cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "\${SCRATCH_BASE_DIR}/data/"
-    ls -l \${SCRATCH_BASE_DIR}/data/
-    ls -l \${SCRATCH_BASE_DIR}/data/${DATASET}
+    if [ "\${SLURM_LOCALID}" -eq 0 ]; then
+      echo "[\$(hostname)] copying dataset..."
+      rm -rf "\${SCRATCH_BASE_DIR:?}"/*
+      mkdir -p "\${SCRATCH_BASE_DIR}/data"
+      cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "\${SCRATCH_BASE_DIR}/data/"
+      ls -l \${SCRATCH_BASE_DIR}/data/
+      ls -l \${SCRATCH_BASE_DIR}/data/${DATASET}
+      touch "\${SCRATCH_BASE_DIR}/.copy_done"
+    else
+      # wait until copy_done exists
+      while [ ! -f "\${SCRATCH_BASE_DIR}/.copy_done" ]; do
+        sleep 1
+      done
+    fi
     DATASET_BIND="\${SCRATCH_BASE_DIR}/data/${DATASET}:/work/data/${DATASET}"
   else
     DATASET_BIND="${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET}:/work/data/${DATASET}"
@@ -88,14 +98,16 @@ srun bash -c '
   df -h /dev/shm
   echo
 
+  # singularity run
   singularity exec \
     --nv \
     --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
     --bind "\${DATASET_BIND}" \
     --bind "/storage/scratch/users/jw19s096:/storage/scratch/users/jw19s096" \
+    --bind /dev/infiniband:/dev/infiniband \
     --pwd /work \
     ${HOME_PATH}/images/dose-prediction-thesis.sif \
-    bash -c "PYTHONPATH=/work/src python scripts/recalculate_metrics.py --model ${MODEL_NAME} --sampling ${SAMPLING_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH}"
+    bash -c "PYTHONPATH=/work/src python scripts/recalculate_metrics.py --model ${MODEL_NAME} --sampling ${SAMPLING_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH} --distributed"
 '
 
 echo "job ${MODEL_NAME} ${SAMPLING_NAME} completed"
