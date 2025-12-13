@@ -324,7 +324,7 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
   return {k: v.to(device) for k, v in metrics.items()}
 
 
-def compute_volume_metrics(samples_path, dataset, device, rank=0):
+def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1):
   """
   Compute volume metrics for all combined volume files in a samples directory.
 
@@ -333,25 +333,33 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0):
     dataset: Dataset instance for accessing structure and target data
     device: Device to run computations on
     rank: Process rank for distributed computing
+    world_size: Total number of processes for distributed computing
 
   Returns:
     DataFrame with volume metrics for each sample
   """
   samples_path = Path(samples_path)
-  volume_files = list(samples_path.glob('*.npy'))
+  volume_files = sorted(list(samples_path.glob('*.npy')))
   # Exclude the _sample_metrics.csv and _overall_metrics.csv indicator files
   volume_files = [f for f in volume_files if not f.stem.startswith('_')]
 
   if len(volume_files) == 0:
-    print(f'No volume files found in {samples_path}')
+    if rank == 0:
+      print(f'No volume files found in {samples_path}')
     return pd.DataFrame()
 
-  print(f'Computing volume metrics for {len(volume_files)} volumes...')
+  # Distribute volume files across ranks
+  # Each rank processes a subset of the volumes
+  rank_volume_files = volume_files[rank::world_size]
+
+  if rank == 0:
+    print(f'Computing volume metrics for {len(volume_files)} volumes across {world_size} GPUs...')
+  print(f'Rank {rank} processing {len(rank_volume_files)} volumes')
 
   metrics = build_volume_metrics(dataset, device)
   volume_metrics = []
 
-  for volume_file in tqdm(volume_files, desc='Computing volume metrics', disable=rank != 0):
+  for volume_file in tqdm(rank_volume_files, desc=f'Computing volume metrics (Rank {rank})', disable=rank != 0):
     # Load predicted volume: shape (1, H, W, D) where D is num_slices
     pred_volume = np.load(volume_file)
     pred_volume = torch.from_numpy(pred_volume).to(device)
@@ -403,6 +411,15 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0):
       'file_name': sample_name,
       **metric_results
     })
+
+  # Gather results from all ranks if in distributed mode
+  if world_size > 1:
+    all_volume_metrics = [None] * world_size
+    dist.all_gather_object(all_volume_metrics, volume_metrics)
+
+    if rank == 0:
+      # Flatten the list of lists
+      volume_metrics = [item for sublist in all_volume_metrics for item in sublist]
 
   return pd.DataFrame(volume_metrics)
 

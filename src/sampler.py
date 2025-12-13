@@ -116,9 +116,22 @@ class Sampler:
       combinator.combine()
       combinator.finish()
 
-      print('\nComputing volume metrics...')
-      volume_metrics = compute_volume_metrics(dir, self.dataset, self.device, rank=self.rank)
+    if self.is_distributed:
+      dist.barrier()
 
+    print(f'\nRank {self.rank}: Computing volume metrics...')
+    volume_metrics = compute_volume_metrics(
+      dir,
+      self.dataset,
+      self.device,
+      rank=self.rank,
+      world_size=self.world_size
+    )
+
+    if self.is_distributed:
+      dist.barrier()
+
+    if self.is_main_process:
       if len(volume_metrics) > 0:
         overall_volume_metrics = volume_metrics.mean(numeric_only=True)
 
