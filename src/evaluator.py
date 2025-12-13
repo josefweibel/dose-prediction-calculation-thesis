@@ -414,6 +414,9 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1):
 
   # Gather results from all ranks if in distributed mode
   if world_size > 1:
+    # Ensure all ranks finish processing before gathering
+    dist.barrier()
+
     all_volume_metrics = [None] * world_size
     dist.all_gather_object(all_volume_metrics, volume_metrics)
 

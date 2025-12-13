@@ -40,12 +40,15 @@ if __name__ == '__main__':
 
     torch.cuda.set_device(local_rank)
 
+    # Set a longer timeout for NCCL operations
+    # This is needed because volume metrics computation can take a long time
     dist.init_process_group(
       backend="nccl",
       init_method=f"tcp://{master_addr}:{master_port}",
       rank=rank,
       world_size=world_size,
       device_id=local_rank,
+      timeout=torch.distributed.timedelta(min=30),
     )
 
     dist.barrier()

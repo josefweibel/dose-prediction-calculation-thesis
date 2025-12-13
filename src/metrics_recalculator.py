@@ -86,6 +86,9 @@ class MetricsRecalculator:
 
     # Gather results from all ranks if in distributed mode
     if self.world_size > 1:
+      # Ensure all ranks finish processing before gathering
+      dist.barrier()
+
       all_sample_metrics = [None] * self.world_size
       dist.all_gather_object(all_sample_metrics, sample_metrics)
 
