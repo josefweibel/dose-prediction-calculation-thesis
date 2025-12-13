@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 import signal
 import sys
 import atexit
+from datetime import timedelta
 
 from metrics_recalculator import MetricsRecalculator
 
@@ -40,7 +41,7 @@ if __name__ == '__main__':
 
     torch.cuda.set_device(local_rank)
 
-    # Set a longer timeout for NCCL operations
+    # Set a longer timeout for NCCL operations (30 minutes instead of default 10 minutes)
     # This is needed because volume metrics computation can take a long time
     dist.init_process_group(
       backend="nccl",
@@ -48,7 +49,7 @@ if __name__ == '__main__':
       rank=rank,
       world_size=world_size,
       device_id=local_rank,
-      timeout=torch.distributed.timedelta(min=30),
+      timeout=timedelta(minutes=30),
     )
 
     dist.barrier()
