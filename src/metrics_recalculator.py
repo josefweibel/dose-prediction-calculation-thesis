@@ -92,7 +92,7 @@ class MetricsRecalculator:
 
       # Save volume metrics
       volume_metrics.to_csv(self.samples_path / '_volume_metrics.csv', index=False)
-      overall_volume_metrics.to_frame().to_csv(self.samples_path / '_overall_volume_metrics.csv', index=False)
+      overall_volume_metrics.to_frame().to_csv(self.samples_path / '_overall_volume_metrics.csv')
 
       print(f'Volume metrics saved to {self.samples_path}')
     else:

@@ -503,7 +503,7 @@ class Evaluator:
 
     if dir is not None and self.rank == 0:
       sample_metrics.to_csv(dir / '_sample_metrics.csv', index=False)
-      overall_metrics.to_frame().to_csv(dir / '_overall_metrics.csv', index=False)
+      overall_metrics.to_frame().to_csv(dir / '_overall_metrics.csv')
 
     dist.barrier()
 
