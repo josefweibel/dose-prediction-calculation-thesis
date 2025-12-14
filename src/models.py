@@ -2,6 +2,7 @@ from mamba_model import MambaUnet
 from mednext import build_mednext_model
 from c3d_model import C3D, C3D_2D
 from beamdiff_model import build_beamdiff
+from spdiffdose_model import build_spdiffdose
 
 
 def build_model(model_config, structure_selector):
@@ -22,6 +23,9 @@ def build_model(model_config, structure_selector):
   elif 'beamdiff' in model_config:
     beamdiff_config = model_config['beamdiff']
     model = build_beamdiff(beamdiff_config, structure_selector)
+  elif 'spdiffdose' in model_config:
+    spdiffdose_config = model_config['spdiffdose']
+    model = build_spdiffdose(spdiffdose_config, structure_selector)
   elif 'mednext' in model_config:
     model = build_mednext_model(
       model_config,
