@@ -108,7 +108,7 @@ class MetricsRecalculator:
       overall_metrics = sample_metrics.mean(numeric_only=True)
 
       sample_metrics.to_csv(self.samples_path / '_sample_metrics.csv', index=False)
-      overall_metrics.to_frame().to_csv(self.samples_path / '_overall_metrics.csv', index=False)
+      overall_metrics.to_frame().to_csv(self.samples_path / '_overall_metrics.csv')
 
     if self.is_distributed:
       dist.barrier()

@@ -48,7 +48,7 @@ sbatch <<EOF
 
 export NCCL_P2P_DISABLE=1
 export TORCH_NCCL_BLOCKING_WAIT=1
-export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 export MASTER_ADDR=\$(scontrol show hostname \${SLURM_NODELIST} | head -n 1)
 export MASTER_PORT=$((12000 + RANDOM % 1000))
