@@ -39,8 +39,7 @@ class Sampler:
     self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None)
 
     conditioning_groups = self.model_config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
-    conditioning_selector = StructureSelector(groups=conditioning_groups)
-    self.conditioning_total_channels = conditioning_selector.total_channels
+    self.conditioning_selector = StructureSelector(conditioning_groups)
 
     if self.is_main_process:
       print('Dataset size', len(self.dataset))
@@ -67,7 +66,7 @@ class Sampler:
     if self.sampling_config['prefetch_on_gpu'] and self.device.type == 'cuda':
       self.dataloader = PrefetchLoader(self.dataloader, self.device)
 
-    self.ema_model = build_model(self.model_config, self.conditioning_total_channels).to(self.device)
+    self.ema_model = build_model(self.model_config, self.conditioning_selector).to(self.device)
 
     if epoch is None or epoch == 'latest':
       checkpoint = load_last_checkpoint(model_name)

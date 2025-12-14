@@ -4,7 +4,9 @@ from c3d_model import C3D, C3D_2D
 from beamdiff_model import build_beamdiff
 
 
-def build_model(model_config, n_input_channels):
+def build_model(model_config, structure_selector):
+
+  n_input_channels = structure_selector.total_channels
 
   if 'c3d' in model_config:
     if model_config['c3d'].get('use_2d', True):
@@ -19,7 +21,7 @@ def build_model(model_config, n_input_channels):
       )
   elif 'beamdiff' in model_config:
     beamdiff_config = model_config['beamdiff']
-    model = build_beamdiff(beamdiff_config, n_input_channels)
+    model = build_beamdiff(beamdiff_config, structure_selector)
   elif 'mednext' in model_config:
     model = build_mednext_model(
       model_config,

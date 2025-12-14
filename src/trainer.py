@@ -150,7 +150,7 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    self.net_model = build_model(self.config, train_dataset.selector.total_channels).to(self.device)
+    self.net_model = build_model(self.config, train_dataset.selector).to(self.device)
 
     if 'diffusion' in self.config:
       self.model = DiffusionModelTrainerModule(

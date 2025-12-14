@@ -326,15 +326,19 @@ class NoisePredictor(nn.Module):
   Compatible with the diffusion trainer interface:
   - forward(x_t, condition, t, cache) where:
     - x_t: noisy dose map
-    - condition: concatenated structural info (CT + PTV + OARs)
+    - condition: concatenated structural info (CT + PTV + OARs + optionally beam fields)
     - t: timestep
     - cache: DeepCache (ignored for now)
+
+  Beam field auto-detection:
+    The model automatically detects if 'beam_plate' and/or 'angle_plate' are present
+    in the conditioning via the structure_selector and extracts them accordingly.
+    Both beam fields can be used simultaneously.
   """
 
   def __init__(
     self,
-    in_channels_struct=5,  # CT + masks + SDMs
-    in_channels_beam=1,    # Beam field
+    structure_selector,    # StructureSelector for extracting components from condition
     base_channels=128,
     channel_mult=(1, 1, 2, 3, 4),
     num_res_blocks=2,
@@ -342,13 +346,33 @@ class NoisePredictor(nn.Module):
     num_heads=4,
     use_mam=True,
     use_afm=True,
-    use_beam_field=False,
   ):
     super().__init__()
 
     self.use_mam = use_mam
     self.use_afm = use_afm
-    self.use_beam_field = use_beam_field
+    self.structure_selector = structure_selector
+
+    # Auto-detect beam fields from structure selector
+    self.beam_field_keys = []
+    if 'beam_plate' in structure_selector.groups:
+      self.beam_field_keys.append('beam_plate')
+    if 'angle_plate' in structure_selector.groups:
+      self.beam_field_keys.append('angle_plate')
+
+    # Use beam field if we found any beam field keys
+    self.use_beam_field = len(self.beam_field_keys) > 0
+
+    # Calculate input channels for each branch
+    # Structural branch: all channels except beam fields
+    in_channels_struct = structure_selector.total_channels
+    in_channels_beam = 0
+
+    for key in self.beam_field_keys:
+      start, end = structure_selector.get_channel_indices(key)
+      beam_channels = end - start
+      in_channels_struct -= beam_channels
+      in_channels_beam += beam_channels
 
     # Timestep embedding
     time_embed_dim = base_channels * 4
@@ -455,7 +479,7 @@ class NoisePredictor(nn.Module):
 
     Args:
         x_noisy: Noisy dose map [B, 1, H, W]
-        condition: Structural information (CT + PTV + OARs) [B, C, H, W]
+        condition: Structural information (CT + PTV + OARs + optionally beam fields) [B, C, H, W]
         timesteps: Diffusion timesteps [B]
         cache: DeepCache (unused, for compatibility)
 
@@ -465,13 +489,28 @@ class NoisePredictor(nn.Module):
     # Timestep embedding
     t_emb = self.time_embed(timesteps)
 
+    # Extract beam fields from condition if present
+    if self.use_beam_field:
+      beam_components = []
+      for key in self.beam_field_keys:
+        beam_components.append(self.structure_selector.get_component(condition, key))
+      x_beam = torch.cat(beam_components, dim=1) if len(beam_components) > 1 else beam_components[0]
+
+      # Build structural condition without beam fields
+      struct_components = []
+      for group in self.structure_selector.groups:
+        if group not in self.beam_field_keys:
+          struct_components.append(self.structure_selector.get_component(condition, group))
+      x_struct = torch.cat(struct_components, dim=1)
+    else:
+      x_struct = condition
+      x_beam = None
+
     # Initial convolutions
     h_noisy = self.conv_in_noisy(x_noisy)
-    h_struct = self.conv_in_struct(condition)
+    h_struct = self.conv_in_struct(x_struct)
 
     if self.use_beam_field:
-      # Extract beam field from condition (e.g., PTV channel)
-      x_beam = condition[:, 1:2, :, :]  # PTV channel as beam proxy
       h_beam = self.conv_in_beam(x_beam)
 
     # Encoder
@@ -537,20 +576,19 @@ class NoisePredictor(nn.Module):
     return h
 
 
-def build_beamdiff(config, in_struc_channels):
+def build_beamdiff(config, structure_selector):
   """
   Build BeamDiff model from configuration.
 
   Args:
       config: BeamDiff configuration dict
-      in_struc_channels: Number of input structure channels
+      structure_selector: StructureSelector instance for extracting components from conditioning tensor
 
   Returns:
       NoisePredictor model (not wrapped in BeamDiff, since trainer handles diffusion)
   """
   model = NoisePredictor(
-    in_channels_struct=in_struc_channels,
-    in_channels_beam=config.get('in_channels_beam', 0),
+    structure_selector=structure_selector,
     base_channels=config.get('base_channels', 128),
     channel_mult=tuple(config.get('channel_mult', [1, 1, 2, 3, 4])),
     num_res_blocks=config.get('num_res_blocks', 2),
@@ -558,6 +596,5 @@ def build_beamdiff(config, in_struc_channels):
     num_heads=config.get('num_heads', 4),
     use_mam=config.get('use_mam', True),
     use_afm=config.get('use_afm', True),
-    use_beam_field=config.get('use_beam_field', False),
   )
   return model
