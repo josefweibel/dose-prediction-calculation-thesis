@@ -19,7 +19,10 @@ diffusion:
   beta_T: 0.02
   T: 1000
 
-dosediff: {}
+dosediff:
+  base_channels: 64  # Reduce from default 128 to match SP-DiffDose memory usage
+  # This reduces memory by ~4x while maintaining model capacity
+  # Default channel_mult: [1, 2, 3, 4] gives [64, 128, 192, 256]
 
 conditioning:
   types:
