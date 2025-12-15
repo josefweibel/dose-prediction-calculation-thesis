@@ -641,8 +641,9 @@ class DenoisingNetwork(nn.Module):
     # Initial convolution for noisy input
     h = self.conv_in_noisy(x_noisy)
 
-    # Encoder with fusion
+    # Encoder with fusion - track spatial dimensions at each level
     encoder_outputs = []
+    spatial_dims = []
 
     for level in range(self.num_levels):
       # Process noisy image
@@ -666,8 +667,9 @@ class DenoisingNetwork(nn.Module):
       # Update h with fused features
       h = fused
 
-      # Store for skip connections
+      # Store for skip connections and spatial dimensions
       encoder_outputs.append(h)
+      spatial_dims.append((h.shape[2], h.shape[3]))
 
       # Downsample
       h = self.downsamples[level](h)
@@ -676,11 +678,23 @@ class DenoisingNetwork(nn.Module):
     for block in self.middle:
       h = block(h)
 
-    # Decoder
+    # Decoder - upsample to match encoder spatial dimensions
     for level in range(len(self.decoder_stages)):
       # No skip connections in SP-DiffDose (based on the paper)
       h = self.decoder_stages[level](h, t_emb)
+
+      # Use transposed conv for upsampling
       h = self.upsamples[level](h)
+
+      # Ensure exact spatial size match with corresponding encoder level
+      # Decoder level i should match encoder level (num_levels - 1 - i - 1) = (num_levels - 2 - i)
+      # because after the last encoder level we downsample before middle blocks
+      if level < len(self.decoder_stages) - 1:  # Skip the last level which has Identity upsample
+        encoder_level = self.num_levels - 2 - level
+        if encoder_level >= 0 and encoder_level < len(spatial_dims):
+          target_h, target_w = spatial_dims[encoder_level]
+          if h.shape[2] != target_h or h.shape[3] != target_w:
+            h = F.interpolate(h, size=(target_h, target_w), mode='bilinear', align_corners=False)
 
     # Output
     h = self.norm_out(h)
