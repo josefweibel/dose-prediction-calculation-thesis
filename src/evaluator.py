@@ -86,7 +86,7 @@ def compute_metrics(metrics, preds, target, structure, dataset):
     # Handle metrics that return dictionaries
     if isinstance(result, dict):
       for sub_key, sub_value in result.items():
-        full_key = f"{metric_name}_{sub_key}"
+        full_key = f"{metric_name}/{sub_key}"
         if torch.is_tensor(sub_value):
           results[full_key] = sub_value.item() if not torch.isnan(sub_value) else float('nan')
         else:
