@@ -3,6 +3,7 @@ from mednext import build_mednext_model
 from c3d_model import C3D, C3D_2D
 from beamdiff_model import build_beamdiff
 from spdiffdose_model import build_spdiffdose
+from dosediff_model import build_dosediff
 
 
 def build_model(model_config, structure_selector):
@@ -26,6 +27,9 @@ def build_model(model_config, structure_selector):
   elif 'spdiffdose' in model_config:
     spdiffdose_config = model_config['spdiffdose']
     model = build_spdiffdose(spdiffdose_config, structure_selector)
+  elif 'dosediff' in model_config:
+    dosediff_config = model_config['dosediff']
+    model = build_dosediff(dosediff_config, structure_selector)
   elif 'mednext' in model_config:
     model = build_mednext_model(
       model_config,
