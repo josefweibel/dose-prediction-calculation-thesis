@@ -181,6 +181,13 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
       couch_angles = []
       beam_names = []
 
+      # MLC and MU information
+      mlc_types = set()
+      mlc_manufacturers = set()
+      beam_meterset_values = []  # Monitor Units per beam
+      total_mlc_leaf_pairs = []
+      mlc_leaf_widths = []
+
       for beam in ds.BeamSequence:
         # Machine info
         if hasattr(beam, 'TreatmentMachineName'):
@@ -242,13 +249,44 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
 
         beams_for_modality.append(beam_dict)
 
+        # Monitor Units (MU) for this beam
+        if hasattr(beam, 'FinalCumulativeMetersetWeight'):
+          # This gives the final cumulative meterset weight (typically 1.0)
+          # Actual MU is in FractionGroupSequence
+          pass
+
+        # Get actual MU from FractionGroupSequence
+        if hasattr(ds, 'FractionGroupSequence'):
+          for fg in ds.FractionGroupSequence:
+            if hasattr(fg, 'ReferencedBeamSequence'):
+              for ref_beam in fg.ReferencedBeamSequence:
+                if hasattr(ref_beam, 'ReferencedBeamNumber') and hasattr(beam, 'BeamNumber'):
+                  if int(ref_beam.ReferencedBeamNumber) == int(beam.BeamNumber):
+                    if hasattr(ref_beam, 'BeamMeterset'):
+                      beam_meterset_values.append(float(ref_beam.BeamMeterset))
+
         # MLC info
         if hasattr(beam, 'BeamLimitingDeviceSequence'):
           for bld in beam.BeamLimitingDeviceSequence:
             if hasattr(bld, 'RTBeamLimitingDeviceType'):
               device_type = str(bld.RTBeamLimitingDeviceType)
+
+              # Collect MLC type information
+              if 'MLC' in device_type:
+                mlc_types.add(device_type)
+
               if device_type == 'MLCX' and hasattr(bld, 'NumberOfLeafJawPairs'):
-                mlc_info.append(int(bld.NumberOfLeafJawPairs))
+                num_leaves = int(bld.NumberOfLeafJawPairs)
+                mlc_info.append(num_leaves)
+                total_mlc_leaf_pairs.append(num_leaves)
+
+                # Extract leaf position boundaries (leaf widths)
+                if hasattr(bld, 'LeafPositionBoundaries'):
+                  boundaries = [float(x) for x in bld.LeafPositionBoundaries]
+                  if len(boundaries) > 1:
+                    # Calculate leaf widths from boundaries
+                    widths = [boundaries[i+1] - boundaries[i] for i in range(len(boundaries)-1)]
+                    mlc_leaf_widths.extend(widths)
 
       # Store beam information
       info['number_of_beams'] = len(ds.BeamSequence)
@@ -265,10 +303,40 @@ def extract_rtplan_detailed_info(rtplan_path: str) -> Dict:
         info['dose_rate_min'] = None
         info['dose_rate_max'] = None
 
+      # MLC information
       if mlc_info:
         info['mlc_leaves'] = mlc_info[0]  # Take first
       else:
         info['mlc_leaves'] = None
+
+      if mlc_types:
+        info['mlc_types'] = ','.join(sorted(mlc_types))
+      else:
+        info['mlc_types'] = None
+
+      if mlc_leaf_widths:
+        unique_widths = sorted(set([round(w, 2) for w in mlc_leaf_widths]))
+        info['mlc_leaf_widths_mm'] = ','.join(map(str, unique_widths))
+        info['mlc_min_leaf_width_mm'] = min(unique_widths)
+        info['mlc_max_leaf_width_mm'] = max(unique_widths)
+      else:
+        info['mlc_leaf_widths_mm'] = None
+        info['mlc_min_leaf_width_mm'] = None
+        info['mlc_max_leaf_width_mm'] = None
+
+      # Monitor Units information
+      if beam_meterset_values:
+        info['total_monitor_units'] = sum(beam_meterset_values)
+        info['mean_mu_per_beam'] = sum(beam_meterset_values) / len(beam_meterset_values)
+        info['min_mu_per_beam'] = min(beam_meterset_values)
+        info['max_mu_per_beam'] = max(beam_meterset_values)
+        info['mu_per_beam_list'] = ','.join(f"{mu:.2f}" for mu in beam_meterset_values)
+      else:
+        info['total_monitor_units'] = None
+        info['mean_mu_per_beam'] = None
+        info['min_mu_per_beam'] = None
+        info['max_mu_per_beam'] = None
+        info['mu_per_beam_list'] = None
 
       # Store collimator and couch angles
       if collimator_angles:
@@ -483,6 +551,46 @@ def scan_head_neck_cohorts(base_dir: str, output_csv: str = "head_neck_rtplan_me
       print(f"\nTreatment Machines:")
       for machine in sorted(all_machines):
         print(f"  - {machine}")
+
+  # MLC information
+  if 'mlc_leaves' in df.columns:
+    valid_mlc = df['mlc_leaves'].dropna()
+    if len(valid_mlc) > 0:
+      print(f"\nMLC Configuration:")
+      mlc_counts = df['mlc_leaves'].value_counts()
+      for mlc_leaves, count in mlc_counts.items():
+        print(f"  {int(mlc_leaves)} leaf pairs: {count} plans")
+
+  if 'mlc_types' in df.columns:
+    all_mlc_types = set()
+    for mlc_types_str in df['mlc_types'].dropna():
+      all_mlc_types.update(mlc_types_str.split(','))
+    if all_mlc_types:
+      print(f"\nMLC Types: {', '.join(sorted(all_mlc_types))}")
+
+  if 'mlc_leaf_widths_mm' in df.columns:
+    all_widths = set()
+    for widths_str in df['mlc_leaf_widths_mm'].dropna():
+      all_widths.update(widths_str.split(','))
+    if all_widths:
+      print(f"\nMLC Leaf Widths: {', '.join(sorted(all_widths))} mm")
+
+  # Monitor Units information
+  if 'total_monitor_units' in df.columns:
+    valid_mu = df['total_monitor_units'].dropna()
+    if len(valid_mu) > 0:
+      print(f"\nMonitor Units (MU):")
+      print(f"  Mean total MU: {valid_mu.mean():.1f}")
+      print(f"  Median total MU: {valid_mu.median():.1f}")
+      print(f"  Range: {valid_mu.min():.1f} - {valid_mu.max():.1f}")
+
+  if 'mean_mu_per_beam' in df.columns:
+    valid_mu_per_beam = df['mean_mu_per_beam'].dropna()
+    if len(valid_mu_per_beam) > 0:
+      print(f"\nMean MU per Beam:")
+      print(f"  Mean: {valid_mu_per_beam.mean():.1f}")
+      print(f"  Median: {valid_mu_per_beam.median():.1f}")
+      print(f"  Range: {valid_mu_per_beam.min():.1f} - {valid_mu_per_beam.max():.1f}")
 
   print(f"\n{'='*80}")
   print(f"✅ Metadata extraction complete!")
