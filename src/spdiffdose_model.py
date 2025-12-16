@@ -390,7 +390,7 @@ class EncoderStage(nn.Module):
 
 
 class SwinEncoderStage(nn.Module):
-  """Encoder stage with SwinTransformer blocks."""
+  """Encoder stage with SwinTransformer blocks with optional timestep conditioning."""
 
   def __init__(self, in_channels, out_channels, time_emb_dim, num_blocks=3, window_size=7, num_heads=8):
     super().__init__()
@@ -401,6 +401,8 @@ class SwinEncoderStage(nn.Module):
       self.channel_adjust = nn.Identity()
 
     self.blocks = nn.ModuleList()
+    self.time_emb_projs = nn.ModuleList() if time_emb_dim is not None else None
+
     for i in range(num_blocks):
       # Alternate between W-MSA and SW-MSA
       shift_size = 0 if (i % 2 == 0) else window_size // 2
@@ -413,9 +415,25 @@ class SwinEncoderStage(nn.Module):
         )
       )
 
+      # Add timestep conditioning projection for each block (for denoising network)
+      if time_emb_dim is not None:
+        self.time_emb_projs.append(nn.Linear(time_emb_dim, out_channels * 2))
+
   def forward(self, x, time_emb):
     x = self.channel_adjust(x)
-    for block in self.blocks:
+
+    for i, block in enumerate(self.blocks):
+      # Apply timestep conditioning via adaptive group norm (scale and shift)
+      if time_emb is not None and self.time_emb_projs is not None:
+        # Project time embedding to get scale and shift parameters
+        t_emb = self.time_emb_projs[i](time_emb)
+        # Reshape for broadcasting: (B, C*2) -> (B, C*2, 1, 1)
+        while len(t_emb.shape) < len(x.shape):
+          t_emb = t_emb[..., None]
+        scale, shift = t_emb.chunk(2, dim=1)
+        # Apply adaptive modulation before the Swin block
+        x = x * (1 + scale) + shift
+
       x = block(x)
     return x
 
