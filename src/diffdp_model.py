@@ -443,9 +443,10 @@ class NoisePredictor(nn.Module):
     for level in range(6):
       # Apply all ResBlocks in this encoder stage
       for block_idx, block in enumerate(self.encoder_stages[level]):
-        # Apply timestep conditioning before each ResBlock
-        h = self._apply_time_conditioning(h, time_emb, self.time_projs_encoder[level][block_idx])
+        # Apply ResBlock first
         h = block(h)
+        # Then apply timestep conditioning (with correct output channels)
+        h = self._apply_time_conditioning(h, time_emb, self.time_projs_encoder[level][block_idx])
 
       # Fuse with structural features (only for first 5 levels)
       if level < 5:
@@ -468,12 +469,12 @@ class NoisePredictor(nn.Module):
 
     # Bottleneck
     for i, block in enumerate(self.bottleneck):
+      h = block(h)
+      # Apply timestep conditioning after ResBlocks (not after self-attention)
       if isinstance(block, ResBlock):
-        # Apply timestep conditioning for ResBlocks
-        idx = i // 2  # 0 for first ResBlock, 1 for second
+        idx = i // 2  # 0 for first ResBlock, 1 for second (skipping self-attention at idx 1)
         if idx < len(self.time_projs_bottleneck):
           h = self._apply_time_conditioning(h, time_emb, self.time_projs_bottleneck[idx])
-      h = block(h)
 
     # Decoder with skip connections
     for level in range(5):
@@ -487,8 +488,10 @@ class NoisePredictor(nn.Module):
 
       # Multiple ResBlocks with timestep conditioning
       for i, res_block in enumerate(self.decoder_stages[level]):
-        h = self._apply_time_conditioning(h, time_emb, self.time_projs_decoder[level][i])
+        # Apply ResBlock first
         h = res_block(h)
+        # Then apply timestep conditioning (with correct output channels)
+        h = self._apply_time_conditioning(h, time_emb, self.time_projs_decoder[level][i])
 
     # Output
     h = self.norm_out(h)
