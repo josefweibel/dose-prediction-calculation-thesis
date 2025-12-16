@@ -5,6 +5,7 @@ from beamdiff_model import build_beamdiff
 from spdiffdose_model import build_spdiffdose
 from dosediff_model import build_dosediff
 from deeplabv3plus_model import build_deeplabv3plus
+from diffdp_model import build_diffdp
 
 
 def build_model(model_config, structure_selector):
@@ -31,6 +32,9 @@ def build_model(model_config, structure_selector):
   elif 'dosediff' in model_config:
     dosediff_config = model_config['dosediff']
     model = build_dosediff(dosediff_config, structure_selector)
+  elif 'diffdp' in model_config:
+    diffdp_config = model_config['diffdp']
+    model = build_diffdp(diffdp_config, structure_selector)
   elif 'deeplabv3plus' in model_config:
     model = build_deeplabv3plus(model_config, structure_selector)
   elif 'mednext' in model_config:
