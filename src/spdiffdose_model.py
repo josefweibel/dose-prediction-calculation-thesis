@@ -213,15 +213,18 @@ class SwinTransformerBlock(nn.Module):
 
     # Reverse cyclic shift
     if self.shift_size > 0:
-      x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+      attn_out = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
     else:
-      x = shifted_x
+      attn_out = shifted_x
 
     # Remove padding
     if pad_r > 0 or pad_b > 0:
-      x = x[:, :H, :W, :].contiguous()
+      attn_out = attn_out[:, :H, :W, :].contiguous()
 
-    # FFN
+    # Add residual connection after attention (CRITICAL FIX)
+    x = x + attn_out
+
+    # FFN with residual
     x = x + self.mlp(self.norm2(x))
 
     # Reshape back to (B, C, H, W)
@@ -302,6 +305,8 @@ class Projector(nn.Module):
         Output features (B, C, H, W)
     """
     B, C, H, W = x.shape
+    identity = x  # Save for residual connection
+
     # Reshape to (B, H, W, C) for linear layers
     x = x.permute(0, 2, 3, 1).contiguous()
 
@@ -312,7 +317,9 @@ class Projector(nn.Module):
 
     # Reshape back to (B, C, H, W)
     x = x.permute(0, 3, 1, 2).contiguous()
-    return x
+
+    # Add residual connection (CRITICAL FIX)
+    return x + identity
 
 
 class CrossAttentionFusion(nn.Module):
@@ -367,7 +374,9 @@ class CrossAttentionFusion(nn.Module):
     # Reshape back to (B, C, H, W)
     out = out.transpose(1, 2).reshape(B, C, H, W)
 
-    return out
+    # Add residual connection from noise features (CRITICAL FIX)
+    # Preserves gradient flow and original noise information
+    return out + x_noise
 
 
 class EncoderStage(nn.Module):
@@ -423,7 +432,11 @@ class SwinEncoderStage(nn.Module):
     x = self.channel_adjust(x)
 
     for i, block in enumerate(self.blocks):
-      # Apply timestep conditioning via adaptive group norm (scale and shift)
+      # Apply Swin block (which includes LayerNorm internally)
+      x = block(x)
+
+      # Apply timestep conditioning AFTER the block (FIXED)
+      # This way it's not erased by internal LayerNorm
       if time_emb is not None and self.time_emb_projs is not None:
         # Project time embedding to get scale and shift parameters
         t_emb = self.time_emb_projs[i](time_emb)
@@ -431,10 +444,9 @@ class SwinEncoderStage(nn.Module):
         while len(t_emb.shape) < len(x.shape):
           t_emb = t_emb[..., None]
         scale, shift = t_emb.chunk(2, dim=1)
-        # Apply adaptive modulation before the Swin block
+        # Apply adaptive modulation after the block output
         x = x * (1 + scale) + shift
 
-      x = block(x)
     return x
 
 
@@ -695,14 +707,16 @@ class DenoisingNetwork(nn.Module):
 
     # Middle blocks with timestep conditioning
     for i, block in enumerate(self.middle):
-      # Apply timestep conditioning
+      # Apply Swin block first (contains LayerNorm)
+      h = block(h)
+
+      # Apply timestep conditioning AFTER the block (FIXED)
+      # This way it's not erased by internal LayerNorm
       t_emb_proj = self.middle_time_projs[i](t_emb)
       while len(t_emb_proj.shape) < len(h.shape):
         t_emb_proj = t_emb_proj[..., None]
       scale, shift = t_emb_proj.chunk(2, dim=1)
       h = h * (1 + scale) + shift
-
-      h = block(h)
 
     # Decoder - upsample to match encoder spatial dimensions
     for level in range(len(self.decoder_stages)):
