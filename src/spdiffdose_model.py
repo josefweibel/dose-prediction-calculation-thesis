@@ -186,6 +186,9 @@ class SwinTransformerBlock(nn.Module):
     # Reshape to (B, H, W, C) for window attention
     x = x.permute(0, 2, 3, 1).contiguous()
 
+    # Save original unpadded x for residual connection
+    x_orig = x
+
     # Pad if needed
     pad_l = pad_t = 0
     pad_r = (self.window_size - W % self.window_size) % self.window_size
@@ -222,7 +225,8 @@ class SwinTransformerBlock(nn.Module):
       attn_out = attn_out[:, :H, :W, :].contiguous()
 
     # Add residual connection after attention (CRITICAL FIX)
-    x = x + attn_out
+    # Use original unpadded x for proper shape matching
+    x = x_orig + attn_out
 
     # FFN with residual
     x = x + self.mlp(self.norm2(x))
