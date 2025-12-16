@@ -328,10 +328,14 @@ class NoisePredictor(nn.Module):
       nn.Linear(time_embed_dim, time_embed_dim)
     )
 
-    # Time embedding projections for each encoder level (for adaptive group norm)
-    self.time_projs_encoder = nn.ModuleList([
-      nn.Linear(time_embed_dim, ch * 2) for ch in channels
-    ])
+    # Time embedding projections for each encoder level
+    # We need one projection per ResBlock per level
+    self.time_projs_encoder = nn.ModuleList()
+    for i in range(6):
+      level_projs = nn.ModuleList([
+        nn.Linear(time_embed_dim, channels[i] * 2) for _ in range(num_blocks_per_level)
+      ])
+      self.time_projs_encoder.append(level_projs)
 
     # Initial convolution for noisy dose
     self.conv_in = nn.Conv2d(1, base_channels, kernel_size=3, padding=1)
@@ -438,9 +442,9 @@ class NoisePredictor(nn.Module):
 
     for level in range(6):
       # Apply all ResBlocks in this encoder stage
-      for block in self.encoder_stages[level]:
+      for block_idx, block in enumerate(self.encoder_stages[level]):
         # Apply timestep conditioning before each ResBlock
-        h = self._apply_time_conditioning(h, time_emb, self.time_projs_encoder[level])
+        h = self._apply_time_conditioning(h, time_emb, self.time_projs_encoder[level][block_idx])
         h = block(h)
 
       # Fuse with structural features (only for first 5 levels)
