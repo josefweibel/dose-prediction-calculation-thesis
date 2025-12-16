@@ -611,11 +611,12 @@ class DenoisingNetwork(nn.Module):
       if use_projector:
         self.projectors.append(Projector(ch))
 
-    # Middle blocks (2 Swin blocks)
-    self.middle = nn.ModuleList([
-      SwinTransformerBlock(channels[-1], num_heads, window_size),
-      SwinTransformerBlock(channels[-1], num_heads, window_size)
-    ])
+    # Middle blocks (2 Swin blocks with timestep conditioning)
+    self.middle = nn.ModuleList()
+    self.middle_time_projs = nn.ModuleList()
+    for _ in range(2):
+      self.middle.append(SwinTransformerBlock(channels[-1], num_heads, window_size))
+      self.middle_time_projs.append(nn.Linear(time_embed_dim, channels[-1] * 2))
 
     # Decoder stages
     self.decoder_stages = nn.ModuleList()
@@ -692,8 +693,15 @@ class DenoisingNetwork(nn.Module):
       # Downsample
       h = self.downsamples[level](h)
 
-    # Middle blocks
-    for block in self.middle:
+    # Middle blocks with timestep conditioning
+    for i, block in enumerate(self.middle):
+      # Apply timestep conditioning
+      t_emb_proj = self.middle_time_projs[i](t_emb)
+      while len(t_emb_proj.shape) < len(h.shape):
+        t_emb_proj = t_emb_proj[..., None]
+      scale, shift = t_emb_proj.chunk(2, dim=1)
+      h = h * (1 + scale) + shift
+
       h = block(h)
 
     # Decoder - upsample to match encoder spatial dimensions

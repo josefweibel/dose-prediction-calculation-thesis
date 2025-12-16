@@ -242,18 +242,63 @@ class Trainer:
         with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, condition)
 
+        # Debug: Check for SPDiffDose models
+        if 'spdiffdose' in self.config and batch_idx % 100 == 0 and self.is_main_process:
+          with torch.no_grad():
+            # Get a prediction to check output statistics
+            if hasattr(self.model, 'module'):
+              # DDP wrapped
+              trainer_module = self.model.module
+            else:
+              trainer_module = self.model
+
+            # Get noise prediction
+            t_sample = torch.randint(trainer_module.T, size=(1,), device=target.device)
+            noise_sample = torch.randn_like(target[:1])
+            sqrt_alphas_bar_t = trainer_module.sqrt_alphas_bar[t_sample].view(1, 1, 1, 1)
+            sqrt_one_minus_alphas_bar_t = trainer_module.sqrt_one_minus_alphas_bar[t_sample].view(1, 1, 1, 1)
+            x_t_sample = sqrt_alphas_bar_t * target[:1] + sqrt_one_minus_alphas_bar_t * noise_sample
+
+            noise_pred_sample = trainer_module.model(x_t_sample, condition[:1], t_sample, trainer_module.cache)
+
+            print(f"\n[DEBUG] Batch {batch_idx}, Epoch {self.epoch}")
+            print(f"  Loss: {loss.item():.6f}")
+            print(f"  Noise pred stats: mean={noise_pred_sample.mean().item():.6f}, "
+                  f"std={noise_pred_sample.std().item():.6f}, "
+                  f"min={noise_pred_sample.min().item():.6f}, "
+                  f"max={noise_pred_sample.max().item():.6f}")
+            print(f"  Target noise stats: mean={noise_sample.mean().item():.6f}, "
+                  f"std={noise_sample.std().item():.6f}")
+            print(f"  Condition stats: mean={condition.mean().item():.6f}, "
+                  f"std={condition.std().item():.6f}")
+            print(f"  Target stats: mean={target.mean().item():.6f}, "
+                  f"std={target.std().item():.6f}")
+
+            # Check output layer weights
+            if hasattr(self.net_model, 'conv_out'):
+              conv_out = self.net_model.conv_out
+              print(f"  Output conv weight stats: mean={conv_out.weight.mean().item():.6f}, "
+                    f"std={conv_out.weight.std().item():.6f}, "
+                    f"absmax={conv_out.weight.abs().max().item():.6f}")
+              print(f"  Output conv bias stats: mean={conv_out.bias.mean().item():.6f}, "
+                    f"std={conv_out.bias.std().item():.6f}")
+
         current_lr = self.optim.param_groups[0]['lr']
 
         if self.scaler is not None:
           self.scaler.scale(loss).backward()
           self.scaler.unscale_(self.optim)
-          torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
+          grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.scaler.step(self.optim)
           self.scaler.update()
         else:
           loss.backward()
-          torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
+          grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
+
+        # Debug: Log gradient norm for SPDiffDose
+        if 'spdiffdose' in self.config and batch_idx % 100 == 0 and self.is_main_process:
+          print(f"  Gradient norm (before clip): {grad_norm.item():.6f}, clip threshold: {self.config['grad_clip']}")
 
         self.lr_scheduler.step()
 
