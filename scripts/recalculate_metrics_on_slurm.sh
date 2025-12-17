@@ -72,7 +72,14 @@ else
   echo "using dataset directly from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET}"
 fi
 
-srun bash -c '
+srun \
+  --ntasks=\${SLURM_NTASKS} \
+  --gpus-per-task=1 \
+  --gpu-bind=single:1 \
+  --export=ALL \
+  bash -c '
+  echo "Task \${SLURM_PROCID} (local \${SLURM_LOCALID}): CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES}"
+
   SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
 
   if [ "${COPY_TO_TMPDIR}" = "true" ]; then
