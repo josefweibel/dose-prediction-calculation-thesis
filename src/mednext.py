@@ -17,9 +17,8 @@ import torch.utils.checkpoint as checkpoint
 import numpy as np
 from typing import Optional
 
-from nnunet_mednext.network_architecture.mednextv1.blocks import MedNeXtBlock, MedNeXtDownBlock, OutBlock
+from nnunet_mednext.network_architecture.mednextv1.blocks import *
 from model_cache import DeepCache
-from mednext_fixed_blocks import MedNeXtUpBlock
 
 
 class MedNeXt(nn.Module):
