@@ -173,23 +173,11 @@ class SwinTransformerBlock(nn.Module):
       x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
 
     # Partition into windows
-    x_windows = self.window_partition(x, self.window_size)  # [B*num_windows, ws_h, ws_w, C] or [B, H, W, C] if single window
-
-    # Handle single window case (when feature map is smaller than window size)
-    is_single_window = (x_windows.shape == x.shape)
-
-    if is_single_window:
-      # Treat entire feature map as one window
-      ws_h, ws_w = H, W
-      x_windows = x_windows.view(B, ws_h * ws_w, C)
-    else:
-      # Get actual window dimensions from partitioned tensor
-      ws_h = x_windows.shape[1]
-      ws_w = x_windows.shape[2]
-      x_windows = x_windows.view(-1, ws_h * ws_w, C)  # [B*num_windows, ws_h*ws_w, C]
+    x_windows, (H_pad, W_pad) = self.window_partition(x, self.window_size)  # [B*num_windows, window_size, window_size, C]
+    x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # [B*num_windows, N, C]
 
     # Window-based multi-head self attention
-    N = ws_h * ws_w
+    N = self.window_size * self.window_size
     qkv = self.qkv(x_windows)  # [B*num_windows, N, 3*C]
     qkv = qkv.reshape(-1, N, 3, self.num_heads, self.head_dim)
     qkv = qkv.permute(2, 0, 3, 1, 4)  # [3, B*num_windows, num_heads, N, head_dim]
@@ -205,11 +193,8 @@ class SwinTransformerBlock(nn.Module):
     x_windows = self.proj(x_windows)
 
     # Merge windows back
-    if is_single_window:
-      x = x_windows.view(B, H, W, C)
-    else:
-      x_windows = x_windows.view(-1, ws_h, ws_w, C)
-      x = self.window_reverse(x_windows, self.window_size, H, W)
+    x_windows = x_windows.view(-1, self.window_size, self.window_size, C)
+    x = self.window_reverse(x_windows, self.window_size, H, W, H_pad, W_pad)
 
     # Reverse cyclic shift
     if self.shift_size > 0:
@@ -229,58 +214,54 @@ class SwinTransformerBlock(nn.Module):
   def window_partition(self, x, window_size):
     """
     Partition input into non-overlapping windows.
-    If H or W is not divisible by window_size, use adaptive window size.
+    If H or W is not divisible by window_size, pad the feature map.
 
     Args:
         x: [B, H, W, C]
         window_size: Window size
     Returns:
-        windows: [B*num_windows, window_size', window_size', C]
+        windows: [B*num_windows, window_size, window_size, C]
+        (H_pad, W_pad): Padded dimensions
     """
     B, H, W, C = x.shape
 
-    # Adaptive window size if needed
-    ws_h = min(window_size, H)
-    ws_w = min(window_size, W)
+    # Calculate padding needed
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
 
-    # If dimensions are not divisible, adjust to use full feature map
-    if H % ws_h != 0:
-      ws_h = H
-    if W % ws_w != 0:
-      ws_w = W
+    # Pad if needed
+    if pad_h > 0 or pad_w > 0:
+      x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))  # Pad right and bottom
 
-    # If window size equals feature map size, treat as single window
-    if ws_h == H and ws_w == W:
-      return x.view(B, H, W, C)
+    H_pad, W_pad = H + pad_h, W + pad_w
 
-    x = x.view(B, H // ws_h, ws_h, W // ws_w, ws_w, C)
-    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, ws_h, ws_w, C)
-    return windows
+    # Partition into windows
+    x = x.view(B, H_pad // window_size, window_size, W_pad // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    return windows, (H_pad, W_pad)
 
-  def window_reverse(self, windows, window_size, H, W):
+  def window_reverse(self, windows, window_size, H, W, H_pad, W_pad):
     """
-    Reverse window partition.
+    Reverse window partition and remove padding.
 
     Args:
-        windows: [B*num_windows, window_size', window_size', C]
-        window_size: Original window size
-        H: Height of image
-        W: Width of image
+        windows: [B*num_windows, window_size, window_size, C]
+        window_size: Window size
+        H: Original height
+        W: Original width
+        H_pad: Padded height
+        W_pad: Padded width
     Returns:
         x: [B, H, W, C]
     """
-    # Get actual window size from windows tensor
-    ws_h = windows.shape[1]
-    ws_w = windows.shape[2]
+    B = int(windows.shape[0] / (H_pad * W_pad / window_size / window_size))
+    x = windows.view(B, H_pad // window_size, W_pad // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H_pad, W_pad, -1)
 
-    # If window size equals feature map size, reverse single window case
-    if ws_h == H and ws_w == W:
-      B = windows.shape[0]
-      return windows.view(B, H, W, -1)
+    # Remove padding
+    if H_pad > H or W_pad > W:
+      x = x[:, :H, :W, :]
 
-    B = int(windows.shape[0] / (H * W / ws_h / ws_w))
-    x = windows.view(B, H // ws_h, W // ws_w, ws_h, ws_w, -1)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
 
 
@@ -665,6 +646,7 @@ class DenoisingNetwork(nn.Module):
 
     # Encoder with fusion
     encoder_features = []
+    encoder_sizes = []  # Track spatial sizes for proper upsampling
 
     for level in range(5):
       stage = self.encoder_stages[level]
@@ -691,6 +673,7 @@ class DenoisingNetwork(nn.Module):
 
       # Store for skip connections (before downsampling)
       encoder_features.append(h)
+      encoder_sizes.append(h.shape[2:])  # Store (H, W)
 
       # Downsample for next level
       if level < 4:  # Don't downsample after last encoder level
@@ -704,6 +687,11 @@ class DenoisingNetwork(nn.Module):
     for level in range(5):
       # Skip connection from encoder at same resolution
       skip = encoder_features[4 - level]
+      target_size = encoder_sizes[4 - level]
+
+      # Resize h to match skip if needed (handle odd-sized feature maps)
+      if h.shape[2:] != target_size:
+        h = F.interpolate(h, size=target_size, mode='bilinear', align_corners=False)
 
       # Add skip connection BEFORE upsampling (UNet-style)
       h = h + skip
@@ -718,7 +706,12 @@ class DenoisingNetwork(nn.Module):
 
       # Upsample to next resolution (except at last level)
       if level < 4:
+        # Get target size for next level
+        next_target_size = encoder_sizes[4 - level - 1]
         h = self.decoder_ups[level](h)
+        # Resize to exact target size if needed
+        if h.shape[2:] != next_target_size:
+          h = F.interpolate(h, size=next_target_size, mode='bilinear', align_corners=False)
 
     # Output
     h = self.norm_out(h)
