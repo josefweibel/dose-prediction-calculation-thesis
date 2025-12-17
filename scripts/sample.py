@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 import signal
 import sys
 import atexit
+from datetime import timedelta
 
 from config import read_sampling_config
 from sampler import Sampler
@@ -62,6 +63,7 @@ if __name__ == '__main__':
       rank=rank,
       world_size=world_size,
       device_id=0,
+      timeout=timedelta(minutes=30),
     )
 
     dist.barrier()
