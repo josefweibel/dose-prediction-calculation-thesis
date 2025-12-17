@@ -71,7 +71,7 @@ else
 fi
 
 srun \
-  --ntasks=${SLURM_NTASKS} \
+  --ntasks=\${SLURM_NTASKS} \
   --gpus-per-task=1 \
   --gpu-bind=single:1 \
   --export=ALL \
