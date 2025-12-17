@@ -19,7 +19,8 @@ diffusion:
   beta_T: 0.02
   T: 1000
 
-spdiffdose: {}
+spdiffdose:
+  cross_attention_levels: [3, 4]
 
 conditioning:
   types:
@@ -33,7 +34,7 @@ conditioning:
 mixed_precision: false
 num_workers: 4
 prefetch_factor: 12
-prefetch_on_gpu: true 
+prefetch_on_gpu: true
 
 grad_clip: 0.5
 ema_decay: 0.9999
