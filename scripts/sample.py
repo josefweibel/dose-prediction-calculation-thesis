@@ -52,14 +52,16 @@ if __name__ == '__main__':
     print(f"Distributed sampling: rank {rank}, local_rank {local_rank}, world_size {world_size}", flush=True)
     print(f"{rank} tcp://{master_addr}:{master_port}", flush=True)
 
-    torch.cuda.set_device(local_rank)
+    # With --gpus-per-task, SLURM sets CUDA_VISIBLE_DEVICES for each task
+    # Each task sees only its assigned GPU(s), so we use device 0
+    torch.cuda.set_device(0)
 
     dist.init_process_group(
       backend="nccl",
       init_method=f"tcp://{master_addr}:{master_port}",
       rank=rank,
       world_size=world_size,
-      device_id=local_rank,
+      device_id=0,
     )
 
     dist.barrier()

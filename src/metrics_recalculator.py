@@ -33,7 +33,7 @@ class MetricsRecalculator:
 
     self.dataset = create_gdphmm_dataset(self.model_config, data_split)
 
-    self.device = detect_device(local_rank)
+    self.device = detect_device()
     self.metrics = build_slice_metrics(self.dataset, self.device)
 
     self.samples_path = SAMPLES_PATH / model_name / sampling_name / f'{data_split}_{epoch}'

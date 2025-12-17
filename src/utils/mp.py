@@ -1,10 +1,8 @@
 import torch
 
-def detect_device(local_rank):
-  if local_rank is not None:
-    return torch.device(f"cuda:{local_rank}")
-  elif torch.cuda.is_available():
-    return torch.device("cuda")
+def detect_device():
+  if torch.cuda.is_available():
+    return torch.device("cuda:0")
   elif torch.backends.mps.is_available():
     return torch.device("mps")
   else:

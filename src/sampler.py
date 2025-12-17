@@ -34,7 +34,7 @@ class Sampler:
     self.is_distributed = rank is not None and world_size is not None
     self.is_main_process = not self.is_distributed or rank == 0
 
-    self.device = detect_device(local_rank)
+    self.device = detect_device()
 
     self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None)
 

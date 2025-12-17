@@ -28,10 +28,9 @@ sbatch <<EOF
 #SBATCH -q job_gpu_caim
 #SBATCH --account=invest
 #SBATCH --time 36:00:00
-#SBATCH --mem 180G
-#SBATCH --gpus h100:2
+#SBATCH --mem-per-cpu=11G
 #SBATCH --ntasks=2
-#SBATCH --gpus-per-task=1
+#SBATCH --gpus-per-task=h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${CONFIG_NAME}-%j.log
 #SBATCH --job-name=${CONFIG_NAME}

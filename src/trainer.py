@@ -93,7 +93,7 @@ class Trainer:
     self.is_distributed = rank is not None and world_size is not None
     self.is_main_process = not self.is_distributed or rank == 0
 
-    self.device = detect_device(local_rank)
+    self.device = detect_device()
 
     # Training dataset uses only conditioning groups
     conditioning_groups = self.config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
@@ -170,8 +170,8 @@ class Trainer:
     if self.is_distributed:
       self.model = DDP(
         self.model,
-        device_ids=[self.local_rank],
-        output_device=self.local_rank,
+        device_ids=[0] if self.device.type == 'cuda' else None,
+        output_device=0 if self.device.type == 'cuda' else None,
         find_unused_parameters=False,
       )
 
