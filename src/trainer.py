@@ -247,17 +247,13 @@ class Trainer:
         if self.scaler is not None:
           self.scaler.scale(loss).backward()
           self.scaler.unscale_(self.optim)
-          grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
+          torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.scaler.step(self.optim)
           self.scaler.update()
         else:
           loss.backward()
-          grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
+          torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
-
-        # Debug: Log gradient norm for SPDiffDose
-        if 'spdiffdose' in self.config and batch_idx % 100 == 0 and self.is_main_process:
-          print(f"  Gradient norm (before clip): {grad_norm.item():.6f}, clip threshold: {self.config['grad_clip']}")
 
         self.lr_scheduler.step()
 
