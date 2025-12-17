@@ -38,11 +38,7 @@ def build_model(model_config, structure_selector):
   elif 'deeplabv3plus' in model_config:
     model = build_deeplabv3plus(model_config, structure_selector)
   elif 'mednext' in model_config:
-    model = build_mednext_model(
-      model_config,
-      n_input_channels,
-      for_diffusion='diffusion' in model_config,
-    )
+    model = build_mednext_model(model_config, structure_selector)
   else:
     model = MambaUnet(
       img_size=model_config['data']['img_size'],
