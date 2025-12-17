@@ -31,7 +31,7 @@ sbatch <<EOF
 #SBATCH --mem 180G
 #SBATCH --gpus h100:2
 #SBATCH --ntasks=2
-#SBATCH --ntasks-per-node=2
+#SBATCH --gpus-per-task=1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/${CONFIG_NAME}-%j.log
 #SBATCH --job-name=${CONFIG_NAME}
