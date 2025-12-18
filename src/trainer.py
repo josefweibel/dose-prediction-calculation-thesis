@@ -58,7 +58,7 @@ class DiffusionModelTrainerModule(nn.Module):
     return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
-class MedNeXtUnetTrainerModule(nn.Module):
+class UnetTrainerModule(nn.Module):
   def __init__(self, model):
     super().__init__()
 
@@ -163,7 +163,7 @@ class Trainer:
       alpha = self.config['c3d'].get('alpha', 0.5)
       self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
     else:
-      self.model = MedNeXtUnetTrainerModule(self.net_model).to(self.device)
+      self.model = UnetTrainerModule(self.net_model).to(self.device)
 
     self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
