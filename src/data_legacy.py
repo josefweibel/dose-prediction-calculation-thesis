@@ -31,6 +31,14 @@ GDPHMM_OAR = [
 # Version 2: Remove last three values (Pituitary, OralCavity, Submandibular)
 GDPHMM_OAR_V2 = GDPHMM_OAR[:-3]
 
+GDPHMM_OAR_V3 = {
+  'Cochlea_L', 'Cochlea_R', 'Eyes', 'Lens_L', 'Lens_R', 'OpticNerve_L', 'OpticNerve_R',
+  'Chiasm', 'Brain', 'BrainStem_03', 'Esophagus', # dropped 'LacrimalGlands', 'BrachialPlexus',
+  'Lips', 'Lungs', 'Trachea', 'Posterior_Neck', 'Shoulders', 'Larynx-PTV', 'Mandible-PTV',
+  'OCavity-PTV', 'ParotidCon-PTV', 'ParotidIps-PTV', 'Parotids-PTV', 'PharConst-PTV',
+  'Submand-PTV', 'SubmandL-PTV', 'SubmandR-PTV', 'Thyroid-PTV', 'SpinalCord_05',
+}
+
 GDPHMM_PTV = {
   70: 'PTV70',
   63: 'PTV63',

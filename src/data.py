@@ -24,6 +24,14 @@ GDPHMM_OAR = [
 # Version 2: Remove last three values (Pituitary, OralCavity, Submandibular)
 GDPHMM_OAR_V2 = GDPHMM_OAR[:-3]
 
+GDPHMM_OAR_V3 = [
+  'Cochlea_L', 'Cochlea_R', 'Eyes', 'Lens_L', 'Lens_R', 'OpticNerve_L', 'OpticNerve_R',
+  'Chiasm', 'Brain', 'BrainStem_03', 'Esophagus', # dropped 'LacrimalGlands', 'BrachialPlexus',
+  'Lips', 'Lungs', 'Trachea', 'Posterior_Neck', 'Shoulders', 'Larynx-PTV', 'Mandible-PTV',
+  'OCavity-PTV', 'ParotidCon-PTV', 'ParotidIps-PTV', 'Parotids-PTV', 'PharConst-PTV',
+  'Submand-PTV', 'SubmandL-PTV', 'SubmandR-PTV', 'Thyroid-PTV', 'SpinalCord_05',
+]
+
 GDPHMM_PTV = {
   70: 'PTV70',
   63: 'PTV63',
@@ -59,6 +67,8 @@ class StructureSelector:
     - 'oar_sdm': OAR signed distance maps (33 channels)
     - 'oar_v2': OAR binary masks without last 3 (30 channels)
     - 'oar_v2_sdm': OAR signed distance maps without last 3 (30 channels)
+    - 'oar_v3': OAR binary masks without last 3 and 2 unused (28 channels)
+    - 'oar_v3_sdm': OAR signed distance maps without last 3 and 2 unused (28 channels)
     - 'ptv_sdm': PTV signed distance map (1 channel)
     - 'beam_plate': Beam configuration plate (1 channel)
     - 'angle_plate': Angle configuration plate (1 channel)
@@ -74,6 +84,8 @@ class StructureSelector:
     'oar_sdm': len(GDPHMM_OAR),  # 33
     'oar_v2': len(GDPHMM_OAR_V2),  # 30 (without last 3)
     'oar_v2_sdm': len(GDPHMM_OAR_V2),  # 30 (without last 3)
+    'oar_v3': len(GDPHMM_OAR_V3),  # 28 (new version)
+    'oar_v3_sdm': len(GDPHMM_OAR_V3), # 28 (new version)
     'ptv_sdm': 1,
     'beam_plate': 1,  # beam configuration plate
     'angle_plate': 1,  # angle configuration plate (3D around isocenter)
@@ -140,6 +152,12 @@ class StructureSelector:
       elif group == 'oar_v2_sdm':
         # Remove last 3 channels from oar_sdm
         components.append(data['oar_sdm'][:-3])
+      elif group == 'oar_v3':
+        # Remove last 3 and indices 8 and 9 from oar
+        components.append(data['oar'][:-3][[i for i in range(data['oar'].shape[0]) if i not in (8, 9)]])
+      elif group == 'oar_v3_sdm':
+        # Remove last 3 and indices 8 and 9 from oar_sdm
+        components.append(data['oar_sdm'][:-3][[i for i in range(data['oar_sdm'].shape[0]) if i not in (8, 9)]])
       elif group == 'ptv_sdm':
         components.append(data['ptv_sdm'])
       elif group == 'beam_plate':
@@ -192,20 +210,22 @@ class StructureSelector:
     Get the channel index for a specific OAR within the OAR group.
 
     Args:
-      oar_name: Name of the OAR (from GDPHMM_OAR or GDPHMM_OAR_V2 list)
+      oar_name: Name of the OAR
 
     Returns:
       Global channel index in the concatenated structure tensor
     """
-    # Support both 'oar' and 'oar_v2' groups
-    if 'oar_v2' in self._index_map:
+    if 'oar_v3' in self._index_map:
+      oar_idx = GDPHMM_OAR_V3.index(oar_name)
+      oar_start, _ = self._index_map['oar_v3']
+    elif 'oar_v2' in self._index_map:
       oar_idx = GDPHMM_OAR_V2.index(oar_name)
       oar_start, _ = self._index_map['oar_v2']
     elif 'oar' in self._index_map:
       oar_idx = GDPHMM_OAR.index(oar_name)
       oar_start, _ = self._index_map['oar']
     else:
-      raise ValueError("Neither 'oar' nor 'oar_v2' group in selected groups")
+      raise ValueError("Neither 'oar', 'oar_v2' nor 'oar_v3' group in selected groups")
 
     return oar_start + oar_idx
 
@@ -214,20 +234,22 @@ class StructureSelector:
     Get the channel index for a specific OAR SDM within the OAR SDM group.
 
     Args:
-      oar_name: Name of the OAR (from GDPHMM_OAR or GDPHMM_OAR_V2 list)
+      oar_name: Name of the OAR
 
     Returns:
       Global channel index in the concatenated structure tensor
     """
-    # Support both 'oar_sdm' and 'oar_v2_sdm' groups
-    if 'oar_v2_sdm' in self._index_map:
+    if 'oar_v3_sdm' in self._index_map:
+      oar_idx = GDPHMM_OAR_V3.index(oar_name)
+      oar_sdm_start, _ = self._index_map['oar_v3_sdm']
+    elif 'oar_v2_sdm' in self._index_map:
       oar_idx = GDPHMM_OAR_V2.index(oar_name)
       oar_sdm_start, _ = self._index_map['oar_v2_sdm']
     elif 'oar_sdm' in self._index_map:
       oar_idx = GDPHMM_OAR.index(oar_name)
       oar_sdm_start, _ = self._index_map['oar_sdm']
     else:
-      raise ValueError("Neither 'oar_sdm' nor 'oar_v2_sdm' group in selected groups")
+      raise ValueError("Neither 'oar_sdm', 'oar_v2_sdm' nor 'oar_v3_sdm' group in selected groups")
 
     return oar_sdm_start + oar_idx
 
@@ -305,20 +327,22 @@ class StructureSelector:
         - (C, H, W): Unbatched 2D slice
         - (B, C, H, W): Batched 2D slices
         - (B, C, H, W, D): Batched 3D volumes
-      oar_name: Name of the OAR (from GDPHMM_OAR or GDPHMM_OAR_V2 list)
+      oar_name: Name of the OAR
 
     Returns:
       OAR channel: (1, H, W), (B, 1, H, W), or (B, 1, H, W, D)
     """
-    # Support both 'oar' and 'oar_v2' groups
-    if 'oar_v2' in self._index_map:
+    if 'oar_v3' in self._index_map:
+      oar_idx = GDPHMM_OAR_V3.index(oar_name)
+      oar_start, _ = self._index_map['oar_v3']
+    elif 'oar_v2' in self._index_map:
       oar_idx = GDPHMM_OAR_V2.index(oar_name)
       oar_start, _ = self._index_map['oar_v2']
     elif 'oar' in self._index_map:
       oar_idx = GDPHMM_OAR.index(oar_name)
       oar_start, _ = self._index_map['oar']
     else:
-      raise ValueError("Neither 'oar' nor 'oar_v2' group in selected groups")
+      raise ValueError("Neither 'oar', 'oar_v2' nor 'oar_v3' group in selected groups")
 
     global_idx = oar_start + oar_idx
 

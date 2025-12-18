@@ -29,7 +29,7 @@ from metrics import (
   PerOrganConstraintCompliance,
 )
 from model_sampler import build_sampler
-from data import GDPHMM_OAR_V2, GDPHMM_OAR
+from data import GDPHMM_OAR_V3
 from constraints import FractionationType, ConstraintGrade
 import numpy as np
 
@@ -59,7 +59,7 @@ def compute_metrics(metrics, preds, target, structure, dataset):
     if isinstance(metric, (ConstraintSatisfactionRate, ConstraintAgreementScore, PerOrganConstraintCompliance)):
       # Build organ masks dictionary for constraint metrics
       organ_masks = {}
-      for oar_name in GDPHMM_OAR_V2:
+      for oar_name in GDPHMM_OAR_V3:
         oar_index = dataset.selector.get_oar_index(oar_name)
         organ_masks[oar_name] = structure[:, oar_index]  # (batch_size, H, W) or (batch_size, H, W, D)
       metric.update(preds, target, organ_masks)
@@ -149,7 +149,7 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
     ptv_start, _ = dataset.selector.get_channel_indices('ptv')
     regions = [('PTV', ptv_start)]
 
-    for oar_name in GDPHMM_OAR_V2:
+    for oar_name in GDPHMM_OAR_V3:
       oar_index = dataset.selector.get_oar_index(oar_name)
       regions.append((oar_name, oar_index))
 
@@ -174,36 +174,36 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
 
   # Add constraint-based metrics
   metrics['csr_all'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_mandatory'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     grade_filter=ConstraintGrade.MANDATORY,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_recommended'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     grade_filter=ConstraintGrade.RECOMMENDED,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_optimal'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     grade_filter=ConstraintGrade.OPTIMAL,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_acceptable'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     grade_filter=ConstraintGrade.ACCEPTABLE,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['agreement'] = ConstraintAgreementScore(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
@@ -269,7 +269,7 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     ptv_start, _ = dataset.selector.get_channel_indices('ptv')
     regions = [('PTV', ptv_start)]
 
-    for oar_name in GDPHMM_OAR_V2:
+    for oar_name in GDPHMM_OAR_V3:
       oar_index = dataset.selector.get_oar_index(oar_name)
       regions.append((oar_name, oar_index))
 
@@ -293,18 +293,18 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
 
   # Add constraint-based metrics
   metrics['vol_csr_all'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['vol_csr_mandatory'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     grade_filter=ConstraintGrade.MANDATORY,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['vol_agreement'] = ConstraintAgreementScore(
-    organ_names=GDPHMM_OAR_V2,
+    organ_names=GDPHMM_OAR_V3,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
