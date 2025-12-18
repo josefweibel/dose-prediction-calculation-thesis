@@ -11,8 +11,8 @@ All transformations from the original dataset are applied:
   - PTV: dose levels {0, 56, 63, 70}, stored as uint8 (saves 75% vs float32)
   - Body: stored as uint8
   - OAR: binary masks from SDM, stored as uint8 (filtered per patient using Pat_Obj_DICT.json)
-  - OAR SDM: signed distance maps, stored as float16 (saves 50% space)
-  - PTV SDM: signed distance map, stored as float16 (saves 50% space)
+  - OAR SDM: clipped to [0, 40] mm, normalized to [0, 1], stored as float16 (saves 50% space)
+  - PTV SDM: clipped to [-50, 50] mm, normalized to [-1, 1], stored as float16 (saves 50% space)
 
 IMPORTANT: SDMs are computed AFTER padding to ensure correct distance values at edges.
 If SDMs were computed before padding, the padded regions would have incorrect 0 values.
@@ -153,6 +153,9 @@ def compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacin
   """
   Compute signed distance maps for OAR and PTV masks.
 
+  OAR SDMs are clipped to [0, 40] mm and normalized to [0, 1].
+  PTV SDMs are clipped to [-50, 50] mm and normalized to [-1, 1].
+
   Args:
     oar_vol: (N_OAR, H, W, D) - binary masks for organs at risk
     ptv_vol: (H, W, D) - PTV mask with dose values
@@ -162,16 +165,21 @@ def compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacin
     voxel_spacing: tuple of (sx, sy, sz) - voxel spacing in mm
 
   Returns:
-    oar_sdm: (N_OAR, H, W, D) float32 - SDMs for each OAR
-    ptv_sdm: (H, W, D) float32 - SDM for combined PTV
-    ptv70_sdm: (H, W, D) float32 - SDM for PTV70
-    ptv63_sdm: (H, W, D) float32 - SDM for PTV63
-    ptv56_sdm: (H, W, D) float32 - SDM for PTV56
+    oar_sdm: (N_OAR, H, W, D) float32 - clipped and normalized SDMs for each OAR [0, 1]
+    ptv_sdm: (H, W, D) float32 - clipped and normalized SDM for combined PTV [-1, 1]
+    ptv70_sdm: (H, W, D) float32 - clipped and normalized SDM for PTV70 [-1, 1]
+    ptv63_sdm: (H, W, D) float32 - clipped and normalized SDM for PTV63 [-1, 1]
+    ptv56_sdm: (H, W, D) float32 - clipped and normalized SDM for PTV56 [-1, 1]
   """
+  # Compute raw OAR SDMs
   oar_sdm = np.stack([
     compute_sdm(oar_vol[i], voxel_spacing)
     for i in range(oar_vol.shape[0])
   ], axis=0)
+
+  # Clip OAR SDMs to [0, 40] mm and normalize to [0, 1]
+  oar_sdm = np.clip(oar_sdm, 0, 40)
+  oar_sdm = oar_sdm / 40.0
 
   ptv_binary = (ptv_vol > 0).astype(np.uint8)
   ptv_sdm = compute_sdm(ptv_binary, voxel_spacing)
@@ -180,6 +188,19 @@ def compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacin
   ptv70_sdm = compute_sdm(ptv70_vol, voxel_spacing)
   ptv63_sdm = compute_sdm(ptv63_vol, voxel_spacing)
   ptv56_sdm = compute_sdm(ptv56_vol, voxel_spacing)
+
+  # Clip PTV SDMs to [-50, 50] mm and normalize to [-1, 1]
+  ptv_sdm = np.clip(ptv_sdm, -50, 50)
+  ptv_sdm = ptv_sdm / 50.0
+
+  ptv70_sdm = np.clip(ptv70_sdm, -50, 50)
+  ptv70_sdm = ptv70_sdm / 50.0
+
+  ptv63_sdm = np.clip(ptv63_sdm, -50, 50)
+  ptv63_sdm = ptv63_sdm / 50.0
+
+  ptv56_sdm = np.clip(ptv56_sdm, -50, 50)
+  ptv56_sdm = ptv56_sdm / 50.0
 
   return oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm
 
