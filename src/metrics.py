@@ -16,6 +16,7 @@ __all__ = [
   'DoseLevelMetricBase',
   'HomogeneityIndex',
   'ConformityIndex',
+  'PaddickConformityIndex',
   'GradientIndex',
   'BodyMaskedMetric',
   'ChallengeMAE',
@@ -408,6 +409,82 @@ class ConformityIndex(DoseLevelMetricBase):
 
     # Calculate conformity index
     return v_ptv_rx / v_ptv
+
+
+class PaddickConformityIndex(DoseLevelMetricBase):
+  """
+  Paddick Conformity Index (COIN) for evaluating target coverage and dose spillage.
+
+  The Paddick Conformity Index is a sophisticated measure that accounts for both
+  target coverage and irradiation of healthy tissue:
+
+  COIN = (TV_PIV / TV) × (TV_PIV / PIV)
+
+  Where:
+  - TV = Target Volume (PTV volume)
+  - PIV = Prescription Isodose Volume (volume receiving at least prescription dose)
+  - TV_PIV = Target volume covered by prescription isodose (intersection of TV and PIV)
+
+  The first term (TV_PIV / TV) represents target coverage.
+  The second term (TV_PIV / PIV) penalizes dose spillage outside the target.
+
+  A COIN of 1.0 indicates perfect conformity (prescription dose covers exactly the target,
+  no more, no less). Values < 1.0 indicate either incomplete target coverage or excessive
+  spillage to surrounding tissue.
+
+  Reference:
+    Paddick I. "A simple scoring ratio to index the conformity of radiosurgical
+    treatment plans." J Neurosurg. 2000;93(Suppl 3):219-222.
+
+  Args:
+    ptv_level: The PTV prescription level (70, 63, or 56), or None for all levels
+    compute_all_levels: If True, compute for all levels (70, 63, 56, highest)
+    include_highest: If True, also compute for highest dose per sample
+    dose_fraction: Fraction of prescribed dose to use as threshold (default: 1.0 = 100%)
+
+  Works with both 2D slices and 3D volumes.
+  """
+  def __init__(self, ptv_level: int = None, compute_all_levels: bool = False,
+               include_highest: bool = True, dose_fraction: float = 1.0, *args, **kwargs):
+    super().__init__(ptv_level, compute_all_levels, include_highest, *args, **kwargs)
+    self.dose_fraction = dose_fraction
+
+  def _compute_metric_for_sample(self, dose: torch.Tensor,
+                                  region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
+    """
+    Compute Paddick Conformity Index for a single sample at a specific dose level.
+
+    Args:
+      dose: Dose distribution for single sample
+      region_mask: Boolean mask for the exclusive PTV region
+      ptv_level: Dose level (70, 63, or 56)
+
+    Returns:
+      Paddick Conformity Index value
+    """
+    # TV: Target Volume (total PTV volume)
+    tv = region_mask.sum().float()
+
+    if tv == 0:
+      return torch.tensor(float('nan'))
+
+    # PIV: Prescription Isodose Volume (volume receiving at least prescription dose)
+    prescribed_dose = float(ptv_level) * self.dose_fraction
+    prescription_mask = dose >= prescribed_dose
+    piv = prescription_mask.sum().float()
+
+    # Avoid division by zero
+    if piv == 0:
+      return torch.tensor(0.0)
+
+    # TV_PIV: intersection of target volume and prescription isodose volume
+    tv_piv = (region_mask & prescription_mask).sum().float()
+
+    # COIN = (TV_PIV / TV) × (TV_PIV / PIV)
+    coverage = tv_piv / tv
+    spillage_penalty = tv_piv / piv
+
+    return coverage * spillage_penalty
 
 
 class GradientIndex(DoseLevelMetricBase):
