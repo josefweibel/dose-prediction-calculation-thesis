@@ -362,10 +362,10 @@ class ConformityIndex(DoseLevelMetricBase):
   CI = V_PTV_Rx / V_PTV
 
   Where:
-  - V_PTV_Rx: Volume of PTV receiving at least the prescribed dose
+  - V_PTV_Rx: Volume of PTV receiving at least a fraction of the prescribed dose
   - V_PTV: Total PTV volume
 
-  A CI of 1.0 indicates perfect conformity (100% of PTV receives prescribed dose).
+  A CI of 1.0 indicates perfect conformity (100% of PTV receives the specified dose threshold).
   Values < 1.0 indicate underdosing of the target.
 
   This metric computes CI for a specific PTV level in its exclusive region.
@@ -374,7 +374,14 @@ class ConformityIndex(DoseLevelMetricBase):
     ptv_level: The PTV prescription level (70, 63, or 56), or None for all levels
     compute_all_levels: If True, compute for all levels (70, 63, 56, highest)
     include_highest: If True, also compute for highest dose per sample
+    dose_fraction: Fraction of prescribed dose to use as threshold (default: 1.0 = 100%)
+                   For example, 0.95 means 95% of the prescribed dose, 1.0 means 100%
   """
+  def __init__(self, ptv_level: int = None, compute_all_levels: bool = False,
+               include_highest: bool = True, dose_fraction: float = 1.0, *args, **kwargs):
+    super().__init__(ptv_level, compute_all_levels, include_highest, *args, **kwargs)
+    self.dose_fraction = dose_fraction
+
   def _compute_metric_for_sample(self, dose: torch.Tensor,
                                   region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
     """
@@ -394,8 +401,8 @@ class ConformityIndex(DoseLevelMetricBase):
     if v_ptv == 0:
       return torch.tensor(float('nan'))
 
-    # Volume of PTV receiving at least the prescribed dose
-    prescribed_dose = float(ptv_level)
+    # Volume of PTV receiving at least the specified fraction of prescribed dose
+    prescribed_dose = float(ptv_level) * self.dose_fraction
     dose_coverage_mask = dose >= prescribed_dose
     v_ptv_rx = (region_mask & dose_coverage_mask).sum().float()
 

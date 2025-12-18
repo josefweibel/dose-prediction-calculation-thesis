@@ -138,6 +138,9 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
     'ptv70_conformity_index': ConformityIndex(ptv_level=70, sync_on_compute=False),
     'ptv63_conformity_index': ConformityIndex(ptv_level=63, sync_on_compute=False),
     'ptv56_conformity_index': ConformityIndex(ptv_level=56, sync_on_compute=False),
+    'ptv70_conformity_index_95': ConformityIndex(ptv_level=70, dose_fraction=0.95, sync_on_compute=False),
+    'ptv63_conformity_index_95': ConformityIndex(ptv_level=63, dose_fraction=0.95, sync_on_compute=False),
+    'ptv56_conformity_index_95': ConformityIndex(ptv_level=56, dose_fraction=0.95, sync_on_compute=False),
 
     'ptv70_gradient_index': GradientIndex(ptv_level=70, sync_on_compute=False),
     'ptv63_gradient_index': GradientIndex(ptv_level=63, sync_on_compute=False),
@@ -253,6 +256,9 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     'vol_ptv70_conformity_index': ConformityIndex(ptv_level=70, sync_on_compute=False),
     'vol_ptv63_conformity_index': ConformityIndex(ptv_level=63, sync_on_compute=False),
     'vol_ptv56_conformity_index': ConformityIndex(ptv_level=56, sync_on_compute=False),
+    'vol_ptv70_conformity_index_95': ConformityIndex(ptv_level=70, dose_fraction=0.95, sync_on_compute=False),
+    'vol_ptv63_conformity_index_95': ConformityIndex(ptv_level=63, dose_fraction=0.95, sync_on_compute=False),
+    'vol_ptv56_conformity_index_95': ConformityIndex(ptv_level=56, dose_fraction=0.95, sync_on_compute=False),
 
     'vol_ptv70_gradient_index': GradientIndex(ptv_level=70, sync_on_compute=False),
     'vol_ptv63_gradient_index': GradientIndex(ptv_level=63, sync_on_compute=False),
