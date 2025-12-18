@@ -127,20 +127,30 @@ class DoseLevelMetricBase(Metric):
     self.include_highest = include_highest
 
     if compute_all_levels:
-      # Track sum and count for each dose level
-      self.add_state("sum_70", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      # Track sum and count for each dose level (pred, target, and abs_diff separately)
+      self.add_state("sum_pred_70", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_target_70", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_abs_diff_70", default=torch.tensor(0.0), dist_reduce_fx="sum")
       self.add_state("count_70", default=torch.tensor(0), dist_reduce_fx="sum")
-      self.add_state("sum_63", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_pred_63", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_target_63", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_abs_diff_63", default=torch.tensor(0.0), dist_reduce_fx="sum")
       self.add_state("count_63", default=torch.tensor(0), dist_reduce_fx="sum")
-      self.add_state("sum_56", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_pred_56", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_target_56", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("sum_abs_diff_56", default=torch.tensor(0.0), dist_reduce_fx="sum")
       self.add_state("count_56", default=torch.tensor(0), dist_reduce_fx="sum")
 
       if include_highest:
-        self.add_state("sum_highest", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("sum_pred_highest", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("sum_target_highest", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("sum_abs_diff_highest", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("count_highest", default=torch.tensor(0), dist_reduce_fx="sum")
     else:
       # Single level mode
-      self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("total_pred", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("total_target", default=torch.tensor(0.0), dist_reduce_fx="sum")
+      self.add_state("total_abs_diff", default=torch.tensor(0.0), dist_reduce_fx="sum")
       self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
   def _get_region_mask(self, ptv70: torch.Tensor, ptv63: torch.Tensor,
@@ -164,14 +174,13 @@ class DoseLevelMetricBase(Metric):
     else:  # 56
       return ptv56 & ~ptv63
 
-  def _compute_metric_for_sample(self, pred: torch.Tensor, target: torch.Tensor,
+  def _compute_metric_for_sample(self, dose: torch.Tensor,
                                   region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
     """
     Compute the metric for a single sample at a specific dose level.
 
     Args:
-      pred: Predicted dose for single sample, shape (H, W) or (H, W, D)
-      target: Target dose for single sample, shape (H, W) or (H, W, D)
+      dose: Dose distribution for single sample, shape (H, W) or (H, W, D)
       region_mask: Boolean mask for the exclusive PTV region, shape (H, W) or (H, W, D)
       ptv_level: Dose level (70, 63, or 56)
 
@@ -206,61 +215,90 @@ class DoseLevelMetricBase(Metric):
         # Compute for all levels and reuse score for highest
         for level in [70, 63, 56]:
           region_mask = self._get_region_mask(ptv70, ptv63, ptv56, level)
-          score = self._compute_metric_for_sample(pred, tgt, region_mask, level)
-          if not torch.isnan(score):
+          pred_score = self._compute_metric_for_sample(pred, region_mask, level)
+          target_score = self._compute_metric_for_sample(tgt, region_mask, level)
+          if not torch.isnan(pred_score) and not torch.isnan(target_score):
+            abs_diff = torch.abs(pred_score - target_score)
             if level == 70:
-              self.sum_70 += score
+              self.sum_pred_70 += pred_score
+              self.sum_target_70 += target_score
+              self.sum_abs_diff_70 += abs_diff
               self.count_70 += 1
             elif level == 63:
-              self.sum_63 += score
+              self.sum_pred_63 += pred_score
+              self.sum_target_63 += target_score
+              self.sum_abs_diff_63 += abs_diff
               self.count_63 += 1
             else:  # 56
-              self.sum_56 += score
+              self.sum_pred_56 += pred_score
+              self.sum_target_56 += target_score
+              self.sum_abs_diff_56 += abs_diff
               self.count_56 += 1
 
             # Reuse this score for highest if it matches
             if level == highest_level:
-              self.sum_highest += score
+              self.sum_pred_highest += pred_score
+              self.sum_target_highest += target_score
+              self.sum_abs_diff_highest += abs_diff
               self.count_highest += 1
       else:
         # Single level mode
         region_mask = self._get_region_mask(ptv70, ptv63, ptv56, self.ptv_level)
-        score = self._compute_metric_for_sample(pred, tgt, region_mask, self.ptv_level)
-        if not torch.isnan(score):
-          self.total += score
+        pred_score = self._compute_metric_for_sample(pred, region_mask, self.ptv_level)
+        target_score = self._compute_metric_for_sample(tgt, region_mask, self.ptv_level)
+        if not torch.isnan(pred_score) and not torch.isnan(target_score):
+          self.total_pred += pred_score
+          self.total_target += target_score
+          self.total_abs_diff += torch.abs(pred_score - target_score)
           self.count += 1
 
   def compute(self):
     """Compute the final metric value(s)."""
     if self.compute_all_levels:
       results = {}
-      if self.count_70 > 0:
-        results[70] = self.sum_70 / self.count_70
-      else:
-        results[70] = torch.tensor(float('nan'))
-
-      if self.count_63 > 0:
-        results[63] = self.sum_63 / self.count_63
-      else:
-        results[63] = torch.tensor(float('nan'))
-
-      if self.count_56 > 0:
-        results[56] = self.sum_56 / self.count_56
-      else:
-        results[56] = torch.tensor(float('nan'))
+      for level in [70, 63, 56]:
+        count = getattr(self, f"count_{level}")
+        if count > 0:
+          results[level] = {
+            'pred': getattr(self, f"sum_pred_{level}") / count,
+            'target': getattr(self, f"sum_target_{level}") / count,
+            'abs_diff': getattr(self, f"sum_abs_diff_{level}") / count
+          }
+        else:
+          results[level] = {
+            'pred': torch.tensor(float('nan')),
+            'target': torch.tensor(float('nan')),
+            'abs_diff': torch.tensor(float('nan'))
+          }
 
       if self.include_highest:
         if self.count_highest > 0:
-          results['highest'] = self.sum_highest / self.count_highest
+          results['highest'] = {
+            'pred': self.sum_pred_highest / self.count_highest,
+            'target': self.sum_target_highest / self.count_highest,
+            'abs_diff': self.sum_abs_diff_highest / self.count_highest
+          }
         else:
-          results['highest'] = torch.tensor(float('nan'))
+          results['highest'] = {
+            'pred': torch.tensor(float('nan')),
+            'target': torch.tensor(float('nan')),
+            'abs_diff': torch.tensor(float('nan'))
+          }
 
       return results
     else:
       if self.count > 0:
-        return self.total / self.count
+        return {
+          'pred': self.total_pred / self.count,
+          'target': self.total_target / self.count,
+          'abs_diff': self.total_abs_diff / self.count
+        }
       else:
-        return torch.tensor(float('nan'))
+        return {
+          'pred': torch.tensor(float('nan')),
+          'target': torch.tensor(float('nan')),
+          'abs_diff': torch.tensor(float('nan'))
+        }
 
 
 class HomogeneityIndex(DoseLevelMetricBase):
@@ -285,14 +323,13 @@ class HomogeneityIndex(DoseLevelMetricBase):
     compute_all_levels: If True, compute for all levels (70, 63, 56, highest)
     include_highest: If True, also compute for highest dose per sample
   """
-  def _compute_metric_for_sample(self, pred: torch.Tensor, target: torch.Tensor,
+  def _compute_metric_for_sample(self, dose: torch.Tensor,
                                   region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
     """
     Compute homogeneity index for a single sample at a specific dose level.
 
     Args:
-      pred: Predicted dose for single sample
-      target: Target dose (not used but required by interface)
+      dose: Dose distribution for single sample
       region_mask: Boolean mask for the exclusive PTV region
       ptv_level: Dose level (70, 63, or 56)
 
@@ -303,7 +340,7 @@ class HomogeneityIndex(DoseLevelMetricBase):
       return torch.tensor(float('nan'))
 
     # Get dose values in the region
-    doses = pred[region_mask].flatten()
+    doses = dose[region_mask].flatten()
     if doses.numel() == 0:
       return torch.tensor(float('nan'))
 
@@ -338,14 +375,13 @@ class ConformityIndex(DoseLevelMetricBase):
     compute_all_levels: If True, compute for all levels (70, 63, 56, highest)
     include_highest: If True, also compute for highest dose per sample
   """
-  def _compute_metric_for_sample(self, pred: torch.Tensor, target: torch.Tensor,
+  def _compute_metric_for_sample(self, dose: torch.Tensor,
                                   region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
     """
     Compute conformity index for a single sample at a specific dose level.
 
     Args:
-      pred: Predicted dose for single sample
-      target: Target dose (not used but required by interface)
+      dose: Dose distribution for single sample
       region_mask: Boolean mask for the exclusive PTV region
       ptv_level: Dose level (70, 63, or 56)
 
@@ -360,7 +396,7 @@ class ConformityIndex(DoseLevelMetricBase):
 
     # Volume of PTV receiving at least the prescribed dose
     prescribed_dose = float(ptv_level)
-    dose_coverage_mask = pred >= prescribed_dose
+    dose_coverage_mask = dose >= prescribed_dose
     v_ptv_rx = (region_mask & dose_coverage_mask).sum().float()
 
     # Calculate conformity index
@@ -393,14 +429,13 @@ class GradientIndex(DoseLevelMetricBase):
 
   Works with both 2D slices and 3D volumes.
   """
-  def _compute_metric_for_sample(self, pred: torch.Tensor, target: torch.Tensor,
+  def _compute_metric_for_sample(self, dose: torch.Tensor,
                                   region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
     """
     Compute gradient index for a single sample at a specific dose level.
 
     Args:
-      pred: Predicted dose for single sample
-      target: Target dose (not used but required by interface)
+      dose: Dose distribution for single sample
       region_mask: Boolean mask for the exclusive PTV region
       ptv_level: Dose level (70, 63, or 56)
 
@@ -413,7 +448,7 @@ class GradientIndex(DoseLevelMetricBase):
 
     # Calculate V_prescription: volume receiving at least the prescribed dose
     prescribed_dose = float(ptv_level)
-    prescription_mask = pred >= prescribed_dose
+    prescription_mask = dose >= prescribed_dose
     v_prescription = prescription_mask.sum().float()
 
     # Skip if no voxels receive the prescription dose
@@ -422,7 +457,7 @@ class GradientIndex(DoseLevelMetricBase):
 
     # Calculate V_half_prescription: volume receiving at least half the prescribed dose
     half_prescribed_dose = prescribed_dose / 2.0
-    half_prescription_mask = pred >= half_prescribed_dose
+    half_prescription_mask = dose >= half_prescribed_dose
     v_half_prescription = half_prescription_mask.sum().float()
 
     # Calculate Gradient Index: GI = V(half_Rx) / V(Rx)
@@ -728,14 +763,13 @@ class PTVPrescriptionMAE(DoseLevelMetricBase):
     compute_all_levels: If True, compute for all levels (70, 63, 56, highest)
     include_highest: If True, also compute for highest dose per sample
   """
-  def _compute_metric_for_sample(self, pred: torch.Tensor, target: torch.Tensor,
+  def _compute_metric_for_sample(self, dose: torch.Tensor,
                                   region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
     """
     Compute MAE from prescription dose for a single sample at a specific dose level.
 
     Args:
-      pred: Predicted dose for single sample
-      target: Target dose (not used but required by interface)
+      dose: Dose distribution for single sample
       region_mask: Boolean mask for the exclusive PTV region
       ptv_level: Dose level (70, 63, or 56)
 
@@ -745,12 +779,12 @@ class PTVPrescriptionMAE(DoseLevelMetricBase):
     if region_mask.sum() == 0:
       return torch.tensor(float('nan'))
 
-    # Get predicted dose values in this region
-    pred_doses = pred[region_mask]
+    # Get dose values in this region
+    doses = dose[region_mask]
 
     # Calculate mean absolute error from prescribed dose
     prescribed_dose = float(ptv_level)
-    return torch.abs(pred_doses - prescribed_dose).mean()
+    return torch.abs(doses - prescribed_dose).mean()
 
 
 class PTVPrescriptionMeanDose(DoseLevelMetricBase):
@@ -765,28 +799,27 @@ class PTVPrescriptionMeanDose(DoseLevelMetricBase):
     compute_all_levels: If True, compute for all levels (70, 63, 56, highest)
     include_highest: If True, also compute for highest dose per sample
   """
-  def _compute_metric_for_sample(self, pred: torch.Tensor, target: torch.Tensor,
+  def _compute_metric_for_sample(self, dose: torch.Tensor,
                                   region_mask: torch.Tensor, ptv_level: int) -> torch.Tensor:
     """
-    Compute mean predicted dose for a single sample at a specific dose level.
+    Compute mean dose for a single sample at a specific dose level.
 
     Args:
-      pred: Predicted dose for single sample
-      target: Target dose (not used but required by interface)
+      dose: Dose distribution for single sample
       region_mask: Boolean mask for the exclusive PTV region
       ptv_level: Dose level (70, 63, or 56)
 
     Returns:
-      Mean predicted dose in the region
+      Mean dose in the region
     """
     if region_mask.sum() == 0:
       return torch.tensor(float('nan'))
 
-    # Get predicted dose values in this region
-    pred_doses = pred[region_mask]
+    # Get dose values in this region
+    doses = dose[region_mask]
 
     # Calculate mean dose
-    return pred_doses.mean()
+    return doses.mean()
 
 
 class DVHAUC(Metric):
