@@ -35,6 +35,9 @@ Each slice contains:
   - oar: (N_OAR, H, W) uint8 - binary OAR masks
   - oar_sdm: (N_OAR, H, W) float16 - signed distance maps for OARs
   - ptv_sdm: (1, H, W) float16 - signed distance map for combined PTV
+  - ptv70_sdm: (1, H, W) float16 - signed distance map for PTV70
+  - ptv63_sdm: (1, H, W) float16 - signed distance map for PTV63
+  - ptv56_sdm: (1, H, W) float16 - signed distance map for PTV56
   - beam_plate: (1, H, W) float32 - beam configuration plate
   - angle_plate: (1, H, W) uint8 - angle configuration plate (binary, 3D around isocenter)
 """
@@ -146,18 +149,24 @@ def compute_sdm(mask: np.ndarray, voxel_spacing: tuple = (1.0, 1.0, 1.0)) -> np.
   return sdm
 
 
-def compute_sdms(oar_vol, ptv_vol, voxel_spacing):
+def compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacing):
   """
   Compute signed distance maps for OAR and PTV masks.
 
   Args:
     oar_vol: (N_OAR, H, W, D) - binary masks for organs at risk
     ptv_vol: (H, W, D) - PTV mask with dose values
+    ptv70_vol: (H, W, D) - binary mask for PTV70
+    ptv63_vol: (H, W, D) - binary mask for PTV63
+    ptv56_vol: (H, W, D) - binary mask for PTV56
     voxel_spacing: tuple of (sx, sy, sz) - voxel spacing in mm
 
   Returns:
     oar_sdm: (N_OAR, H, W, D) float32 - SDMs for each OAR
-    ptv_sdm: (H, W, D) float32 - SDM for PTV
+    ptv_sdm: (H, W, D) float32 - SDM for combined PTV
+    ptv70_sdm: (H, W, D) float32 - SDM for PTV70
+    ptv63_sdm: (H, W, D) float32 - SDM for PTV63
+    ptv56_sdm: (H, W, D) float32 - SDM for PTV56
   """
   oar_sdm = np.stack([
     compute_sdm(oar_vol[i], voxel_spacing)
@@ -167,7 +176,12 @@ def compute_sdms(oar_vol, ptv_vol, voxel_spacing):
   ptv_binary = (ptv_vol > 0).astype(np.uint8)
   ptv_sdm = compute_sdm(ptv_binary, voxel_spacing)
 
-  return oar_sdm, ptv_sdm
+  # Compute SDMs for individual PTV levels
+  ptv70_sdm = compute_sdm(ptv70_vol, voxel_spacing)
+  ptv63_sdm = compute_sdm(ptv63_vol, voxel_spacing)
+  ptv56_sdm = compute_sdm(ptv56_vol, voxel_spacing)
+
+  return oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm
 
 
 def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_vol, beam_plate_vol, angle_plate_vol, pad_size=None):
@@ -332,11 +346,16 @@ def process_volume(args):
     )
 
     # Compute signed distance maps AFTER padding so distances are correct at edges
-    oar_sdm, ptv_sdm = compute_sdms(oar_vol, ptv_vol, voxel_spacing)
+    oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm = compute_sdms(
+      oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacing
+    )
 
     # Convert SDMs to float16 for storage efficiency (saves 50% space, sufficient precision)
     oar_sdm = oar_sdm.astype(np.float16)
     ptv_sdm = ptv_sdm.astype(np.float16)
+    ptv70_sdm = ptv70_sdm.astype(np.float16)
+    ptv63_sdm = ptv63_sdm.astype(np.float16)
+    ptv56_sdm = ptv56_sdm.astype(np.float16)
 
     # Create output directory for this volume
     volume_name = file_path.stem
@@ -357,6 +376,9 @@ def process_volume(args):
         'oar': oar_vol[:, :, :, slice_idx],  # (N_OAR, H, W)
         'oar_sdm': oar_sdm[:, :, :, slice_idx],  # (N_OAR, H, W)
         'ptv_sdm': ptv_sdm[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'ptv70_sdm': ptv70_sdm[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'ptv63_sdm': ptv63_sdm[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
+        'ptv56_sdm': ptv56_sdm[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
         'beam_plate': beam_plate_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
         'angle_plate': angle_plate_vol[:, :, slice_idx][np.newaxis, :, :],  # (1, H, W)
       }

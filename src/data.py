@@ -32,6 +32,7 @@ GDPHMM_OAR_V3 = [
   'Submand-PTV', 'SubmandL-PTV', 'SubmandR-PTV', 'Thyroid-PTV', 'SpinalCord_05',
 ]
 
+# dose -> key mapping for PTVs
 GDPHMM_PTV = {
   70: 'PTV70',
   63: 'PTV63',
@@ -70,6 +71,7 @@ class StructureSelector:
     - 'oar_v3': OAR binary masks without last 3 and 2 unused (28 channels)
     - 'oar_v3_sdm': OAR signed distance maps without last 3 and 2 unused (28 channels)
     - 'ptv_sdm': PTV signed distance map (1 channel)
+    - 'ptv_sdms': Individual PTV signed distance maps for 70/63/56 Gy (3 channels)
     - 'beam_plate': Beam configuration plate (1 channel)
     - 'angle_plate': Angle configuration plate (1 channel)
   """
@@ -87,6 +89,7 @@ class StructureSelector:
     'oar_v3': len(GDPHMM_OAR_V3),  # 28 (new version)
     'oar_v3_sdm': len(GDPHMM_OAR_V3), # 28 (new version)
     'ptv_sdm': 1,
+    'ptv_sdms': 3,  # ptv70_sdm, ptv63_sdm, ptv56_sdm
     'beam_plate': 1,  # beam configuration plate
     'angle_plate': 1,  # angle configuration plate (3D around isocenter)
   }
@@ -125,7 +128,7 @@ class StructureSelector:
 
     Args:
       data: Dict with keys 'ct', 'body', 'ptv', 'ptv70', 'ptv63', 'ptv56', 'oar', 'oar_sdm', 'ptv_sdm',
-            'beam_plate', 'angle_plate'
+            'ptv70_sdm', 'ptv63_sdm', 'ptv56_sdm', 'beam_plate', 'angle_plate'
             Each value should be a torch.Tensor or numpy array
 
     Returns:
@@ -160,6 +163,8 @@ class StructureSelector:
         components.append(data['oar_sdm'][:-3][[i for i in range(data['oar_sdm'].shape[0]) if i not in (8, 9)]])
       elif group == 'ptv_sdm':
         components.append(data['ptv_sdm'])
+      elif group == 'ptv_sdms':
+        components.extend([data['ptv70_sdm'], data['ptv63_sdm'], data['ptv56_sdm']])
       elif group == 'beam_plate':
         components.append(data['beam_plate'])
       elif group == 'angle_plate':
@@ -379,8 +384,8 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     dataset_name: Name of dataset (e.g., 'gdphmm-hn')
     split: 'train', 'valid', or 'test'
     structure_groups: List of structure groups to load. If None, loads all.
-                      Available: ['ct', 'body', 'ptv', 'ptv_masks', 'oar', 'oar_sdm', 'ptv_sdm']
-                      Example: ['ct', 'body', 'oar', 'ptv_sdm'] to load only CT, body mask, OARs, and PTV SDM
+                      Available: ['ct', 'body', 'ptv', 'ptv_masks', 'oar', 'oar_sdm', 'ptv_sdm', 'ptv_sdms']
+                      Example: ['ct', 'body', 'oar', 'ptv_sdms'] to load only CT, body mask, OARs, and PTV SDMs
     limit: Optional limit on number of slices
     skip: Number of slices to skip from start
 
@@ -471,6 +476,9 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
       'oar': torch.from_numpy(data_np['oar']),  # uint8 {0, 1}
       'oar_sdm': torch.from_numpy(data_np['oar_sdm']).float(),  # float16 → float32
       'ptv_sdm': torch.from_numpy(data_np['ptv_sdm']).float(),  # float16 → float32
+      'ptv70_sdm': torch.from_numpy(data_np['ptv70_sdm']).float(),  # float16 → float32
+      'ptv63_sdm': torch.from_numpy(data_np['ptv63_sdm']).float(),  # float16 → float32
+      'ptv56_sdm': torch.from_numpy(data_np['ptv56_sdm']).float(),  # float16 → float32
       'beam_plate': torch.from_numpy(data_np['beam_plate']),  # float32, continuous values
       'angle_plate': torch.from_numpy(data_np['angle_plate']),  # uint8 {0, 1}, binary
     }
