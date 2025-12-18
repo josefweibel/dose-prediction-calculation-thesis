@@ -12,6 +12,13 @@ GDPHMM_IMG_MAX = 3071
 GDPHMM_DOSE_MIN = 0
 GDPHMM_DOSE_MAX = 88
 
+# SDM (Signed Distance Map) clipping and normalization ranges
+GDPHMM_OAR_SDM_MIN = 0
+GDPHMM_OAR_SDM_MAX = 40  # mm
+
+GDPHMM_PTV_SDM_MIN = -50  # mm
+GDPHMM_PTV_SDM_MAX = 50   # mm
+
 GDPHMM_OAR = [
   'Cochlea_L', 'Cochlea_R', 'Eyes', 'Lens_L', 'Lens_R', 'OpticNerve_L', 'OpticNerve_R',
   'Chiasm', 'LacrimalGlands', 'BrachialPlexus', 'Brain', 'BrainStem_03', 'Esophagus',

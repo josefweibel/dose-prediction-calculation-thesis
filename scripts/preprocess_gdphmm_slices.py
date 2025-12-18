@@ -60,6 +60,10 @@ from data import (
   GDPHMM_IMG_MAX,
   GDPHMM_DOSE_MIN,
   GDPHMM_DOSE_MAX,
+  GDPHMM_OAR_SDM_MIN,
+  GDPHMM_OAR_SDM_MAX,
+  GDPHMM_PTV_SDM_MIN,
+  GDPHMM_PTV_SDM_MAX,
   GDPHMM_OAR,
   GDPHMM_PTV,
 )
@@ -153,8 +157,8 @@ def compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacin
   """
   Compute signed distance maps for OAR and PTV masks.
 
-  OAR SDMs are clipped to [0, 40] mm and normalized to [0, 1].
-  PTV SDMs are clipped to [-50, 50] mm and normalized to [-1, 1].
+  OAR SDMs are clipped to [GDPHMM_OAR_SDM_MIN, GDPHMM_OAR_SDM_MAX] mm and normalized to [0, 1].
+  PTV SDMs are clipped to [GDPHMM_PTV_SDM_MIN, GDPHMM_PTV_SDM_MAX] mm and normalized to [-1, 1].
 
   Args:
     oar_vol: (N_OAR, H, W, D) - binary masks for organs at risk
@@ -177,9 +181,9 @@ def compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacin
     for i in range(oar_vol.shape[0])
   ], axis=0)
 
-  # Clip OAR SDMs to [0, 40] mm and normalize to [0, 1]
-  oar_sdm = np.clip(oar_sdm, 0, 40)
-  oar_sdm = oar_sdm / 40.0
+  # Clip OAR SDMs and normalize to [0, 1]
+  oar_sdm = np.clip(oar_sdm, GDPHMM_OAR_SDM_MIN, GDPHMM_OAR_SDM_MAX)
+  oar_sdm = (oar_sdm - GDPHMM_OAR_SDM_MIN) / (GDPHMM_OAR_SDM_MAX - GDPHMM_OAR_SDM_MIN)
 
   ptv_binary = (ptv_vol > 0).astype(np.uint8)
   ptv_sdm = compute_sdm(ptv_binary, voxel_spacing)
@@ -189,18 +193,18 @@ def compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, voxel_spacin
   ptv63_sdm = compute_sdm(ptv63_vol, voxel_spacing)
   ptv56_sdm = compute_sdm(ptv56_vol, voxel_spacing)
 
-  # Clip PTV SDMs to [-50, 50] mm and normalize to [-1, 1]
-  ptv_sdm = np.clip(ptv_sdm, -50, 50)
-  ptv_sdm = ptv_sdm / 50.0
+  # Clip PTV SDMs and normalize to [-1, 1]
+  ptv_sdm = np.clip(ptv_sdm, GDPHMM_PTV_SDM_MIN, GDPHMM_PTV_SDM_MAX)
+  ptv_sdm = (ptv_sdm - GDPHMM_PTV_SDM_MIN) / (GDPHMM_PTV_SDM_MAX - GDPHMM_PTV_SDM_MIN) * 2 - 1
 
-  ptv70_sdm = np.clip(ptv70_sdm, -50, 50)
-  ptv70_sdm = ptv70_sdm / 50.0
+  ptv70_sdm = np.clip(ptv70_sdm, GDPHMM_PTV_SDM_MIN, GDPHMM_PTV_SDM_MAX)
+  ptv70_sdm = (ptv70_sdm - GDPHMM_PTV_SDM_MIN) / (GDPHMM_PTV_SDM_MAX - GDPHMM_PTV_SDM_MIN) * 2 - 1
 
-  ptv63_sdm = np.clip(ptv63_sdm, -50, 50)
-  ptv63_sdm = ptv63_sdm / 50.0
+  ptv63_sdm = np.clip(ptv63_sdm, GDPHMM_PTV_SDM_MIN, GDPHMM_PTV_SDM_MAX)
+  ptv63_sdm = (ptv63_sdm - GDPHMM_PTV_SDM_MIN) / (GDPHMM_PTV_SDM_MAX - GDPHMM_PTV_SDM_MIN) * 2 - 1
 
-  ptv56_sdm = np.clip(ptv56_sdm, -50, 50)
-  ptv56_sdm = ptv56_sdm / 50.0
+  ptv56_sdm = np.clip(ptv56_sdm, GDPHMM_PTV_SDM_MIN, GDPHMM_PTV_SDM_MAX)
+  ptv56_sdm = (ptv56_sdm - GDPHMM_PTV_SDM_MIN) / (GDPHMM_PTV_SDM_MAX - GDPHMM_PTV_SDM_MIN) * 2 - 1
 
   return oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm
 
