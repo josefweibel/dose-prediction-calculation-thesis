@@ -10,12 +10,16 @@ All transformations from the original dataset are applied:
   - Dose: normalized to [0, 1], stored as float32
   - PTV: dose levels {0, 56, 63, 70}, stored as uint8 (saves 75% vs float32)
   - Body: stored as uint8
-  - OAR: binary masks from SDM, stored as uint8
+  - OAR: binary masks from SDM, stored as uint8 (filtered per patient using Pat_Obj_DICT.json)
   - OAR SDM: signed distance maps, stored as float16 (saves 50% space)
   - PTV SDM: signed distance map, stored as float16 (saves 50% space)
 
 IMPORTANT: SDMs are computed AFTER padding to ensure correct distance values at edges.
 If SDMs were computed before padding, the padded regions would have incorrect 0 values.
+
+OAR FILTERING: The script uses Pat_Obj_DICT.json to determine which OARs are available
+for each patient. Only OARs listed in this file for a given patient will contain actual
+data; all other OARs will be zero-filled to maintain consistent tensor shapes.
 
 Output structure:
   data/{dataset_name}_slices/{split}/{volume_name}/slice_{idx:04d}.npz
@@ -43,6 +47,7 @@ import argparse
 from scipy.ndimage import distance_transform_edt, zoom
 from multiprocessing import Pool, cpu_count
 import sys
+import json
 
 # Import constants from data module
 sys.path.insert(0, str(Path(__file__).parents[1] / 'src'))
@@ -90,6 +95,26 @@ def process_angle_plate(angle_plate_2d, img_shape, isocenter, z_range=5):
     angle_plate_3d[:, :, z] = angle_plate_2d
 
   return angle_plate_3d
+
+
+def load_pat_obj_dict():
+  """
+  Load the Pat_Obj_DICT.json file that maps patient IDs to available OARs.
+
+  Returns:
+    Dictionary mapping patient IDs to lists of OAR names, or None if file not found
+  """
+  pat_obj_path = GDPHMM_DATA_BASE_PATH / 'gdphmm-hn' / 'incoming' / 'Pat_Obj_DICT.json'
+
+  if not pat_obj_path.exists():
+    print(f"Warning: Pat_Obj_DICT.json not found at {pat_obj_path}")
+    return None
+
+  with open(pat_obj_path, 'r') as f:
+    pat_obj_dict = json.load(f)
+
+  print(f"Loaded Pat_Obj_DICT.json with {len(pat_obj_dict)} patients")
+  return pat_obj_dict
 
 
 def compute_sdm(mask: np.ndarray, voxel_spacing: tuple = (1.0, 1.0, 1.0)) -> np.ndarray:
@@ -247,12 +272,12 @@ def process_volume(args):
   Process a single volume file and save all its slices.
 
   Args:
-    args: tuple of (file_path, output_dir, voxel_spacing, pad_size)
+    args: tuple of (file_path, output_dir, voxel_spacing, pad_size, pat_obj_dict)
 
   Returns:
     tuple of (volume_name, num_slices, success)
   """
-  file_path, output_dir, voxel_spacing, pad_size = args
+  file_path, output_dir, voxel_spacing, pad_size, pat_obj_dict = args
 
   try:
     # Load volume
@@ -263,9 +288,21 @@ def process_volume(args):
     ct_vol = vol['img']
     body_vol = vol['Body']
 
+    # Extract patient ID from filename (e.g., '0522c0001+15Ag+MOS_23629.npz' -> '0522c0001')
+    patient_id = file_path.stem.split('+')[0]
+
+    # Get list of available OARs for this patient
+    if pat_obj_dict is not None and patient_id in pat_obj_dict:
+      available_oars = set(pat_obj_dict[patient_id])
+    else:
+      available_oars = None  # All OARs considered available
+
     # Build OAR volume (N_OAR, H, W, D)
+    # Keep iterating over all GDPHMM_OAR to ensure consistent tensor shape,
+    # but only include data if the OAR is available for this patient
     oar_vol = np.stack(
-      [vol[name].astype(np.uint8) if name in vol else np.zeros_like(vol['dose'].astype(np.uint8))
+      [vol[name].astype(np.uint8) if (name in vol and (available_oars is None or name in available_oars))
+       else np.zeros_like(vol['dose'].astype(np.uint8))
        for name in GDPHMM_OAR],
       axis=0
     )
@@ -390,6 +427,9 @@ def preprocess_split(dataset_name, split, voxel_spacing, num_workers, pad_size=N
   """
   print(f"\nProcessing {dataset_name}/{split}...")
 
+  # Load Pat_Obj_DICT for OAR filtering
+  pat_obj_dict = load_pat_obj_dict()
+
   # Setup paths
   input_dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
   output_base = GDPHMM_DATA_BASE_PATH / f"{dataset_name}_slices"
@@ -406,7 +446,7 @@ def preprocess_split(dataset_name, split, voxel_spacing, num_workers, pad_size=N
   print(f"Found {len(volume_files)} volumes to process")
 
   # Prepare arguments for parallel processing
-  args_list = [(f, output_dir, voxel_spacing, pad_size) for f in volume_files]
+  args_list = [(f, output_dir, voxel_spacing, pad_size, pat_obj_dict) for f in volume_files]
 
   # Process volumes in parallel
   if num_workers > 1:
