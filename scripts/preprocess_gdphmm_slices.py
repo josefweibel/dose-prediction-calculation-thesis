@@ -13,6 +13,7 @@ All transformations from the original dataset are applied:
   - OAR: binary masks from SDM, stored as uint8 (filtered per patient using Pat_Obj_DICT.json)
   - OAR SDM: clipped to [0, 40] mm, normalized to [0, 1], stored as float16 (saves 50% space)
   - PTV SDM: clipped to [-50, 50] mm, normalized to [-1, 1], stored as float16 (saves 50% space)
+  - Beam plate: clipped to [0, 92], normalized to [0, 1], stored as float32
 
 IMPORTANT: SDMs are computed AFTER padding to ensure correct distance values at edges.
 If SDMs were computed before padding, the padded regions would have incorrect 0 values.
@@ -64,6 +65,8 @@ from data import (
   GDPHMM_OAR_SDM_MAX,
   GDPHMM_PTV_SDM_MIN,
   GDPHMM_PTV_SDM_MAX,
+  GDPHMM_BEAM_PLATE_MIN,
+  GDPHMM_BEAM_PLATE_MAX,
   GDPHMM_OAR,
   GDPHMM_PTV,
 )
@@ -220,7 +223,7 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56
     - PTV70/63/56: binary masks stored as uint8
     - Body: convert to uint8
     - OAR: convert to uint8
-    - Beam plate: keep as float32 (continuous values)
+    - Beam plate: clip to [0, 92], normalize to [0, 1]
     - Angle plate: convert to uint8 (binary)
     - Padding: optionally pad to fixed size (saves runtime padding)
 
@@ -264,8 +267,10 @@ def apply_transformations(ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56
   # OAR: convert to uint8
   oar_transformed = oar_vol.astype(np.uint8)
 
-  # Beam plate: keep as float32 (continuous values)
-  beam_plate_transformed = beam_plate_vol.astype(np.float32)
+  # Beam plate: clip and normalize to [0, 1]
+  beam_plate_transformed = np.clip(beam_plate_vol, GDPHMM_BEAM_PLATE_MIN, GDPHMM_BEAM_PLATE_MAX)
+  beam_plate_transformed = (beam_plate_transformed - GDPHMM_BEAM_PLATE_MIN) / (GDPHMM_BEAM_PLATE_MAX - GDPHMM_BEAM_PLATE_MIN)
+  beam_plate_transformed = beam_plate_transformed.astype(np.float32)
 
   # Angle plate: convert to uint8 (binary mask)
   angle_plate_transformed = angle_plate_vol.astype(np.uint8)

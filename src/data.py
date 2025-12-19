@@ -19,6 +19,10 @@ GDPHMM_OAR_SDM_MAX = 40  # mm
 GDPHMM_PTV_SDM_MIN = -50  # mm
 GDPHMM_PTV_SDM_MAX = 50   # mm
 
+# Beam plate normalization range
+GDPHMM_BEAM_PLATE_MIN = 0
+GDPHMM_BEAM_PLATE_MAX = 92
+
 GDPHMM_OAR = [
   'Cochlea_L', 'Cochlea_R', 'Eyes', 'Lens_L', 'Lens_R', 'OpticNerve_L', 'OpticNerve_R',
   'Chiasm', 'LacrimalGlands', 'BrachialPlexus', 'Brain', 'BrainStem_03', 'Esophagus',
