@@ -111,10 +111,12 @@ class UpBlock(nn.Module):
   As described in Section 2.3 of the paper.
   """
 
-  def __init__(self, channels):
+  def __init__(self, in_channels, out_channels=None):
     super().__init__()
+    if out_channels is None:
+      out_channels = in_channels
     self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
-    self.conv = nn.Conv2d(channels, channels, kernel_size=1)
+    self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
   def forward(self, x):
     x = self.upsample(x)
@@ -393,25 +395,31 @@ class NoisePredictor(nn.Module):
     self.decoder_ups = nn.ModuleList()
     self.time_projs_decoder = nn.ModuleList()
 
+    # Track output channels from previous level (starts at bottleneck)
+    prev_out_ch = channels[5]  # 2048 from bottleneck
+
     for i in range(5):
-      # Decoder processes features from encoder in reverse
-      # Level i of decoder corresponds to encoder level (5 - i - 1)
-      ch = channels[5 - i - 1]
-      next_ch = channels[5 - i - 2] if i < 4 else base_channels
+      # Skip connection channels from encoder at this level
+      skip_ch = channels[5 - i - 1]  # 1024, 512, 256, 128, 64
+      # Output channels after ResBlocks
+      next_ch = channels[5 - i - 2] if i < 4 else base_channels  # 512, 256, 128, 64, 64
 
-      # Upsampling
-      self.decoder_ups.append(UpBlock(ch))
+      # Upsampling: prev_out_ch → skip_ch (to match skip connection for addition)
+      self.decoder_ups.append(UpBlock(prev_out_ch, skip_ch))
 
-      # Multiple ResBlocks per decoder level
+      # Multiple ResBlocks per decoder level: skip_ch → next_ch
       stage_blocks = nn.ModuleList()
       stage_time_projs = nn.ModuleList()
       for j in range(num_blocks_per_level):
-        block_in_ch = ch if j == 0 else next_ch
+        block_in_ch = skip_ch if j == 0 else next_ch
         stage_blocks.append(ResBlock(block_in_ch, next_ch))
         stage_time_projs.append(nn.Linear(time_embed_dim, next_ch * 2))
 
       self.decoder_stages.append(stage_blocks)
       self.time_projs_decoder.append(stage_time_projs)
+
+      # Update for next iteration
+      prev_out_ch = next_ch
 
     # Output
     self.norm_out = nn.GroupNorm(8, base_channels)
@@ -556,9 +564,9 @@ def build_diffdp(config, structure_selector):
   """
   Build DiffDP model from configuration.
 
-  Default values correspond to the best configuration from the paper (Section 2.5):
+  Default values correspond to the configuration from the paper:
   - Base channels: 64
-  - Number of ResBlocks per level: 1 (paper doesn't specify, using minimal for efficiency)
+  - Number of ResBlocks per level: 2 (Section 2.3: "each contains an Up block and two ResBlock")
   - 6-level UNet for noise predictor
   - 5-level structure encoder
   - 8 attention heads for cross-attention and self-attention
@@ -585,6 +593,6 @@ def build_diffdp(config, structure_selector):
     structure_selector=structure_selector,
     base_channels=config.get('base_channels', 64),
     num_heads=config.get('num_heads', 8),
-    num_blocks_per_level=config.get('num_blocks_per_level', 1)
+    num_blocks_per_level=config.get('num_blocks_per_level', 2)
   )
   return model
