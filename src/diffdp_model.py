@@ -492,6 +492,11 @@ class NoisePredictor(nn.Module):
       # Skip connection from encoder
       # Level i of decoder connects to encoder level (5 - i - 1)
       skip = encoder_features[5 - level - 1]
+
+      # Handle spatial dimension mismatch (can occur when input size isn't divisible by 2^5)
+      if h.shape[2:] != skip.shape[2:]:
+        h = F.interpolate(h, size=skip.shape[2:], mode='nearest')
+
       h = h + skip
 
       # Multiple ResBlocks with timestep conditioning
