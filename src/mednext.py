@@ -175,6 +175,9 @@ class MedNeXtUpBlock(MedNeXtBlock):
   """
   Upsampling block using resize-convolution instead of transposed convolution
   to avoid checkerboard artifacts. See: https://distill.pub/2016/deconv-checkerboard/
+
+  Uses nearest-neighbor upsampling followed by a 3x3 conv for spatial mixing,
+  then the standard MedNeXtBlock operations.
   """
 
   def __init__(self, in_channels, out_channels, exp_r=4, kernel_size=7,
@@ -188,10 +191,17 @@ class MedNeXtUpBlock(MedNeXtBlock):
     self.dim = dim
     if dim == '2d':
       conv = nn.Conv2d
-      self.interpolate_mode = 'bilinear'
     elif dim == '3d':
       conv = nn.Conv3d
-      self.interpolate_mode = 'trilinear'
+
+    # Conv after upsampling to enable learning spatial mixing (replaces transposed conv)
+    self.upsample_conv = conv(
+      in_channels = in_channels,
+      out_channels = in_channels,
+      kernel_size = 3,
+      stride = 1,
+      padding = 1,
+    )
 
     if do_res:
       self.res_conv = conv(
@@ -212,8 +222,11 @@ class MedNeXtUpBlock(MedNeXtBlock):
 
 
   def forward(self, x, dummy_tensor=None):
-    # Upsample first using interpolation (resize-convolution approach)
-    x_upsampled = F.interpolate(x, scale_factor=2, mode=self.interpolate_mode, align_corners=False)
+    # Upsample using nearest-neighbor (recommended by Distill article)
+    x_upsampled = F.interpolate(x, scale_factor=2, mode='nearest')
+
+    # Apply conv to enable learning spatial features after upsampling
+    x_upsampled = self.upsample_conv(x_upsampled)
 
     # Apply the MedNeXtBlock operations on upsampled input
     x1 = self.conv1(x_upsampled)
