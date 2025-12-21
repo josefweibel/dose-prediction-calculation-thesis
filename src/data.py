@@ -168,10 +168,10 @@ class StructureSelector:
         components.append(data['oar_sdm'][:-3])
       elif group == 'oar_v3':
         # Remove last 3 and indices 8 and 9 from oar
-        components.append(data['oar'][:-3][[i for i in range(data['oar'].shape[0]) if i not in (8, 9)]])
+        components.append(data['oar'][[i for i in range(data['oar'].shape[0]) if i not in (8, 9, 30, 31, 32)]])
       elif group == 'oar_v3_sdm':
         # Remove last 3 and indices 8 and 9 from oar_sdm
-        components.append(data['oar_sdm'][:-3][[i for i in range(data['oar_sdm'].shape[0]) if i not in (8, 9)]])
+        components.append(data['oar_sdm'][[i for i in range(data['oar_sdm'].shape[0]) if i not in (8, 9, 30, 31, 32)]])
       elif group == 'ptv_sdm':
         components.append(data['ptv_sdm'])
       elif group == 'ptv_sdms':
