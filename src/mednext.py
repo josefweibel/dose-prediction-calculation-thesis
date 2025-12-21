@@ -172,6 +172,12 @@ class MedNeXtDownBlock(MedNeXtBlock):
 
 
 class MedNeXtUpBlock(MedNeXtBlock):
+  """
+  MODIFIED TO FIX CHECKERBOARD ARTIFACTS: Replaces transposed convolution with
+  bilinear/trilinear upsampling + regular convolution.
+
+  Reference: https://distill.pub/2016/deconv-checkerboard/
+  """
 
   def __init__(self, in_channels, out_channels, exp_r=4, kernel_size=7,
               do_res=False, norm_type = 'group', dim='3d', grn = False):
@@ -182,44 +188,50 @@ class MedNeXtUpBlock(MedNeXtBlock):
     self.resample_do_res = do_res
 
     self.dim = dim
+    # CHECKERBOARD FIX: Use regular convolution instead of transposed convolution
     if dim == '2d':
-      conv = nn.ConvTranspose2d
+      conv = nn.Conv2d
     elif dim == '3d':
-      conv = nn.ConvTranspose3d
+      conv = nn.Conv3d
     if do_res:
       self.res_conv = conv(
         in_channels = in_channels,
         out_channels = out_channels,
         kernel_size = 1,
-        stride = 2
+        stride = 1  # CHECKERBOARD FIX: Regular conv, not transposed
         )
 
+    # CHECKERBOARD FIX: Regular depthwise conv with stride=1
     self.conv1 = conv(
       in_channels = in_channels,
       out_channels = in_channels,
       kernel_size = kernel_size,
-      stride = 2,
+      stride = 1,  # CHECKERBOARD FIX: Regular stride, not transposed
       padding = kernel_size//2,
       groups = in_channels,
     )
 
 
   def forward(self, x, dummy_tensor=None):
+    # CHECKERBOARD FIX: Store original for potential residual connection
+    x_orig = x
 
-    x1 = super().forward(x)
-    # Asymmetry but necessary to match shape
-
+    # CHECKERBOARD FIX: Upsample FIRST using bilinear/trilinear interpolation
     if self.dim == '2d':
-      x1 = torch.nn.functional.pad(x1, (1,0,1,0))
+      x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
     elif self.dim == '3d':
-      x1 = torch.nn.functional.pad(x1, (1,0,1,0,1,0))
+      x = F.interpolate(x, scale_factor=2, mode='trilinear', align_corners=False)
 
+    # Apply MedNeXt block operations
+    x1 = super().forward(x, dummy_tensor)
+
+    # CHECKERBOARD FIX: Add upsampling residual connection if enabled
     if self.resample_do_res:
-      res = self.res_conv(x)
       if self.dim == '2d':
-        res = torch.nn.functional.pad(res, (1,0,1,0))
+        res = F.interpolate(x_orig, scale_factor=2, mode='bilinear', align_corners=False)
       elif self.dim == '3d':
-        res = torch.nn.functional.pad(res, (1,0,1,0,1,0))
+        res = F.interpolate(x_orig, scale_factor=2, mode='trilinear', align_corners=False)
+      res = self.res_conv(res)
       x1 = x1 + res
 
     return x1
