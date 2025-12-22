@@ -8,11 +8,7 @@ data:
 batch_size: 128
 epochs: 200
 
-lr_scheduler:
-  start_lr: 0.0001
-  end_lr: 0.00001
-  start_decay: 40000
-  end_decay: 60000
+lr: 0.0001
 
 diffusion:
   beta_1: 0.0001
@@ -28,8 +24,8 @@ conditioning:
   types:
     - ct
     - body
-    - ptv_sdm
-    - oar_v2_sdm
+    - ptv_sdms
+    - oar_v3_sdm
 
 mixed_precision: false
 num_workers: 4
