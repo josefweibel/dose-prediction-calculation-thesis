@@ -6,6 +6,7 @@ from dosediff_model import build_dosediff
 from deeplabv3plus_model import build_deeplabv3plus
 from diffdp_model import build_diffdp
 from spdiffdose_model import build_spdiffdose
+from hdunet_model import build_hdunet
 
 
 def build_model(model_config, structure_selector):
@@ -37,6 +38,8 @@ def build_model(model_config, structure_selector):
     model = build_spdiffdose(spdiffdose_config, structure_selector)
   elif 'deeplabv3plus' in model_config:
     model = build_deeplabv3plus(model_config, structure_selector)
+  elif 'hdunet' in model_config:
+    model = build_hdunet(model_config, structure_selector)
   elif 'mednext' in model_config:
     model = build_mednext_model(model_config, structure_selector)
   else:
