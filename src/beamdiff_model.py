@@ -186,6 +186,16 @@ class MultiConditionAggregationModule(nn.Module):
     """
     B, C, H, W = xq.shape
 
+    # Pad to make dimensions divisible by patch_size
+    ps = self.patch_size
+    pad_h = (ps - H % ps) % ps
+    pad_w = (ps - W % ps) % ps
+    if pad_h > 0 or pad_w > 0:
+      xq = F.pad(xq, (0, pad_w, 0, pad_h))
+      xk = F.pad(xk, (0, pad_w, 0, pad_h))
+      xv = F.pad(xv, (0, pad_w, 0, pad_h))
+    H_pad, W_pad = H + pad_h, W + pad_w
+
     # Split into patches
     xq_patches = self._to_patches(xq)  # B, num_patches, patch_dim
     xk_patches = self._to_patches(xk)
@@ -210,12 +220,16 @@ class MultiConditionAggregationModule(nn.Module):
 
     # Project back to image space
     x = self.proj_back(x)
-    x = self._from_patches(x, H, W)
+    x = self._from_patches(x, H_pad, W_pad)
+
+    # Remove padding
+    if pad_h > 0 or pad_w > 0:
+      x = x[:, :, :H, :W]
 
     return x
 
   def _to_patches(self, x):
-    """Convert image to patches."""
+    """Convert image to patches. Assumes H and W are divisible by patch_size."""
     B, C, H, W = x.shape
     ps = self.patch_size
     x = x.reshape(B, C, H // ps, ps, W // ps, ps)
@@ -224,7 +238,7 @@ class MultiConditionAggregationModule(nn.Module):
     return x
 
   def _from_patches(self, x, H, W):
-    """Convert patches back to image."""
+    """Convert patches back to image. H and W should be the padded dimensions."""
     B, num_patches, patch_dim = x.shape
     ps = self.patch_size
     C = self.channels
