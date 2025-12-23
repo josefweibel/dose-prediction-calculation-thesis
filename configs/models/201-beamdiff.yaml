@@ -5,7 +5,7 @@ data:
   valid_cache_size: inf
   valid_limit: 512
 
-batch_size: 128
+batch_size: 64
 epochs: 200
 
 lr: 0.0001
