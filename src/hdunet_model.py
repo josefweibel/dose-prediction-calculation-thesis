@@ -181,8 +181,9 @@ def build_hdunet(model_config, structure_selector):
     in_channels=n_input_channels,
     out_channels=1,
     growth_rate=hdunet_config.get('growth_rate', 16),
-    num_dense_layers=hdunet_config.get('num_dense_layers', 2),
-    num_bottleneck_layers=hdunet_config.get('num_bottleneck_layers', 4)
+    n_dense=hdunet_config.get('num_dense_layers', 2),
+    n_bottleneck=hdunet_config.get('num_bottleneck_layers', 4),
+    base_channels=hdunet_config.get('base_channels', 32),
   )
 
   return model
