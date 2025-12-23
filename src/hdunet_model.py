@@ -75,8 +75,8 @@ class TransitionUp(nn.Module):
       bias=False
     )
 
-def forward(self, x):
-  return self.conv(x)
+  def forward(self, x):
+    return self.conv(x)
 
 class ChannelReduce(nn.Module):
   def __init__(self, in_channels, out_channels):
