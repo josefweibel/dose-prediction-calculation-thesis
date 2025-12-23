@@ -13,6 +13,7 @@ lr: 0.0001
 hdunet: {}
 
 loss: mse  # Paper specifies MSE loss
+masked_loss: true  # Only compute loss on non-zero dose regions
 
 conditioning:
   types:

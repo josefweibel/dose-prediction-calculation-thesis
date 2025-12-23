@@ -59,19 +59,33 @@ class DiffusionModelTrainerModule(nn.Module):
 
 
 class UnetTrainerModule(nn.Module):
-  def __init__(self, model, loss_type='l1'):
+  def __init__(self, model, loss_type='l1', masked_loss=False):
     super().__init__()
 
     self.model = model
     self.loss_type = loss_type
+    self.masked_loss = masked_loss
 
   def forward(self, x, condition):
     output = self.model(condition)
     output = F.relu(output)
-    if self.loss_type == 'mse':
-      return F.mse_loss(output, x, reduction='mean')
+
+    if self.masked_loss:
+      # Only compute loss on non-zero dose regions (like C3D)
+      mask = x > 0
+      if mask.sum() == 0:
+        return torch.tensor(0.0, device=x.device, requires_grad=True)
+      output_masked = output[mask]
+      target_masked = x[mask]
+      if self.loss_type == 'mse':
+        return F.mse_loss(output_masked, target_masked, reduction='mean')
+      else:
+        return F.l1_loss(output_masked, target_masked, reduction='mean')
     else:
-      return F.l1_loss(output, x, reduction='mean')
+      if self.loss_type == 'mse':
+        return F.mse_loss(output, x, reduction='mean')
+      else:
+        return F.l1_loss(output, x, reduction='mean')
 
 
 class C3DTrainerModule(nn.Module):
@@ -168,7 +182,8 @@ class Trainer:
       self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
     else:
       loss_type = self.config.get('loss', 'l1')
-      self.model = UnetTrainerModule(self.net_model, loss_type=loss_type).to(self.device)
+      masked_loss = self.config.get('masked_loss', False)
+      self.model = UnetTrainerModule(self.net_model, loss_type=loss_type, masked_loss=masked_loss).to(self.device)
 
     self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
