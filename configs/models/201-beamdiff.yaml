@@ -6,7 +6,7 @@ data:
   valid_limit: 512
 
 batch_size: 64
-epochs: 200
+epochs: 100
 
 lr: 0.0001
 
