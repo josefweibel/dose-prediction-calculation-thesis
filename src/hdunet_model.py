@@ -21,23 +21,23 @@ import torch.nn.functional as F
 
 class DenseLayer(nn.Module):
   """
-  Single dense layer: Conv + InstanceNorm + ReLU (post-activation pattern).
+  Single dense layer: BN + ReLU + 3x3 conv (pre-activation pattern).
   Output is concatenated with input (dense connection).
   """
   def __init__(self, in_channels, growth_rate):
     super().__init__()
+    self.bn = nn.BatchNorm2d(in_channels)
+    self.relu = nn.ReLU(inplace=True)
     self.conv = nn.Conv2d(
       in_channels,
       growth_rate,
       kernel_size=3,
-      padding=1,
-      bias=True
+      padding=1,  # zero padding to maintain spatial size
+      bias=False  # No bias when using BatchNorm
     )
-    self.norm = nn.InstanceNorm2d(growth_rate)
-    self.relu = nn.ReLU(inplace=True)
 
   def forward(self, x):
-    out = self.relu(self.norm(self.conv(x)))
+    out = self.conv(self.relu(self.bn(x)))
     # Dense connection: concatenate input and output
     return torch.cat([x, out], dim=1)
 
@@ -66,48 +66,48 @@ class DenseBlock(nn.Module):
 
 class TransitionDown(nn.Module):
   """
-  Transition down layer: Conv with 2x2 stride + InstanceNorm + ReLU.
+  Transition down layer: BN + ReLU + 3x3 conv with 2x2 stride.
   Reduces spatial dimensions by half and adds growth_rate features.
   """
   def __init__(self, in_channels, growth_rate):
     super().__init__()
-    self.out_channels = in_channels + growth_rate
+    self.bn = nn.BatchNorm2d(in_channels)
+    self.relu = nn.ReLU(inplace=True)
     self.conv = nn.Conv2d(
       in_channels,
-      self.out_channels,
+      in_channels + growth_rate,
       kernel_size=3,
       stride=2,
       padding=1,
-      bias=True
+      bias=False
     )
-    self.norm = nn.InstanceNorm2d(self.out_channels)
-    self.relu = nn.ReLU(inplace=True)
+    self.out_channels = in_channels + growth_rate
 
   def forward(self, x):
-    return self.relu(self.norm(self.conv(x)))
+    return self.conv(self.relu(self.bn(x)))
 
 
 class TransitionUp(nn.Module):
   """
-  Transition up layer: Bilinear upsample + Conv + InstanceNorm + ReLU.
+  Transition up layer: BN + ReLU + 3x3 transpose conv with 2x2 stride.
   Increases spatial dimensions by 2x.
   """
   def __init__(self, in_channels, out_channels):
     super().__init__()
-    self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-    self.conv = nn.Conv2d(
+    self.bn = nn.BatchNorm2d(in_channels)
+    self.relu = nn.ReLU(inplace=True)
+    self.conv = nn.ConvTranspose2d(
       in_channels,
       out_channels,
       kernel_size=3,
+      stride=2,
       padding=1,
-      bias=True
+      output_padding=1,
+      bias=False
     )
-    self.norm = nn.InstanceNorm2d(out_channels)
-    self.relu = nn.ReLU(inplace=True)
 
   def forward(self, x):
-    x = self.upsample(x)
-    return self.relu(self.norm(self.conv(x)))
+    return self.conv(self.relu(self.bn(x)))
 
 
 class HDUNet(nn.Module):
