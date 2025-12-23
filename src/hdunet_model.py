@@ -21,22 +21,23 @@ import torch.nn.functional as F
 
 class DenseLayer(nn.Module):
   """
-  Single dense layer: 3x3 zero-padded convolution + ReLU.
+  Single dense layer: BN + ReLU + 3x3 conv (pre-activation pattern).
   Output is concatenated with input (dense connection).
   """
   def __init__(self, in_channels, growth_rate):
     super().__init__()
+    self.bn = nn.BatchNorm2d(in_channels)
+    self.relu = nn.ReLU(inplace=True)
     self.conv = nn.Conv2d(
       in_channels,
       growth_rate,
       kernel_size=3,
       padding=1,  # zero padding to maintain spatial size
-      bias=True
+      bias=False  # No bias when using BatchNorm
     )
-    self.relu = nn.ReLU(inplace=True)
 
   def forward(self, x):
-    out = self.relu(self.conv(x))
+    out = self.conv(self.relu(self.bn(x)))
     # Dense connection: concatenate input and output
     return torch.cat([x, out], dim=1)
 
@@ -65,33 +66,36 @@ class DenseBlock(nn.Module):
 
 class TransitionDown(nn.Module):
   """
-  Transition down layer: 3x3 convolution with 2x2 stride + ReLU.
+  Transition down layer: BN + ReLU + 3x3 conv with 2x2 stride.
   Reduces spatial dimensions by half and adds growth_rate features.
   """
   def __init__(self, in_channels, growth_rate):
     super().__init__()
+    self.bn = nn.BatchNorm2d(in_channels)
+    self.relu = nn.ReLU(inplace=True)
     self.conv = nn.Conv2d(
       in_channels,
       in_channels + growth_rate,
       kernel_size=3,
       stride=2,
       padding=1,
-      bias=True
+      bias=False
     )
-    self.relu = nn.ReLU(inplace=True)
     self.out_channels = in_channels + growth_rate
 
   def forward(self, x):
-    return self.relu(self.conv(x))
+    return self.conv(self.relu(self.bn(x)))
 
 
 class TransitionUp(nn.Module):
   """
-  Transition up layer: 3x3 transpose convolution with 2x2 stride + ReLU.
+  Transition up layer: BN + ReLU + 3x3 transpose conv with 2x2 stride.
   Increases spatial dimensions by 2x.
   """
   def __init__(self, in_channels, out_channels):
     super().__init__()
+    self.bn = nn.BatchNorm2d(in_channels)
+    self.relu = nn.ReLU(inplace=True)
     self.conv = nn.ConvTranspose2d(
       in_channels,
       out_channels,
@@ -99,12 +103,11 @@ class TransitionUp(nn.Module):
       stride=2,
       padding=1,
       output_padding=1,
-      bias=True
+      bias=False
     )
-    self.relu = nn.ReLU(inplace=True)
 
   def forward(self, x):
-    return self.relu(self.conv(x))
+    return self.conv(self.relu(self.bn(x)))
 
 
 class HDUNet(nn.Module):
