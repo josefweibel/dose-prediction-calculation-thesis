@@ -59,19 +59,15 @@ class DiffusionModelTrainerModule(nn.Module):
 
 
 class UnetTrainerModule(nn.Module):
-  def __init__(self, model, loss_type='l1'):
+  def __init__(self, model):
     super().__init__()
 
     self.model = model
-    self.loss_type = loss_type
 
   def forward(self, x, condition):
     output = self.model(condition)
     output = F.relu(output)
-    if self.loss_type == 'mse':
-      return F.mse_loss(output, x, reduction='mean')
-    else:
-      return F.l1_loss(output, x, reduction='mean')
+    return F.l1_loss(output, x, reduction='mean')
 
 
 class C3DTrainerModule(nn.Module):
@@ -167,8 +163,7 @@ class Trainer:
       alpha = self.config['c3d'].get('alpha', 0.5)
       self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
     else:
-      loss_type = self.config.get('loss', 'l1')
-      self.model = UnetTrainerModule(self.net_model, loss_type=loss_type).to(self.device)
+      self.model = UnetTrainerModule(self.net_model).to(self.device)
 
     self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
