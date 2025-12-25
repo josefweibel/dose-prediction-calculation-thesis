@@ -5,7 +5,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAMPLES_DIR="${SCRIPT_DIR}/../samples"
 
-echo "Recalculating metrics for all samples..."
+# Optional filter pattern (e.g., "10x" to only process models containing "10x")
+FILTER_PATTERN="${1:-}"
+
+if [ -n "${FILTER_PATTERN}" ]; then
+  echo "Recalculating metrics for models matching '${FILTER_PATTERN}'..."
+else
+  echo "Recalculating metrics for all samples..."
+fi
 echo ""
 
 # Counter for tracking progress
@@ -21,6 +28,11 @@ for model_dir in "${SAMPLES_DIR}"/*; do
 
   # Skip hidden directories
   if [[ "${model_name}" == .* ]]; then
+    continue
+  fi
+
+  # Apply filter pattern if specified
+  if [ -n "${FILTER_PATTERN}" ] && [[ "${model_name}" != *"${FILTER_PATTERN}"* ]]; then
     continue
   fi
 
