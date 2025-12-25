@@ -83,14 +83,23 @@ def compute_metrics(metrics, preds, target, structure, dataset):
 
     result = metric.compute()
 
-    # Handle metrics that return dictionaries
+    # Handle metrics that return dictionaries (potentially nested)
     if isinstance(result, dict):
       for sub_key, sub_value in result.items():
-        full_key = f"{metric_name}/{sub_key}"
-        if torch.is_tensor(sub_value):
-          results[full_key] = sub_value.item() if not torch.isnan(sub_value) else float('nan')
+        if isinstance(sub_value, dict):
+          # Handle nested dicts (e.g., from DoseLevelMetricBase with compute_all_levels=True)
+          for inner_key, inner_value in sub_value.items():
+            full_key = f"{metric_name}/{sub_key}/{inner_key}"
+            if torch.is_tensor(inner_value):
+              results[full_key] = inner_value.item() if not torch.isnan(inner_value) else float('nan')
+            else:
+              results[full_key] = float(inner_value)
         else:
-          results[full_key] = float(sub_value)
+          full_key = f"{metric_name}/{sub_key}"
+          if torch.is_tensor(sub_value):
+            results[full_key] = sub_value.item() if not torch.isnan(sub_value) else float('nan')
+          else:
+            results[full_key] = float(sub_value)
     else:
       results[metric_name] = result.item() if not torch.isnan(result) else float('nan')
 
@@ -115,7 +124,7 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
     'dvh': DVHScore(sync_on_compute=False),
     'dvh_auc': DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False),
     'dose_score': DoseScore(sync_on_compute=False),
-    'homogeneity_index': HomogeneityIndex(sync_on_compute=False),
+    'homogeneity_index': HomogeneityIndex(compute_all_levels=True, sync_on_compute=False),
 
     'mse_body': BodyMaskedMetric(MeanSquaredError(sync_on_compute=False), sync_on_compute=False),
     'rmse_body': BodyMaskedMetric(MeanSquaredError(squared=False, sync_on_compute=False), sync_on_compute=False),
@@ -128,23 +137,13 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
     'var_laplacian_target': VarianceOfLaplacian(mode='target', sync_on_compute=False),
     'var_laplacian_diff': VarianceOfLaplacian(mode='diff', sync_on_compute=False),
 
-    'ptv70_prescription_mae': PTVPrescriptionMAE(ptv_level=70, sync_on_compute=False),
-    'ptv63_prescription_mae': PTVPrescriptionMAE(ptv_level=63, sync_on_compute=False),
-    'ptv56_prescription_mae': PTVPrescriptionMAE(ptv_level=56, sync_on_compute=False),
-    'ptv70_mean_dose': PTVPrescriptionMeanDose(ptv_level=70, sync_on_compute=False),
-    'ptv63_mean_dose': PTVPrescriptionMeanDose(ptv_level=63, sync_on_compute=False),
-    'ptv56_mean_dose': PTVPrescriptionMeanDose(ptv_level=56, sync_on_compute=False),
+    'prescription_mae': PTVPrescriptionMAE(compute_all_levels=True, sync_on_compute=False),
+    'mean_dose': PTVPrescriptionMeanDose(compute_all_levels=True, sync_on_compute=False),
 
-    'ptv70_conformity_index': ConformityIndex(ptv_level=70, sync_on_compute=False),
-    'ptv63_conformity_index': ConformityIndex(ptv_level=63, sync_on_compute=False),
-    'ptv56_conformity_index': ConformityIndex(ptv_level=56, sync_on_compute=False),
-    'ptv70_conformity_index_95': ConformityIndex(ptv_level=70, dose_fraction=0.95, sync_on_compute=False),
-    'ptv63_conformity_index_95': ConformityIndex(ptv_level=63, dose_fraction=0.95, sync_on_compute=False),
-    'ptv56_conformity_index_95': ConformityIndex(ptv_level=56, dose_fraction=0.95, sync_on_compute=False),
+    'conformity_index': ConformityIndex(compute_all_levels=True, sync_on_compute=False),
+    'conformity_index_95': ConformityIndex(compute_all_levels=True, dose_fraction=0.95, sync_on_compute=False),
 
-    'ptv70_gradient_index': GradientIndex(ptv_level=70, sync_on_compute=False),
-    'ptv63_gradient_index': GradientIndex(ptv_level=63, sync_on_compute=False),
-    'ptv56_gradient_index': GradientIndex(ptv_level=56, sync_on_compute=False),
+    'gradient_index': GradientIndex(compute_all_levels=True, sync_on_compute=False),
   }
 
   if include_region_metrics:
@@ -238,7 +237,7 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     'vol_dvh': DVHScore(sync_on_compute=False),
     'vol_dvh_auc': DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False),
     'vol_dose_score': DoseScore(sync_on_compute=False),
-    'vol_homogeneity_index': HomogeneityIndex(sync_on_compute=False),
+    'vol_homogeneity_index': HomogeneityIndex(compute_all_levels=True, sync_on_compute=False),
 
     'vol_mse_body': BodyMaskedMetric(MeanSquaredError(sync_on_compute=False), sync_on_compute=False),
     'vol_rmse_body': BodyMaskedMetric(MeanSquaredError(squared=False, sync_on_compute=False), sync_on_compute=False),
@@ -246,23 +245,13 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
 
     'vol_mae_challenge': ChallengeMAE(sync_on_compute=False),
 
-    'vol_ptv70_prescription_mae': PTVPrescriptionMAE(ptv_level=70, sync_on_compute=False),
-    'vol_ptv63_prescription_mae': PTVPrescriptionMAE(ptv_level=63, sync_on_compute=False),
-    'vol_ptv56_prescription_mae': PTVPrescriptionMAE(ptv_level=56, sync_on_compute=False),
-    'vol_ptv70_mean_dose': PTVPrescriptionMeanDose(ptv_level=70, sync_on_compute=False),
-    'vol_ptv63_mean_dose': PTVPrescriptionMeanDose(ptv_level=63, sync_on_compute=False),
-    'vol_ptv56_mean_dose': PTVPrescriptionMeanDose(ptv_level=56, sync_on_compute=False),
+    'vol_prescription_mae': PTVPrescriptionMAE(compute_all_levels=True, sync_on_compute=False),
+    'vol_mean_dose': PTVPrescriptionMeanDose(compute_all_levels=True, sync_on_compute=False),
 
-    'vol_ptv70_conformity_index': ConformityIndex(ptv_level=70, sync_on_compute=False),
-    'vol_ptv63_conformity_index': ConformityIndex(ptv_level=63, sync_on_compute=False),
-    'vol_ptv56_conformity_index': ConformityIndex(ptv_level=56, sync_on_compute=False),
-    'vol_ptv70_conformity_index_95': ConformityIndex(ptv_level=70, dose_fraction=0.95, sync_on_compute=False),
-    'vol_ptv63_conformity_index_95': ConformityIndex(ptv_level=63, dose_fraction=0.95, sync_on_compute=False),
-    'vol_ptv56_conformity_index_95': ConformityIndex(ptv_level=56, dose_fraction=0.95, sync_on_compute=False),
+    'vol_conformity_index': ConformityIndex(compute_all_levels=True, sync_on_compute=False),
+    'vol_conformity_index_95': ConformityIndex(compute_all_levels=True, dose_fraction=0.95, sync_on_compute=False),
 
-    'vol_ptv70_gradient_index': GradientIndex(ptv_level=70, sync_on_compute=False),
-    'vol_ptv63_gradient_index': GradientIndex(ptv_level=63, sync_on_compute=False),
-    'vol_ptv56_gradient_index': GradientIndex(ptv_level=56, sync_on_compute=False),
+    'vol_gradient_index': GradientIndex(compute_all_levels=True, sync_on_compute=False),
 
     'vol_gamma_5_5': GammaIndex(dose_tolerance=5.0, distance_tolerance=5.0, sync_on_compute=False),
     'vol_gamma_3_3': GammaIndex(dose_tolerance=3.0, distance_tolerance=3.0, sync_on_compute=False),
