@@ -438,6 +438,11 @@ class Evaluator:
     model.eval()
     sampler = build_sampler(self.model_config, self.sampling_config, model).to(self.device)
 
+    if dir is not None and self.rank == 0:
+      dir.mkdir(parents=True, exist_ok=True)
+
+    dist.barrier()
+
     with torch.no_grad():
       sample_metrics = []
 
@@ -466,7 +471,7 @@ class Evaluator:
         pred = self.dataloader.dataset.denormalize_target(pred)
 
         # Calculate metrics for each sample in the batch
-        for i in range(target.shape[0]):
+        for i, (file_name, slice_index) in enumerate(zip(info['file_name'], info['index'])):
           sample_pred = pred[i:i+1]  # Keep batch dimension
           sample_target = target[i:i+1]
           sample_body = body[i:i+1]
@@ -474,8 +479,8 @@ class Evaluator:
           sample_pred = sample_pred * sample_body
 
           sample_row = {
-            'file_name': info['file_name'][i],
-            'slice_index': info['index'][i].item(),
+            'file_name': file_name,
+            'slice_index': slice_index.item(),
             'duration': duration / target.shape[0]
           }
 
@@ -491,18 +496,12 @@ class Evaluator:
 
           sample_metrics.append(sample_row)
 
-        if dir is not None:
-          if self.rank == 0:
-            dir.mkdir(parents=True, exist_ok=True)
-
-          dist.barrier()
-
-          for i, (file_name, slice_index) in enumerate(zip(info['file_name'], info['index'])):
+          if dir is not None:
             p = Path(file_name)
             out_path = Path(dir) / f"{p.stem}-{slice_index.item()}.npy"
-            np.save(out_path, pred[i].cpu().numpy())
+            np.save(out_path, sample_pred.cpu().numpy())
 
-        dist.barrier()
+    dist.barrier()
 
     if self.world_size > 1:
       all_sample_metrics = [None] * self.world_size
