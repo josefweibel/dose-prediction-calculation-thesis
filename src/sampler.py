@@ -38,7 +38,7 @@ class Sampler:
 
     self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None)
 
-    conditioning_groups = self.model_config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
+    conditioning_groups = self.model_config['conditioning']['types']
     self.conditioning_selector = StructureSelector(conditioning_groups)
 
     if self.is_main_process:

@@ -59,6 +59,50 @@ DEFAULT_METRICS = [
 
 HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body', 'var_laplacian_diff']
 
+# PTV line styles: solid for PTV70, dashed for PTV63, dotted for PTV56
+PTV_LINESTYLES = ['solid', 'dashed', 'dotted']
+PTV_LABELS = ['PTV70', 'PTV63', 'PTV56']
+
+def draw_ptv_contours(ax, ptv_doses, color='white', linewidths=0.5):
+  """
+  Draw contours for all three PTV levels on the given axes.
+
+  Args:
+      ax: Matplotlib axes
+      ptv_doses: Array of shape (3, H, W) with PTV high, mid, low dose masks
+      color: Color for all contours
+      linewidths: Line width for contours
+  """
+  for mask, linestyle in zip(ptv_doses, PTV_LINESTYLES):
+    if mask.any():
+      ax.contour(mask > 0, colors=[color], linewidths=linewidths, linestyles=[linestyle])
+
+def draw_ptv_overlay(ax, ptv_doses, color='red', alpha=0.3):
+  """
+  Draw filled overlay for all three PTV levels on the given axes.
+
+  Args:
+      ax: Matplotlib axes
+      ptv_doses: Array of shape (3, H, W) with PTV high, mid, low dose masks
+      color: Color for the overlay
+      alpha: Transparency of the overlay
+  """
+  # Combine all masks into one
+  combined_mask = (ptv_doses[0] > 0) | (ptv_doses[1] > 0) | (ptv_doses[2] > 0)
+  overlay = np.zeros((*combined_mask.shape, 4))
+  # Convert color name to RGB if needed
+  if color == 'red':
+    rgb = (1.0, 0.0, 0.0)
+  elif color == 'blue':
+    rgb = (0.0, 0.0, 1.0)
+  else:
+    rgb = (1.0, 0.0, 0.0)  # default to red
+  overlay[combined_mask, 0] = rgb[0]
+  overlay[combined_mask, 1] = rgb[1]
+  overlay[combined_mask, 2] = rgb[2]
+  overlay[combined_mask, 3] = alpha
+  ax.imshow(overlay)
+
 def build_dataset(dataset_split='test'):
   cache = LRUCacheBytes(max_bytes=5 * 1024 ** 3)  # 5 GB cache
 
@@ -71,7 +115,7 @@ def build_dataset(dataset_split='test'):
     structure_groups=[
       'ct',
       'oar_v3',
-      'ptv',
+      'ptv_doses',
     ],
     limit=None,
     skip=0,
@@ -322,7 +366,7 @@ class BaseResults:
 
   def plot_ptv_dvh(self, ax=None):
     # For DVH plotting, we still need the index
-    ptv_start, _ = self.dataset.selector.get_channel_indices('ptv')
+    ptv_start, _ = self.dataset.selector.get_channel_indices('ptv_doses')
     ax = self.plot_dvh(ptv_start, ax)
     ax.set_title(f'PTV DVH Comparison')
     return ax
@@ -441,30 +485,30 @@ class SampleResults(BaseResults):
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
-    # Get CT and PTV using selector
+    # Get CT and PTV masks using selector
     ct_slice = self.dataset.selector.get_ct(structure)[0]
-    ptv_mask = self.dataset.selector.get_ptv(structure)[0] > 0
+    ptv_doses = self.dataset.selector.get_component(structure, 'ptv_doses')
 
     ax[0].imshow(ct_slice, cmap='gray')
-    overlay = np.zeros((*ptv_mask.shape, 4))
-    overlay[ptv_mask, 0] = 1.0     # red channel
-    overlay[ptv_mask, 3] = 0.3     # alpha channel
-    ax[0].imshow(overlay)
-    ax[0].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_overlay(ax[0], ptv_doses)
+    draw_ptv_contours(ax[0], ptv_doses)
     ax[0].set_title('CT Slice')
     ax[0].axis('off')
 
     im1 = ax[1].imshow(original_dose, cmap='gray', vmin=0, vmax=original_dose.max())
+    draw_ptv_contours(ax[1], ptv_doses)
     ax[1].set_title('Original Dose')
     ax[1].axis('off')
     plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
 
     im2 = ax[2].imshow(pred_dose, cmap='gray', vmin=0, vmax=original_dose.max())
+    draw_ptv_contours(ax[2], ptv_doses)
     ax[2].set_title('Predicted Dose')
     ax[2].axis('off')
     plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
 
     im3 = ax[3].imshow(original_dose - pred_dose, cmap='bwr', vmin=-np.max(np.abs(original_dose - pred_dose)), vmax=np.max(np.abs(original_dose - pred_dose)))
+    draw_ptv_contours(ax[3], ptv_doses)
     ax[3].set_title('Error (original - predicted)')
     ax[3].axis('off')
     plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04)
@@ -506,19 +550,16 @@ class SampleResults(BaseResults):
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
-    # Get CT and PTV using selector
+    # Get CT and PTV masks using selector
     ct_slice = self.dataset.selector.get_ct(structure)[0]
-    ptv_mask = self.dataset.selector.get_ptv(structure)[0] > 0
+    ptv_doses = self.dataset.selector.get_component(structure, 'ptv_doses')
 
     dose_max = original_dose.max()
 
-    # Panel 0: CT with PTV overlay (same as before)
+    # Panel 0: CT with PTV overlay
     ax[0].imshow(ct_slice, cmap='gray')
-    overlay = np.zeros((*ptv_mask.shape, 4))
-    overlay[ptv_mask, 0] = 1.0     # red channel
-    overlay[ptv_mask, 3] = 0.3     # alpha channel
-    ax[0].imshow(overlay)
-    ax[0].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_overlay(ax[0], ptv_doses)
+    draw_ptv_contours(ax[0], ptv_doses)
     ax[0].set_title('CT with PTV')
     ax[0].axis('off')
 
@@ -526,7 +567,7 @@ class SampleResults(BaseResults):
     ax[1].imshow(ct_slice, cmap='gray')
     dose_masked = np.ma.masked_where(original_dose < 0.01 * dose_max, original_dose)
     im1 = ax[1].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
-    ax[1].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_contours(ax[1], ptv_doses)
     ax[1].set_title('Original Dose on CT')
     ax[1].axis('off')
     plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04, label='Dose (Gy)')
@@ -535,18 +576,18 @@ class SampleResults(BaseResults):
     ax[2].imshow(ct_slice, cmap='gray')
     pred_masked = np.ma.masked_where(pred_dose < 0.01 * dose_max, pred_dose)
     im2 = ax[2].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
-    ax[2].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_contours(ax[2], ptv_doses)
     ax[2].set_title('Predicted Dose on CT')
     ax[2].axis('off')
     plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04, label='Dose (Gy)')
 
-    # Panel 3: Error map (same as before but with CT underneath)
+    # Panel 3: Error map with CT underneath
     ax[3].imshow(ct_slice, cmap='gray')
     error = original_dose - pred_dose
     error_max = np.max(np.abs(error))
     error_masked = np.ma.masked_where(np.abs(error) < 0.01 * error_max, error)
     im3 = ax[3].imshow(error_masked, cmap='bwr', alpha=dose_alpha, vmin=-error_max, vmax=error_max)
-    ax[3].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_contours(ax[3], ptv_doses)
     ax[3].set_title('Error on CT (original - predicted)')
     ax[3].axis('off')
     plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04, label='Error (Gy)')
@@ -900,20 +941,18 @@ class ModelComparison(BaseResults):
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
-    # Get CT and PTV using selector
+    # Get CT and PTV masks using selector
     ct_slice = first_result.dataset.selector.get_ct(structure)[0]
-    ptv_mask = first_result.dataset.selector.get_ptv(structure)[0] > 0
+    ptv_doses = first_result.dataset.selector.get_component(structure, 'ptv_doses')
 
     axes[1, 0].imshow(ct_slice, cmap='gray')
-    overlay = np.zeros((*ptv_mask.shape, 4))
-    overlay[ptv_mask, 0] = 1.0     # red channel
-    overlay[ptv_mask, 3] = 0.3     # alpha channel
-    axes[1, 0].imshow(overlay)
-    axes[1, 0].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_overlay(axes[1, 0], ptv_doses)
+    draw_ptv_contours(axes[1, 0], ptv_doses)
     axes[1, 0].set_title('CT Slice')
     axes[1, 0].axis('off')
 
     im1 = axes[0, 0].imshow(original_dose, cmap='gray', vmin=0, vmax=original_dose.max())
+    draw_ptv_contours(axes[0, 0], ptv_doses)
     axes[0, 0].set_title('Original Dose')
     axes[0, 0].axis('off')
     plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04)
@@ -929,6 +968,7 @@ class ModelComparison(BaseResults):
         pred_dose = np.flip(pred_dose_vol[:, slice_index, :], 0)
 
       im = axes[0, i + 1].imshow(pred_dose, cmap='gray', vmin=0, vmax=original_dose.max())
+      draw_ptv_contours(axes[0, i + 1], ptv_doses)
       axes[0, i + 1].set_title(f'{self.result_labels[i]} - Predicted Dose')
       axes[0, i + 1].axis('off')
       plt.colorbar(im, ax=axes[0, i + 1], fraction=0.046, pad=0.04)
@@ -939,6 +979,7 @@ class ModelComparison(BaseResults):
         vmin=-np.max(np.abs(original_dose - pred_dose)),
         vmax=np.max(np.abs(original_dose - pred_dose))
       )
+      draw_ptv_contours(axes[1, i + 1], ptv_doses)
       axes[1, i + 1].set_title(f'{self.result_labels[i]} - Error (original - predicted)')
       axes[1, i + 1].axis('off')
       plt.colorbar(im_err, ax=axes[1, i + 1], fraction=0.046, pad=0.04)
@@ -980,9 +1021,9 @@ class ModelComparison(BaseResults):
     else:
       raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
 
-    # Get CT and PTV using selector
+    # Get CT and PTV masks using selector
     ct_slice = first_result.dataset.selector.get_ct(structure)[0]
-    ptv_mask = first_result.dataset.selector.get_ptv(structure)[0] > 0
+    ptv_doses = first_result.dataset.selector.get_component(structure, 'ptv_doses')
 
     dose_max = original_dose.max()
 
@@ -990,18 +1031,15 @@ class ModelComparison(BaseResults):
     axes[0, 0].imshow(ct_slice, cmap='gray')
     dose_masked = np.ma.masked_where(original_dose < 0.01 * dose_max, original_dose)
     im1 = axes[0, 0].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
-    axes[0, 0].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_contours(axes[0, 0], ptv_doses)
     axes[0, 0].set_title('Original Dose on CT')
     axes[0, 0].axis('off')
     plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04, label='Dose (Gy)')
 
     # Row 1, Col 0: CT with PTV only (reference)
     axes[1, 0].imshow(ct_slice, cmap='gray')
-    overlay = np.zeros((*ptv_mask.shape, 4))
-    overlay[ptv_mask, 0] = 1.0     # red channel
-    overlay[ptv_mask, 3] = 0.3     # alpha channel
-    axes[1, 0].imshow(overlay)
-    axes[1, 0].contour(ptv_mask, colors='red', linewidths=0.5)
+    draw_ptv_overlay(axes[1, 0], ptv_doses)
+    draw_ptv_contours(axes[1, 0], ptv_doses)
     axes[1, 0].set_title('CT with PTV')
     axes[1, 0].axis('off')
 
@@ -1019,7 +1057,7 @@ class ModelComparison(BaseResults):
       axes[0, i + 1].imshow(ct_slice, cmap='gray')
       pred_masked = np.ma.masked_where(pred_dose < 0.01 * dose_max, pred_dose)
       im = axes[0, i + 1].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
-      axes[0, i + 1].contour(ptv_mask, colors='red', linewidths=0.5)
+      draw_ptv_contours(axes[0, i + 1], ptv_doses)
       axes[0, i + 1].set_title(f'{self.result_labels[i]} - Predicted')
       axes[0, i + 1].axis('off')
       plt.colorbar(im, ax=axes[0, i + 1], fraction=0.046, pad=0.04, label='Dose (Gy)')
@@ -1030,7 +1068,7 @@ class ModelComparison(BaseResults):
       axes[1, i + 1].imshow(ct_slice, cmap='gray')
       error_masked = np.ma.masked_where(np.abs(error) < 0.01 * error_max, error)
       im_err = axes[1, i + 1].imshow(error_masked, cmap='bwr', alpha=dose_alpha, vmin=-error_max, vmax=error_max)
-      axes[1, i + 1].contour(ptv_mask, colors='red', linewidths=0.5)
+      draw_ptv_contours(axes[1, i + 1], ptv_doses)
       axes[1, i + 1].set_title(f'{self.result_labels[i]} - Error')
       axes[1, i + 1].axis('off')
       plt.colorbar(im_err, ax=axes[1, i + 1], fraction=0.046, pad=0.04, label='Error (Gy)')

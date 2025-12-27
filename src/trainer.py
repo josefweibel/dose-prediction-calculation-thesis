@@ -96,7 +96,7 @@ class Trainer:
     self.device = detect_device()
 
     # Training dataset uses only conditioning groups
-    conditioning_groups = self.config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
+    conditioning_groups = self.config['conditioning']['types']
     train_dataset = create_gdphmm_dataset(self.config, 'train', structure_groups=conditioning_groups)
 
     if self.config['data'].get('val_on_train', False):

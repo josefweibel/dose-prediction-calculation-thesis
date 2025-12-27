@@ -17,6 +17,7 @@ from metrics import (
   HomogeneityIndex,
   ConformityIndex,
   GradientIndex,
+  PaddickConformityIndex,
   BodyMaskedMetric,
   ChallengeMAE,
   VarianceOfLaplacian,
@@ -64,20 +65,17 @@ def compute_metrics(metrics, preds, target, structure, dataset):
         organ_masks[oar_name] = structure[:, oar_index]  # (batch_size, H, W) or (batch_size, H, W, D)
       metric.update(preds, target, organ_masks)
     elif isinstance(metric, DoseLevelMetricBase):
-      ptv_masks = dataset.selector.get_component(structure, 'ptv_masks')
-      ptv70_mask = ptv_masks[:, 0:1]  # (batch_size, 1, H, W) or (batch_size, 1, H, W, D)
-      ptv63_mask = ptv_masks[:, 1:2]
-      ptv56_mask = ptv_masks[:, 2:3]
-      metric.update(preds, target, ptv70_mask, ptv63_mask, ptv56_mask)
+      ptv_doses = dataset.selector.get_component(structure, 'ptv_doses')
+      metric.update(preds, target, ptv_doses)
     elif isinstance(metric, RegionMaskedMetric):
       metric.update(preds, target, structure)
     elif isinstance(metric, BodyMaskedMetric):
       body = dataset.selector.get_body(structure)
       metric.update(preds, target, body)
     elif isinstance(metric, ChallengeMAE):
-      ptv_channel = dataset.selector.get_ptv(structure)
+      ptv_doses = dataset.selector.get_component(structure, 'ptv_doses')
       body = dataset.selector.get_body(structure)
-      metric.update(preds, target, ptv_channel[:, 0], body[0])  # Remove channel dim
+      metric.update(preds, target, ptv_doses, body)
     else:
       metric.update(preds, target)
 
@@ -142,14 +140,18 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
 
     'conformity_index': ConformityIndex(compute_all_levels=True, sync_on_compute=False),
     'conformity_index_95': ConformityIndex(compute_all_levels=True, dose_fraction=0.95, sync_on_compute=False),
+    'paddick_conformity_index': PaddickConformityIndex(compute_all_levels=True, sync_on_compute=False),
+    'paddick_conformity_index_95': PaddickConformityIndex(compute_all_levels=True, dose_fraction=0.95, sync_on_compute=False),
 
     'gradient_index': GradientIndex(compute_all_levels=True, sync_on_compute=False),
   }
 
   if include_region_metrics:
     # Build region list with indices for RegionMaskedMetric
-    ptv_start, _ = dataset.selector.get_channel_indices('ptv')
-    regions = [('PTV', ptv_start)]
+    # For PTV, use all three dose level indices (high, mid, low) to create a union mask
+    ptv_start, ptv_count = dataset.selector.get_channel_indices('ptv_doses')
+    ptv_indices = list(range(ptv_start, ptv_start + ptv_count))
+    regions = [('PTV', ptv_indices)]
 
     for oar_name in GDPHMM_OAR_V3:
       oar_index = dataset.selector.get_oar_index(oar_name)
@@ -250,6 +252,8 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
 
     'vol_conformity_index': ConformityIndex(compute_all_levels=True, sync_on_compute=False),
     'vol_conformity_index_95': ConformityIndex(compute_all_levels=True, dose_fraction=0.95, sync_on_compute=False),
+    'vol_paddick_conformity_index': PaddickConformityIndex(compute_all_levels=True, sync_on_compute=False),
+    'vol_paddick_conformity_index_95': PaddickConformityIndex(compute_all_levels=True, dose_fraction=0.95, sync_on_compute=False),
 
     'vol_gradient_index': GradientIndex(compute_all_levels=True, sync_on_compute=False),
 
@@ -261,8 +265,10 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
 
   if include_region_metrics:
     # Build region list with indices for RegionMaskedMetric
-    ptv_start, _ = dataset.selector.get_channel_indices('ptv')
-    regions = [('PTV', ptv_start)]
+    # For PTV, use all three dose level indices (high, mid, low) to create a union mask
+    ptv_start, ptv_count = dataset.selector.get_channel_indices('ptv_doses')
+    ptv_indices = list(range(ptv_start, ptv_start + ptv_count))
+    regions = [('PTV', ptv_indices)]
 
     for oar_name in GDPHMM_OAR_V3:
       oar_index = dataset.selector.get_oar_index(oar_name)
@@ -448,7 +454,7 @@ class Evaluator:
     self.device = device
     self.rank = rank
     self.world_size = world_size
-    self.conditioning_groups = self.model_config.get('conditioning', {}).get('types', ['ct', 'ptv', 'oar'])
+    self.conditioning_groups = self.model_config['conditioning']['types']
 
     self.metrics = build_slice_metrics(dataloader.dataset, device)
 

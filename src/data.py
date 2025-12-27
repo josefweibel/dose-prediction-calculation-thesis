@@ -43,12 +43,6 @@ GDPHMM_OAR_V3 = [
   'Submand-PTV', 'SubmandL-PTV', 'SubmandR-PTV', 'Thyroid-PTV', 'SpinalCord_05',
 ]
 
-# dose -> key mapping for PTVs
-GDPHMM_PTV = {
-  70: 'PTV70',
-  63: 'PTV63',
-  56: 'PTV56'
-}
 
 
 class StructureSelector:
@@ -61,28 +55,26 @@ class StructureSelector:
 
   Usage:
     # Define what you need
-    selector = StructureSelector(groups=['ct', 'oar', 'ptv_sdm'])
+    selector = StructureSelector(groups=['ct', 'oar', 'ptv_doses'])
 
     # In dataset __getitem__, load only selected groups
     structure = selector.build_structure(data)
 
     # Access components easily
-    ct = selector.get_component(structure, 'ct')
-    oar = selector.get_component(structure, 'oar')
+    ct = selector.get_ct(structure)
+    ptv_doses = selector.get_ptv_doses(structure)  # (3, H, W) - sorted by dose descending
 
   Available groups:
     - 'ct': CT scan (1 channel)
     - 'body': Body mask (1 channel)
-    - 'ptv': Combined PTV mask (1 channel)
-    - 'ptv_masks': Individual PTV masks for 70/63/56 Gy (3 channels)
+    - 'ptv_doses': PTV masks sorted by dose descending (3 channels), values are dose/GDPHMM_DOSE_MAX
     - 'oar': OAR binary masks (33 channels)
     - 'oar_sdm': OAR signed distance maps (33 channels)
     - 'oar_v2': OAR binary masks without last 3 (30 channels)
     - 'oar_v2_sdm': OAR signed distance maps without last 3 (30 channels)
     - 'oar_v3': OAR binary masks without last 3 and 2 unused (28 channels)
     - 'oar_v3_sdm': OAR signed distance maps without last 3 and 2 unused (28 channels)
-    - 'ptv_sdm': PTV signed distance map (1 channel)
-    - 'ptv_sdms': Individual PTV signed distance maps for 70/63/56 Gy (3 channels)
+    - 'ptv_sdm': PTV signed distance maps (3 channels), one per PTV level
     - 'beam_plate': Beam configuration plate (1 channel)
     - 'angle_plate': Angle configuration plate (1 channel)
   """
@@ -91,16 +83,14 @@ class StructureSelector:
   AVAILABLE_GROUPS = {
     'ct': 1,
     'body': 1,
-    'ptv': 1,
-    'ptv_masks': 3,  # ptv70, ptv63, ptv56
+    'ptv_doses': 3,  # PTV masks sorted by dose descending
     'oar': len(GDPHMM_OAR),  # 33
     'oar_sdm': len(GDPHMM_OAR),  # 33
     'oar_v2': len(GDPHMM_OAR_V2),  # 30 (without last 3)
     'oar_v2_sdm': len(GDPHMM_OAR_V2),  # 30 (without last 3)
     'oar_v3': len(GDPHMM_OAR_V3),  # 28 (new version)
-    'oar_v3_sdm': len(GDPHMM_OAR_V3), # 28 (new version)
-    'ptv_sdm': 1,
-    'ptv_sdms': 3,  # ptv70_sdm, ptv63_sdm, ptv56_sdm
+    'oar_v3_sdm': len(GDPHMM_OAR_V3),  # 28 (new version)
+    'ptv_sdm': 3,  # PTV SDMs sorted by dose descending
     'beam_plate': 1,  # beam configuration plate
     'angle_plate': 1,  # angle configuration plate (3D around isocenter)
   }
@@ -138,8 +128,8 @@ class StructureSelector:
     Build structure tensor from preprocessed data dict.
 
     Args:
-      data: Dict with keys 'ct', 'body', 'ptv', 'ptv70', 'ptv63', 'ptv56', 'oar', 'oar_sdm', 'ptv_sdm',
-            'ptv70_sdm', 'ptv63_sdm', 'ptv56_sdm', 'beam_plate', 'angle_plate'
+      data: Dict with keys 'ct', 'body', 'ptv_doses', 'oar', 'oar_sdm', 'ptv_sdm',
+            'beam_plate', 'angle_plate'
             Each value should be a torch.Tensor or numpy array
 
     Returns:
@@ -152,10 +142,8 @@ class StructureSelector:
         components.append(data['ct'])
       elif group == 'body':
         components.append(data['body'])
-      elif group == 'ptv':
-        components.append(data['ptv'])
-      elif group == 'ptv_masks':
-        components.extend([data['ptv70'], data['ptv63'], data['ptv56']])
+      elif group == 'ptv_doses':
+        components.append(data['ptv_doses'])
       elif group == 'oar':
         components.append(data['oar'])
       elif group == 'oar_sdm':
@@ -174,8 +162,6 @@ class StructureSelector:
         components.append(data['oar_sdm'][[i for i in range(data['oar_sdm'].shape[0]) if i not in (8, 9, 30, 31, 32)]])
       elif group == 'ptv_sdm':
         components.append(data['ptv_sdm'])
-      elif group == 'ptv_sdms':
-        components.extend([data['ptv70_sdm'], data['ptv63_sdm'], data['ptv56_sdm']])
       elif group == 'beam_plate':
         components.append(data['beam_plate'])
       elif group == 'angle_plate':
@@ -298,17 +284,17 @@ class StructureSelector:
 
     return torch.cat(selected, dim=-3)  # Concatenate on channel dim (works for both 3D and 4D)
 
-  def get_ptv(self, structure):
+  def get_ptv_doses(self, structure):
     """
-    Get PTV channel from structure tensor.
+    Get PTV doses channels from structure tensor.
 
     Args:
       structure: Structure tensor - (C, H, W), (B, C, H, W), or (B, C, H, W, D)
 
     Returns:
-      PTV channel(s): (1, H, W), (B, 1, H, W), or (B, 1, H, W, D)
+      PTV doses channels: (3, H, W), (B, 3, H, W), or (B, 3, H, W, D)
     """
-    return self.get_component(structure, 'ptv')
+    return self.get_component(structure, 'ptv_doses')
 
   def get_ct(self, structure):
     """
@@ -395,8 +381,8 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     dataset_name: Name of dataset (e.g., 'gdphmm-hn')
     split: 'train', 'valid', or 'test'
     structure_groups: List of structure groups to load. If None, loads all.
-                      Available: ['ct', 'body', 'ptv', 'ptv_masks', 'oar', 'oar_sdm', 'ptv_sdm', 'ptv_sdms']
-                      Example: ['ct', 'body', 'oar', 'ptv_sdms'] to load only CT, body mask, OARs, and PTV SDMs
+                      Available: ['ct', 'body', 'ptv_doses', 'oar', 'oar_sdm', 'ptv_sdm', 'beam_plate', 'angle_plate']
+                      Example: ['ct', 'body', 'oar', 'ptv_sdm'] to load only CT, body mask, OARs, and PTV SDMs
     limit: Optional limit on number of slices
     skip: Number of slices to skip from start
 
@@ -406,17 +392,17 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
       python scripts/preprocess_gdphmm_slices.py --pad-size 256 256
 
   Example usage:
-    # Load only CT, body, OARs, and PTV SDM (saves memory compared to loading everything)
+    # Load only CT, body, OARs, and PTV doses (saves memory compared to loading everything)
     dataset = GDPHMMPreprocessedSlicesDataset(
       'gdphmm-hn', 'train',
-      structure_groups=['ct', 'body', 'oar', 'ptv_sdm']
+      structure_groups=['ct', 'body', 'oar', 'ptv_doses']
     )
     structure, dose, info = dataset[0]
 
     # Access specific components easily
-    ct = dataset.selector.get_component(structure, 'ct')
-    body = dataset.selector.get_component(structure, 'body')
-    oar = dataset.selector.get_component(structure, 'oar')
+    ct = dataset.selector.get_ct(structure)
+    body = dataset.selector.get_body(structure)
+    ptv_doses = dataset.selector.get_ptv_doses(structure)  # (3, H, W) - sorted by dose descending
   """
   def __init__(
     self,
@@ -480,16 +466,10 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     data = {
       'ct': torch.from_numpy(data_np['ct']),  # float32, normalized [0, 1]
       'body': torch.from_numpy(data_np['body']),  # uint8 {0, 1}
-      'ptv': torch.from_numpy(data_np['ptv']).float() / 100.0,  # uint8 {0, 56, 63, 70} → float32 [0, 1]
-      'ptv70': torch.from_numpy(data_np['ptv70']),  # uint8 {0, 1}
-      'ptv63': torch.from_numpy(data_np['ptv63']),  # uint8 {0, 1}
-      'ptv56': torch.from_numpy(data_np['ptv56']),  # uint8 {0, 1}
+      'ptv_doses': torch.from_numpy(data_np['ptv_doses']).float() / GDPHMM_DOSE_MAX,  # uint8 → float32 [0, 1]
       'oar': torch.from_numpy(data_np['oar']),  # uint8 {0, 1}
       'oar_sdm': torch.from_numpy(data_np['oar_sdm']).float(),  # float16 → float32
       'ptv_sdm': torch.from_numpy(data_np['ptv_sdm']).float(),  # float16 → float32
-      'ptv70_sdm': torch.from_numpy(data_np['ptv70_sdm']).float(),  # float16 → float32
-      'ptv63_sdm': torch.from_numpy(data_np['ptv63_sdm']).float(),  # float16 → float32
-      'ptv56_sdm': torch.from_numpy(data_np['ptv56_sdm']).float(),  # float16 → float32
       'beam_plate': torch.from_numpy(data_np['beam_plate']),  # float32, continuous values
       'angle_plate': torch.from_numpy(data_np['angle_plate']),  # uint8 {0, 1}, binary
     }
