@@ -517,7 +517,7 @@ class Evaluator:
           if dir is not None:
             p = Path(file_name)
             out_path = Path(dir) / f"{p.stem}-{slice_index.item()}.npy"
-            np.save(out_path, sample_pred.cpu().numpy())
+            np.save(out_path, sample_pred[0].cpu().numpy())
 
     dist.barrier()
 
