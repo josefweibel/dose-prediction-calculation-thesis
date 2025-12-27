@@ -298,6 +298,24 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
+  metrics['vol_csr_recommended'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V3,
+    grade_filter=ConstraintGrade.RECOMMENDED,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['vol_csr_optimal'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V3,
+    grade_filter=ConstraintGrade.OPTIMAL,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
+  metrics['vol_csr_acceptable'] = ConstraintSatisfactionRate(
+    organ_names=GDPHMM_OAR_V3,
+    grade_filter=ConstraintGrade.ACCEPTABLE,
+    fractionation=FractionationType.CONVENTIONAL,
+    sync_on_compute=False
+  )
   metrics['vol_agreement'] = ConstraintAgreementScore(
     organ_names=GDPHMM_OAR_V3,
     fractionation=FractionationType.CONVENTIONAL,
