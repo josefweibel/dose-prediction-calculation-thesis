@@ -654,7 +654,83 @@ class SharedCache:
       self.data.clear()
       self.nbytes.value = 0
 
-class LRUCache:
+class LRUCacheBytes:
+  """
+  LRU cache for numpy arrays stored in local memory (not shared).
+  Evicts least recently used entries when total size exceeds max_bytes.
+  Each instance maintains its own isolated cache.
+  """
+
+  def __init__(self, max_bytes):
+    """
+    Args:
+        max_bytes (int): Maximum total cache size in bytes.
+    """
+    self.data = {}  # key -> np.ndarray
+    self.order = []  # LRU order (oldest first)
+    self.max_bytes = max_bytes
+    self.nbytes = 0
+
+  def get(self, key):
+    """
+    Return (np.ndarray, None) or (None, None).
+    Second return value is None for compatibility with shared cache interface.
+    """
+    if key not in self.data:
+      return None, None
+
+    # Update LRU order
+    self.order.remove(key)
+    self.order.append(key)
+
+    return self.data[key], None
+
+  def put(self, key, value: np.ndarray):
+    """Store a numpy array in local memory, evicting LRU entries if needed."""
+    assert isinstance(value, np.ndarray), "LRUCacheBytes only supports numpy arrays"
+
+    v_nbytes = value.nbytes
+
+    # Reject if too big for cache
+    if v_nbytes > self.max_bytes:
+      return
+
+    # If key exists, remove old entry first
+    if key in self.data:
+      old_nbytes = self.data[key].nbytes
+      del self.data[key]
+      self.order.remove(key)
+      self.nbytes -= old_nbytes
+
+    # Evict until there's space
+    while self.nbytes + v_nbytes > self.max_bytes and len(self.order) > 0:
+      oldest = self.order.pop(0)
+      old_nbytes = self.data[oldest].nbytes
+      del self.data[oldest]
+      self.nbytes -= old_nbytes
+
+    # Store new entry
+    self.data[key] = value.copy()
+    self.order.append(key)
+    self.nbytes += v_nbytes
+
+  def __contains__(self, key):
+    return key in self.data
+
+  def __len__(self):
+    return len(self.data)
+
+  def keys(self):
+    return list(self.data.keys())
+
+  def clear(self):
+    """Remove all entries."""
+    self.data.clear()
+    self.order.clear()
+    self.nbytes = 0
+
+
+class Cache:
   """
   Simple cache for numpy arrays stored in local memory (not shared).
   No size limit - stores all entries until manually cleared.

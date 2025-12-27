@@ -7,7 +7,7 @@ from itertools import cycle
 from pathlib import Path
 
 from data import GDPHMM_OAR, GDPHMM_DOSE_MAX
-from data_legacy import GDPHMMSlicesDataset, LRUCache
+from data_legacy import GDPHMMSlicesDataset, LRUCacheBytes
 from constraints import (
     ConstraintLibrary, ConstraintEvaluator,
     FractionationType, ConstraintType, ConstraintGrade,
@@ -60,8 +60,7 @@ DEFAULT_METRICS = [
 HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body', 'var_laplacian_diff']
 
 def build_dataset(dataset_split='test'):
-  # Create an LRUCache instance for the dataset
-  cache = LRUCache()
+  cache = LRUCacheBytes(max_bytes=5 * 1024 ** 3)  # 5 GB cache
 
   # Create the dataset using the legacy class
   dataset = GDPHMMSlicesDataset(
@@ -69,7 +68,11 @@ def build_dataset(dataset_split='test'):
     split=dataset_split,
     img_size=[176, 160],
     cache=cache,
-    structure_groups=None,
+    structure_groups=[
+      'ct',
+      'oar_v3',
+      'ptv',
+    ],
     limit=None,
     skip=0,
     voxel_spacing=[2.5, 2.5, 2.0],
@@ -158,57 +161,65 @@ class BaseResults:
     bins = np.linspace(0, GDPHMM_DOSE_MAX, 200)
     colors = cycle(plt.cm.tab10.colors)
 
-    # Pre-load all original volumes once (common across all models)
     first_result = self.results_list[0]
-    orig_volumes_cache = {}  # file_name -> (structure, original_dose)
+    file_names = first_result.slice_metrics['file_name'].unique()
 
+    # Pre-load masks and compute original DVH in one pass (don't store full dose volumes)
+    cached_masks = {}  # {sample_name: mask}
     y_orig_all = []
     y_orig_means = []
-    for file_name in first_result.slice_metrics['file_name'].unique():
-      sample_results = first_result.for_sample(file_name.replace('.npz', ''))
-      structure, original_dose = sample_results.load_orig_volume()
-      orig_volumes_cache[file_name] = (structure, original_dose)
 
+    for file_name in file_names:
+      sample_name = file_name.replace('.npz', '')
+      sample_results = first_result.for_sample(sample_name)
+      structure, original_dose = sample_results.load_orig_volume()
       mask = structure[structure_index]
+      cached_masks[sample_name] = mask
+
+      # Compute original DVH immediately, then discard original_dose
       x, y_orig = compute_dvh(original_dose, mask, bins)
       y_orig_all.append(y_orig)
-      y_orig_means.append(np.mean(original_dose[mask > 0]))
+      if mask.sum() > 0:
+        y_orig_means.append(np.mean(original_dose[mask > 0]))
 
     if len(y_orig_all) > 0:
       y_orig = np.mean(y_orig_all, axis=0)
       ax.plot(x, y_orig, color='blue', linestyle='-', label='Original Dose', linewidth=2)
-      orig_mean = np.mean(y_orig_means)
-      ax.axvline(x=orig_mean, color='blue', linestyle='--', alpha=0.7)
+      if len(y_orig_means) > 0:
+        orig_mean = np.mean(y_orig_means)
+        ax.axvline(x=orig_mean, color='blue', linestyle='--', alpha=0.7)
 
-      if len(y_orig_means) > 1:
-        orig_min, orig_max = np.min(y_orig_means), np.max(y_orig_means)
-        ax.axvspan(orig_min, orig_max, color='blue', alpha=0.1)
+        if len(y_orig_means) > 1:
+          orig_min, orig_max = np.min(y_orig_means), np.max(y_orig_means)
+          ax.axvspan(orig_min, orig_max, color='blue', alpha=0.1)
 
-    # Plot each model's prediction
+    # Plot each model's prediction using cached masks
     for result, label in zip(self.results_list, self.result_labels):
       color = next(colors)
       y_pred_all = []
       y_pred_means = []
 
       for file_name in result.slice_metrics['file_name'].unique():
-        sample_results = first_result.for_sample(file_name.replace('.npz', ''))
-        structure, _ = sample_results.load_orig_volume()
-        pred_dose = sample_results.load_pred_volume()
+        sample_name = file_name.replace('.npz', '')
+        mask = cached_masks[sample_name]
+        # Load prediction from the current result's path
+        pred_dose = np.load(result.base_path / f'{sample_name}.npy')[0]
 
-        mask = structure[structure_index]
         _, y_pred = compute_dvh(pred_dose, mask, bins)
         y_pred_all.append(y_pred)
-        y_pred_means.append(np.mean(pred_dose[mask > 0]))
+        if mask.sum() > 0:
+          y_pred_means.append(np.mean(pred_dose[mask > 0]))
 
       if len(y_pred_all) > 0:
         y_pred = np.mean(y_pred_all, axis=0)
         ax.plot(x, y_pred, color=color, linestyle='-', label=label)
-        pred_mean = np.mean(y_pred_means)
-        ax.axvline(x=pred_mean, color=color, linestyle='--', alpha=0.5)
+        if len(y_pred_means) > 0:
+          pred_mean = np.mean(y_pred_means)
+          ax.axvline(x=pred_mean, color=color, linestyle='--', alpha=0.5)
 
-        if len(y_pred_means) > 1:
-          pred_min, pred_max = np.min(y_pred_means), np.max(y_pred_means)
-          ax.axvspan(pred_min, pred_max, color=color, alpha=0.1)
+          if len(y_pred_means) > 1:
+            pred_min, pred_max = np.min(y_pred_means), np.max(y_pred_means)
+            ax.axvspan(pred_min, pred_max, color=color, alpha=0.1)
 
     ax.set_xlabel('Dose (Gy)')
     ax.set_ylabel('Volume Fraction ≥ Dose')
@@ -323,11 +334,11 @@ class ModelResults(BaseResults):
 
     path = self.base_path / '_sample_metrics.csv'
     self.slice_metrics = pd.read_csv(path)
-    self.volume_metrics = self.slice_metrics.groupby('file_name').agg({
-      **{col: 'mean' for col in self.slice_metrics.select_dtypes('number').columns},  # mean for all numeric
-      'duration': 'sum',
-      'slice_index': 'count'
-    }).reset_index()
+
+    volume_path = self.base_path / '_volume_metrics.csv'
+    self.volume_metrics = pd.read_csv(volume_path).set_index('file_name')
+    self.volume_metrics['duration'] = self.slice_metrics.groupby(self.slice_metrics['file_name'].str.replace('.npz', ''))['duration'].sum().values
+    self.volume_metrics = self.volume_metrics.reset_index()
 
     # For uniform interface with ModelComparison
     self.results_list = [self]
@@ -460,6 +471,88 @@ class SampleResults(BaseResults):
 
     return ax
 
+  def visualise_slice_with_ct(self, slice_index, axis='sagittal', ax=None, dose_cmap='jet', dose_alpha=0.5):
+    """
+    Visualize a slice with the CT scan underneath transparent dose distributions.
+
+    Args:
+        slice_index: Index of the slice to visualize
+        axis: 'sagittal', 'axial', or 'coronal'
+        ax: Optional matplotlib axes array (expects 4 axes)
+        dose_cmap: Colormap for dose overlay (default: 'jet')
+        dose_alpha: Transparency of dose overlay (default: 0.5)
+
+    Returns:
+        Matplotlib axes
+    """
+    if ax is None:
+      fig, ax = plt.subplots(1, 4, figsize=(20, 5))
+
+    structure_vol, original_dose_vol = self.load_orig_volume()
+    pred_dose_vol = self.load_pred_volume()
+
+    if axis == "sagittal":
+      structure = structure_vol[:, :, :, slice_index]
+      original_dose = original_dose_vol[:, :, slice_index]
+      pred_dose = pred_dose_vol[:, :, slice_index]
+    elif axis == "axial":
+      structure = structure_vol[:, slice_index, :, :]
+      original_dose = original_dose_vol[slice_index, :, :]
+      pred_dose = pred_dose_vol[slice_index, :, :]
+    elif axis == "coronal":
+      structure = np.flip(structure_vol[:, :, slice_index, :], 1)
+      original_dose = np.flip(original_dose_vol[:, slice_index, :], 0)
+      pred_dose = np.flip(pred_dose_vol[:, slice_index, :], 0)
+    else:
+      raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
+
+    # Get CT and PTV using selector
+    ct_slice = self.dataset.selector.get_ct(structure)[0]
+    ptv_mask = self.dataset.selector.get_ptv(structure)[0] > 0
+
+    dose_max = original_dose.max()
+
+    # Panel 0: CT with PTV overlay (same as before)
+    ax[0].imshow(ct_slice, cmap='gray')
+    overlay = np.zeros((*ptv_mask.shape, 4))
+    overlay[ptv_mask, 0] = 1.0     # red channel
+    overlay[ptv_mask, 3] = 0.3     # alpha channel
+    ax[0].imshow(overlay)
+    ax[0].contour(ptv_mask, colors='red', linewidths=0.5)
+    ax[0].set_title('CT with PTV')
+    ax[0].axis('off')
+
+    # Panel 1: CT with original dose overlay
+    ax[1].imshow(ct_slice, cmap='gray')
+    dose_masked = np.ma.masked_where(original_dose < 0.01 * dose_max, original_dose)
+    im1 = ax[1].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
+    ax[1].contour(ptv_mask, colors='red', linewidths=0.5)
+    ax[1].set_title('Original Dose on CT')
+    ax[1].axis('off')
+    plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04, label='Dose (Gy)')
+
+    # Panel 2: CT with predicted dose overlay
+    ax[2].imshow(ct_slice, cmap='gray')
+    pred_masked = np.ma.masked_where(pred_dose < 0.01 * dose_max, pred_dose)
+    im2 = ax[2].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
+    ax[2].contour(ptv_mask, colors='red', linewidths=0.5)
+    ax[2].set_title('Predicted Dose on CT')
+    ax[2].axis('off')
+    plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04, label='Dose (Gy)')
+
+    # Panel 3: Error map (same as before but with CT underneath)
+    ax[3].imshow(ct_slice, cmap='gray')
+    error = original_dose - pred_dose
+    error_max = np.max(np.abs(error))
+    error_masked = np.ma.masked_where(np.abs(error) < 0.01 * error_max, error)
+    im3 = ax[3].imshow(error_masked, cmap='bwr', alpha=dose_alpha, vmin=-error_max, vmax=error_max)
+    ax[3].contour(ptv_mask, colors='red', linewidths=0.5)
+    ax[3].set_title('Error on CT (original - predicted)')
+    ax[3].axis('off')
+    plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04, label='Error (Gy)')
+
+    return ax
+
 class ModelComparison(BaseResults):
   def __init__(self, results_list: List[ModelResults], result_labels=None):
     if len(results_list) == 0:
@@ -482,6 +575,66 @@ class ModelComparison(BaseResults):
     self.slice_metrics = pd.concat([r.slice_metrics for r in results_list], ignore_index=True)
     self.volume_metrics = pd.concat([r.volume_metrics for r in results_list], ignore_index=True)
 
+  def __add__(self, other):
+    """
+    Add ModelResults or another ModelComparison to this comparison.
+
+    Args:
+        other: A ModelResults, ModelComparison, or list of ModelResults to add
+
+    Returns:
+        A new ModelComparison with the added results
+    """
+    if isinstance(other, ModelResults):
+      to_add = [other]
+      labels_to_add = [f'{other.model_name} ({other.sampling_name})']
+    elif isinstance(other, ModelComparison):
+      to_add = other.results_list
+      labels_to_add = other.result_labels
+    elif isinstance(other, (list, tuple)):
+      to_add = list(other)
+      labels_to_add = [f'{r.model_name} ({r.sampling_name})' for r in to_add]
+    else:
+      raise TypeError(f'Cannot add {type(other).__name__} to ModelComparison')
+
+    new_results = list(self.results_list)
+    new_labels = list(self.result_labels)
+    for result, label in zip(to_add, labels_to_add):
+      if result not in new_results:
+        new_results.append(result)
+        new_labels.append(label)
+
+    return ModelComparison(new_results, new_labels)
+
+  def __sub__(self, other):
+    """
+    Exclude specific ModelResults from the comparison.
+
+    Args:
+        other: A ModelResults instance or a list of ModelResults to exclude
+
+    Returns:
+        A new ModelComparison without the excluded results
+    """
+    if isinstance(other, ModelResults):
+      to_exclude = [other]
+    elif isinstance(other, (list, tuple)):
+      to_exclude = list(other)
+    else:
+      raise TypeError(f'Cannot subtract {type(other).__name__} from ModelComparison')
+
+    new_results = []
+    new_labels = []
+    for result, label in zip(self.results_list, self.result_labels):
+      if result not in to_exclude:
+        new_results.append(result)
+        new_labels.append(label)
+
+    if len(new_results) == 0:
+      raise ValueError('Cannot create ModelComparison with no results')
+
+    return ModelComparison(new_results, new_labels)
+
   def for_sample(self, sample):
     # For ModelComparison, we need to handle this differently
     # We could either:
@@ -495,7 +648,7 @@ class ModelComparison(BaseResults):
       'or access individual results via results_list[i].for_sample(sample)'
     )
 
-  def plot_metric_distribution(self, metric, ax=None):
+  def plot_metric_distribution(self, metric, ax=None, sort=False):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
@@ -509,7 +662,16 @@ class ModelComparison(BaseResults):
       labels.extend([label] * len(result.volume_metrics[metric]))
 
     df = pd.DataFrame({'model': labels, 'value': data})
-    sns.boxplot(x='model', y='value', data=df, ax=ax)
+
+    # Sort by median if requested
+    if sort:
+      higher_is_better = metric in HIGHER_IS_BETTER
+      median_order = df.groupby('model')['value'].median().sort_values(ascending=not higher_is_better).index.tolist()
+      order = median_order
+    else:
+      order = None
+
+    sns.boxplot(x='model', y='value', data=df, ax=ax, order=order)
     ax.tick_params(axis='x', rotation=90)
 
     dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
@@ -519,11 +681,14 @@ class ModelComparison(BaseResults):
 
     return ax
 
-  def plot_metric_distributions(self):
-    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+  def plot_metric_distributions(self, metrics=DEFAULT_METRICS):
+    n_metrics = len(metrics)
+    n_cols = min(3, n_metrics)
+    n_rows = (n_metrics + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
     axes = axes.flatten()
 
-    for i, metric in enumerate(DEFAULT_METRICS):
+    for i, metric in enumerate(metrics):
       self.plot_metric_distribution(metric, ax=axes[i])
 
     fig.suptitle('Metric Distributions Across Models', fontsize=16)
@@ -777,6 +942,98 @@ class ModelComparison(BaseResults):
       axes[1, i + 1].set_title(f'{self.result_labels[i]} - Error (original - predicted)')
       axes[1, i + 1].axis('off')
       plt.colorbar(im_err, ax=axes[1, i + 1], fraction=0.046, pad=0.04)
+
+    if fig is not None:
+      fig.tight_layout()
+
+    return fig, axes
+
+  def visualise_slice_comparison_with_ct(self, sample, slice_index, axis='sagittal', dose_cmap='jet', dose_alpha=0.5):
+    """
+    Visualize slice comparison with CT underneath transparent dose distributions.
+
+    Args:
+        sample: Sample name to visualize
+        slice_index: Index of the slice to visualize
+        axis: 'sagittal', 'axial', or 'coronal'
+        dose_cmap: Colormap for dose overlay (default: 'jet')
+        dose_alpha: Transparency of dose overlay (default: 0.5)
+
+    Returns:
+        Tuple of (figure, axes)
+    """
+    fig, axes = plt.subplots(2, len(self.results_list) + 1, figsize=(5 * (len(self.results_list) + 1), 10))
+
+    first_result = self.results_list[0]
+    sample_results = first_result.for_sample(sample)
+    structure_vol, original_dose_vol = sample_results.load_orig_volume()
+
+    if axis == "sagittal":
+      structure = structure_vol[:, :, :, slice_index]
+      original_dose = original_dose_vol[:, :, slice_index]
+    elif axis == "axial":
+      structure = structure_vol[:, slice_index, :, :]
+      original_dose = original_dose_vol[slice_index, :, :]
+    elif axis == "coronal":
+      structure = np.flip(structure_vol[:, :, slice_index, :], 1)
+      original_dose = np.flip(original_dose_vol[:, slice_index, :], 0)
+    else:
+      raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
+
+    # Get CT and PTV using selector
+    ct_slice = first_result.dataset.selector.get_ct(structure)[0]
+    ptv_mask = first_result.dataset.selector.get_ptv(structure)[0] > 0
+
+    dose_max = original_dose.max()
+
+    # Row 0, Col 0: CT with original dose overlay
+    axes[0, 0].imshow(ct_slice, cmap='gray')
+    dose_masked = np.ma.masked_where(original_dose < 0.01 * dose_max, original_dose)
+    im1 = axes[0, 0].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
+    axes[0, 0].contour(ptv_mask, colors='red', linewidths=0.5)
+    axes[0, 0].set_title('Original Dose on CT')
+    axes[0, 0].axis('off')
+    plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04, label='Dose (Gy)')
+
+    # Row 1, Col 0: CT with PTV only (reference)
+    axes[1, 0].imshow(ct_slice, cmap='gray')
+    overlay = np.zeros((*ptv_mask.shape, 4))
+    overlay[ptv_mask, 0] = 1.0     # red channel
+    overlay[ptv_mask, 3] = 0.3     # alpha channel
+    axes[1, 0].imshow(overlay)
+    axes[1, 0].contour(ptv_mask, colors='red', linewidths=0.5)
+    axes[1, 0].set_title('CT with PTV')
+    axes[1, 0].axis('off')
+
+    for i, result in enumerate(self.results_list):
+      sample_results = result.for_sample(sample)
+      pred_dose_vol = sample_results.load_pred_volume()
+      if axis == "sagittal":
+        pred_dose = pred_dose_vol[:, :, slice_index]
+      elif axis == "axial":
+        pred_dose = pred_dose_vol[slice_index, :, :]
+      else:  # coronal
+        pred_dose = np.flip(pred_dose_vol[:, slice_index, :], 0)
+
+      # Row 0: CT with predicted dose overlay
+      axes[0, i + 1].imshow(ct_slice, cmap='gray')
+      pred_masked = np.ma.masked_where(pred_dose < 0.01 * dose_max, pred_dose)
+      im = axes[0, i + 1].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
+      axes[0, i + 1].contour(ptv_mask, colors='red', linewidths=0.5)
+      axes[0, i + 1].set_title(f'{self.result_labels[i]} - Predicted')
+      axes[0, i + 1].axis('off')
+      plt.colorbar(im, ax=axes[0, i + 1], fraction=0.046, pad=0.04, label='Dose (Gy)')
+
+      # Row 1: CT with error overlay
+      error = original_dose - pred_dose
+      error_max = np.max(np.abs(error))
+      axes[1, i + 1].imshow(ct_slice, cmap='gray')
+      error_masked = np.ma.masked_where(np.abs(error) < 0.01 * error_max, error)
+      im_err = axes[1, i + 1].imshow(error_masked, cmap='bwr', alpha=dose_alpha, vmin=-error_max, vmax=error_max)
+      axes[1, i + 1].contour(ptv_mask, colors='red', linewidths=0.5)
+      axes[1, i + 1].set_title(f'{self.result_labels[i]} - Error')
+      axes[1, i + 1].axis('off')
+      plt.colorbar(im_err, ax=axes[1, i + 1], fraction=0.046, pad=0.04, label='Error (Gy)')
 
     if fig is not None:
       fig.tight_layout()
