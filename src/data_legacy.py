@@ -7,6 +7,7 @@ from PIL import Image
 import pandas as pd
 from multiprocessing import shared_memory
 import time
+import json
 from scipy.ndimage import distance_transform_edt, zoom
 
 from data import StructureSelector
@@ -39,11 +40,50 @@ GDPHMM_OAR_V3 = {
   'Submand-PTV', 'SubmandL-PTV', 'SubmandR-PTV', 'Thyroid-PTV', 'SpinalCord_05',
 }
 
-GDPHMM_PTV = {
-  70: 'PTV70',
-  63: 'PTV63',
-  56: 'PTV56'
-}
+# Cache for PTV dictionary (loaded once)
+_PTV_DICT_CACHE = None
+
+def load_ptv_dict():
+  """Load PTV_DICT.json mapping patient IDs to PTV configurations."""
+  global _PTV_DICT_CACHE
+  if _PTV_DICT_CACHE is None:
+    ptv_path = GDPHMM_DATA_BASE_PATH / 'gdphmm-hn' / 'incoming' / 'PTV_DICT.json'
+    with open(ptv_path, 'r') as f:
+      _PTV_DICT_CACHE = json.load(f)
+  return _PTV_DICT_CACHE
+
+
+def combine_ptv(vol, ptv_config):
+  """
+  Combine PTV masks sorted by dose descending.
+
+  Returns:
+    ptv_doses: (3, H, W, D) - 3 masks sorted by dose descending (highest first).
+               Each mask contains the prescribed dose value (e.g., 70, 63, 56 Gy).
+               Missing PTVs are zeros.
+  """
+  shape = vol['img'].shape
+
+  # Collect available PTVs with their doses
+  ptv_list = []
+  for level in ['PTV_High', 'PTV_Mid', 'PTV_Low']:
+    if level in ptv_config:
+      opt_name = ptv_config[level]['OPTName']
+      pdose = ptv_config[level]['PDose']
+      if opt_name in vol:
+        ptv_list.append((vol[opt_name].astype(np.float32), pdose))
+
+  # Sort by dose descending
+  ptv_list.sort(key=lambda x: x[1], reverse=True)
+
+  # Pad to exactly 3 masks
+  while len(ptv_list) < 3:
+    ptv_list.append((np.zeros(shape, dtype=np.float32), 0.0))
+
+  # Stack masks with prescribed dose value
+  ptv_doses = np.stack([mask * pdose for mask, pdose in ptv_list], axis=0)
+
+  return ptv_doses
 
 
 def to_float(x):
@@ -150,6 +190,7 @@ class GDPHMMSlicesDataset(Dataset):
     self.mode = mode
 
     self.selector = StructureSelector(groups=structure_groups)
+    self.ptv_dict = load_ptv_dict()
 
     dir = GDPHMM_DATA_BASE_PATH / dataset_name / split
     self.index_map = pd.read_csv(dir / '_index.csv')
@@ -177,9 +218,11 @@ class GDPHMMSlicesDataset(Dataset):
       T.Lambda(to_byte),
       PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
-    self.ptv_transforms = T.Compose([
+
+    self.ptv_doses_transforms = T.Compose([
       T.Lambda(to_plain_tensor),
       T.Lambda(to_float),
+      T.Lambda(lambda x: x / GDPHMM_DOSE_MAX),  # Normalize to [0, 1]
       PadToFixedSize(img_size, fill=0, padding_mode='constant', mode=mode),
     ])
 
@@ -217,25 +260,21 @@ class GDPHMMSlicesDataset(Dataset):
   def __getitem__(self, idx):
     file, slice_idx = self.index_map[idx]
 
+    # Extract patient ID from filename (e.g., "PT_ABC123.npz" -> "PT_ABC123")
+    patient_id = file.stem
+
     dose_vol, dose_shm = self.cache.get(file.name + ':dose')
-    ptv_vol, ptv_shm = self.cache.get(file.name + ':ptv')
-    ptv70_vol, ptv70_shm = self.cache.get(file.name + ':ptv70')
-    ptv63_vol, ptv63_shm = self.cache.get(file.name + ':ptv63')
-    ptv56_vol, ptv56_shm = self.cache.get(file.name + ':ptv56')
+    ptv_doses_vol, ptv_doses_shm = self.cache.get(file.name + ':ptv_doses')
     ct_vol, ct_shm = self.cache.get(file.name + ':ct')
     oar_sdm, oar_sdm_shm = self.cache.get(file.name + ':oar_sdm')
     ptv_sdm, ptv_sdm_shm = self.cache.get(file.name + ':ptv_sdm')
-    ptv70_sdm, ptv70_sdm_shm = self.cache.get(file.name + ':ptv70_sdm')
-    ptv63_sdm, ptv63_sdm_shm = self.cache.get(file.name + ':ptv63_sdm')
-    ptv56_sdm, ptv56_sdm_shm = self.cache.get(file.name + ':ptv56_sdm')
     body_vol, body_shm = self.cache.get(file.name + ':body')
     beam_plate_vol, beam_plate_shm = self.cache.get(file.name + ':beam_plate')
     angle_plate_vol, angle_plate_shm = self.cache.get(file.name + ':angle_plate')
 
     # If any volume is missing, load all from disk and cache them
-    if (dose_vol is None or ptv_vol is None or ptv70_vol is None or ptv63_vol is None or
-        ptv56_vol is None or ct_vol is None or oar_sdm is None or ptv_sdm is None or
-        ptv70_sdm is None or ptv63_sdm is None or ptv56_sdm is None or body_vol is None or
+    if (dose_vol is None or ptv_doses_vol is None or ct_vol is None or
+        oar_sdm is None or ptv_sdm is None or body_vol is None or
         beam_plate_vol is None or angle_plate_vol is None):
       vol = np.load(file, allow_pickle=True)['arr_0'].item()
 
@@ -245,18 +284,14 @@ class GDPHMMSlicesDataset(Dataset):
         axis=0
       )
 
-      # Create individual PTV masks
-      ptv70_vol = vol['PTV70'].astype(np.uint8) if 'PTV70' in vol else np.zeros_like(vol['dose'].astype(np.uint8))
-      ptv63_vol = vol['PTV63'].astype(np.uint8) if 'PTV63' in vol else np.zeros_like(vol['dose'].astype(np.uint8))
-      ptv56_vol = vol['PTV56'].astype(np.uint8) if 'PTV56' in vol else np.zeros_like(vol['dose'].astype(np.uint8))
+      # Create ptv_doses using patient-specific PTV configuration
+      # Format: (3, H, W, D) sorted by dose descending with dose values
+      ptv_config = self.ptv_dict.get(patient_id, {})
+      ptv_doses_vol = combine_ptv(vol, ptv_config)
 
-      # Combined PTV with dose levels
-      ptv_vol = np.maximum.reduce(
-        [vol[name] * dose / 100 for dose, name in GDPHMM_PTV.items() if name in vol]
-      )
       ct_vol = vol['img']
       body_vol = vol['Body']
-      oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm = self.compute_sdms(oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol)
+      oar_sdm, ptv_sdm = self.compute_sdms(oar_vol, ptv_doses_vol)
 
       # Process beam_plate (already 3D) and angle_plate (2D to 3D)
       beam_plate_vol = vol['beam_plate']
@@ -264,27 +299,21 @@ class GDPHMMSlicesDataset(Dataset):
       isocenter = vol['isocenter']
       angle_plate_vol = process_angle_plate(angle_plate_2d, ct_vol.shape, isocenter, z_range=5)
 
-      ct_cache, dose_cache, ptv_cache, ptv70_cache, ptv63_cache, ptv56_cache, body_cache, oar_sdm_cache, ptv_sdm_cache, ptv70_sdm_cache, ptv63_sdm_cache, ptv56_sdm_cache, beam_plate_cache, angle_plate_cache = self.pack_for_cache(
-        ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm, beam_plate_vol, angle_plate_vol
+      ct_cache, dose_cache, ptv_doses_cache, body_cache, oar_sdm_cache, ptv_sdm_cache, beam_plate_cache, angle_plate_cache = self.pack_for_cache(
+        ct_vol, dose_vol, ptv_doses_vol, body_vol, oar_sdm, ptv_sdm, beam_plate_vol, angle_plate_vol
       )
 
       self.cache.put(file.name + ':dose', dose_cache)
-      self.cache.put(file.name + ':ptv', ptv_cache)
-      self.cache.put(file.name + ':ptv70', ptv70_cache)
-      self.cache.put(file.name + ':ptv63', ptv63_cache)
-      self.cache.put(file.name + ':ptv56', ptv56_cache)
+      self.cache.put(file.name + ':ptv_doses', ptv_doses_cache)
       self.cache.put(file.name + ':ct', ct_cache)
       self.cache.put(file.name + ':oar_sdm', oar_sdm_cache)
       self.cache.put(file.name + ':ptv_sdm', ptv_sdm_cache)
-      self.cache.put(file.name + ':ptv70_sdm', ptv70_sdm_cache)
-      self.cache.put(file.name + ':ptv63_sdm', ptv63_sdm_cache)
-      self.cache.put(file.name + ':ptv56_sdm', ptv56_sdm_cache)
       self.cache.put(file.name + ':body', body_cache)
       self.cache.put(file.name + ':beam_plate', beam_plate_cache)
       self.cache.put(file.name + ':angle_plate', angle_plate_cache)
     else:
-      ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm, beam_plate_vol, angle_plate_vol = self.unpack_from_cache(
-        ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm, beam_plate_vol, angle_plate_vol
+      ct_vol, dose_vol, ptv_doses_vol, body_vol, oar_sdm, ptv_sdm, beam_plate_vol, angle_plate_vol = self.unpack_from_cache(
+        ct_vol, dose_vol, ptv_doses_vol, body_vol, oar_sdm, ptv_sdm, beam_plate_vol, angle_plate_vol
       )
 
     oar_vol = (oar_sdm > 0).astype(np.uint8)
@@ -292,18 +321,12 @@ class GDPHMMSlicesDataset(Dataset):
     if self.mode == '2d':
       sample = {
         'dose': self.dose_transforms(dose_vol[:, :, slice_idx]),
-        'ptv': self.ptv_transforms(ptv_vol[:, :, slice_idx]),
-        'ptv70': self.oar_transforms(ptv70_vol[:, :, slice_idx]),
-        'ptv63': self.oar_transforms(ptv63_vol[:, :, slice_idx]),
-        'ptv56': self.oar_transforms(ptv56_vol[:, :, slice_idx]),
+        'ptv_doses': self.ptv_doses_transforms(ptv_doses_vol[:, :, :, slice_idx]),
         'ct': self.ct_transforms(ct_vol[:, :, slice_idx]),
         'oar': self.oar_transforms(oar_vol[:, :, :, slice_idx]),
         'body': self.oar_transforms(body_vol[:, :, slice_idx]),
         'oar_sdm': self.sdm_transforms(oar_sdm[:, :, :, slice_idx]),
-        'ptv_sdm': self.sdm_transforms(ptv_sdm[:, :, slice_idx]),
-        'ptv70_sdm': self.sdm_transforms(ptv70_sdm[:, :, slice_idx]),
-        'ptv63_sdm': self.sdm_transforms(ptv63_sdm[:, :, slice_idx]),
-        'ptv56_sdm': self.sdm_transforms(ptv56_sdm[:, :, slice_idx]),
+        'ptv_sdm': self.sdm_transforms(ptv_sdm[:, :, :, slice_idx]),
         'beam_plate': self.beam_plate_transforms(beam_plate_vol[:, :, slice_idx]),
         'angle_plate': self.angle_plate_transforms(angle_plate_vol[:, :, slice_idx]),
         'info': {
@@ -316,18 +339,12 @@ class GDPHMMSlicesDataset(Dataset):
     else:
       sample = {
         'dose': self.dose_transforms(dose_vol),
-        'ptv': self.ptv_transforms(ptv_vol),
-        'ptv70': self.oar_transforms(ptv70_vol),
-        'ptv63': self.oar_transforms(ptv63_vol),
-        'ptv56': self.oar_transforms(ptv56_vol),
+        'ptv_doses': self.ptv_doses_transforms(ptv_doses_vol),
         'ct': self.ct_transforms(ct_vol),
         'oar': self.oar_transforms(oar_vol),
         'body': self.oar_transforms(body_vol),
         'oar_sdm': self.sdm_transforms(oar_sdm),
         'ptv_sdm': self.sdm_transforms(ptv_sdm),
-        'ptv70_sdm': self.sdm_transforms(ptv70_sdm),
-        'ptv63_sdm': self.sdm_transforms(ptv63_sdm),
-        'ptv56_sdm': self.sdm_transforms(ptv56_sdm),
         'beam_plate': self.beam_plate_transforms(beam_plate_vol),
         'angle_plate': self.angle_plate_transforms(angle_plate_vol),
         'info': {
@@ -337,7 +354,7 @@ class GDPHMMSlicesDataset(Dataset):
         }
       }
 
-    for shm in [dose_shm, ptv_shm, ptv70_shm, ptv63_shm, ptv56_shm, ct_shm, oar_sdm_shm, ptv_sdm_shm, ptv70_sdm_shm, ptv63_sdm_shm, ptv56_sdm_shm, body_shm, beam_plate_shm, angle_plate_shm]:
+    for shm in [dose_shm, ptv_doses_shm, ct_shm, oar_sdm_shm, ptv_sdm_shm, body_shm, beam_plate_shm, angle_plate_shm]:
       if shm is not None:
         shm.close()
 
@@ -351,58 +368,56 @@ class GDPHMMSlicesDataset(Dataset):
   def finish(self):
     return self.cache.clear()
 
-  def compute_sdms(self, oar_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol):
+  def compute_sdms(self, oar_vol, ptv_doses):
+    """
+    Compute signed distance maps for OAR and PTV masks.
+
+    Args:
+      oar_vol: (N_OAR, H, W, D) - binary masks for organs at risk
+      ptv_doses: (3, H, W, D) - PTV masks sorted by dose (highest first)
+
+    Returns:
+      oar_sdm: (N_OAR, H, W, D) float32 - SDMs for each OAR
+      ptv_sdm: (3, H, W, D) float32 - SDMs for each PTV level
+    """
     oar_sdm = np.stack([
       compute_sdm(oar_vol[i], self.voxel_spacing)
       for i in range(oar_vol.shape[0])
     ], axis=0)
 
-    ptv_binary = (ptv_vol > 0).astype(np.uint8)
-    ptv_sdm = compute_sdm(ptv_binary, self.voxel_spacing)
+    # Compute SDMs for each PTV mask (binary: >0)
+    ptv_sdm = np.stack([
+      compute_sdm((ptv_doses[i] > 0).astype(np.uint8), self.voxel_spacing)
+      for i in range(3)
+    ], axis=0)
 
-    # Compute SDMs for individual PTV levels
-    ptv70_sdm = compute_sdm(ptv70_vol, self.voxel_spacing)
-    ptv63_sdm = compute_sdm(ptv63_vol, self.voxel_spacing)
-    ptv56_sdm = compute_sdm(ptv56_vol, self.voxel_spacing)
+    return oar_sdm, ptv_sdm
 
-    return oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm
-
-  def pack_for_cache(self, ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm, beam_plate_vol, angle_plate_vol):
+  def pack_for_cache(self, ct_vol, dose_vol, ptv_doses_vol, body_vol, oar_sdm, ptv_sdm, beam_plate_vol, angle_plate_vol):
     ct_pack = np.clip(ct_vol, GDPHMM_IMG_MIN, GDPHMM_IMG_MAX).astype(np.float16)
     dose_norm = (dose_vol - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
     dose_pack = np.clip(dose_norm * 65535, 0, 65535).astype(np.uint16)
-    ptv_pack = np.clip(ptv_vol * 65535, 0, 65535).astype(np.uint16)
-    ptv70_pack = ptv70_vol.astype(np.uint8)
-    ptv63_pack = ptv63_vol.astype(np.uint8)
-    ptv56_pack = ptv56_vol.astype(np.uint8)
+    # ptv_doses contains dose values (0-88 Gy), store as float32 to preserve precision
+    ptv_doses_pack = ptv_doses_vol.astype(np.float32)
     body_pack = body_vol.astype(np.uint8)
-    oar_sdm = oar_sdm.astype(np.float16)
-    ptv_sdm = ptv_sdm.astype(np.float16)
-    ptv70_sdm = ptv70_sdm.astype(np.float16)
-    ptv63_sdm = ptv63_sdm.astype(np.float16)
-    ptv56_sdm = ptv56_sdm.astype(np.float16)
+    oar_sdm_pack = oar_sdm.astype(np.float16)
+    ptv_sdm_pack = ptv_sdm.astype(np.float16)
     beam_plate_pack = beam_plate_vol.astype(np.float32)
     angle_plate_pack = angle_plate_vol.astype(np.uint8)
 
-    return ct_pack, dose_pack, ptv_pack, ptv70_pack, ptv63_pack, ptv56_pack, body_pack, oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm, beam_plate_pack, angle_plate_pack
+    return ct_pack, dose_pack, ptv_doses_pack, body_pack, oar_sdm_pack, ptv_sdm_pack, beam_plate_pack, angle_plate_pack
 
-  def unpack_from_cache(self, ct_pack, dose_pack, ptv_pack, ptv70_pack, ptv63_pack, ptv56_pack, body_pack, oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm, beam_plate_pack, angle_plate_pack):
+  def unpack_from_cache(self, ct_pack, dose_pack, ptv_doses_pack, body_pack, oar_sdm_pack, ptv_sdm_pack, beam_plate_pack, angle_plate_pack):
     ct_vol = ct_pack.astype(np.float32)
     dose_vol = (dose_pack.astype(np.float32) / 65535.0) * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
-    ptv_vol = ptv_pack.astype(np.float32) / 65535.0
-    ptv70_vol = ptv70_pack.astype(np.uint8)
-    ptv63_vol = ptv63_pack.astype(np.uint8)
-    ptv56_vol = ptv56_pack.astype(np.uint8)
+    ptv_doses_vol = ptv_doses_pack.astype(np.float32)
     body_vol = body_pack.astype(np.uint8)
-    oar_sdm = oar_sdm.astype(np.float32)
-    ptv_sdm = ptv_sdm.astype(np.float32)
-    ptv70_sdm = ptv70_sdm.astype(np.float32)
-    ptv63_sdm = ptv63_sdm.astype(np.float32)
-    ptv56_sdm = ptv56_sdm.astype(np.float32)
+    oar_sdm = oar_sdm_pack.astype(np.float32)
+    ptv_sdm = ptv_sdm_pack.astype(np.float32)
     beam_plate_vol = beam_plate_pack.astype(np.float32)
     angle_plate_vol = angle_plate_pack.astype(np.uint8)
 
-    return ct_vol, dose_vol, ptv_vol, ptv70_vol, ptv63_vol, ptv56_vol, body_vol, oar_sdm, ptv_sdm, ptv70_sdm, ptv63_sdm, ptv56_sdm, beam_plate_vol, angle_plate_vol
+    return ct_vol, dose_vol, ptv_doses_vol, body_vol, oar_sdm, ptv_sdm, beam_plate_vol, angle_plate_vol
 
 
 class PadToFixedSize:
