@@ -58,6 +58,82 @@ class DiffusionModelTrainerModule(nn.Module):
     return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
+class VPredictionTrainerModule(nn.Module):
+  """
+  Training module with v-prediction parameterization.
+
+  V-prediction (Salimans & Ho, 2022):
+    v = alpha_t * epsilon - sigma_t * x_0
+
+  This parameterization provides more stable training, especially at low SNR,
+  and is preferred for progressive distillation.
+  """
+  def __init__(self, denoising_model, beta_1, beta_T, T, loss_weighting='snr_plus_one'):
+    super().__init__()
+
+    self.model = denoising_model
+    self.T = T
+    self.loss_weighting = loss_weighting
+
+    betas = torch.linspace(beta_1, beta_T, T).float()
+    alphas = 1. - betas
+    alphas_bar = torch.cumprod(alphas, dim=0)
+
+    sqrt_alphas_bar = torch.sqrt(alphas_bar)
+    sqrt_one_minus_alphas_bar = torch.sqrt(1. - alphas_bar)
+
+    self.register_buffer('sqrt_alphas_bar', sqrt_alphas_bar)
+    self.register_buffer('sqrt_one_minus_alphas_bar', sqrt_one_minus_alphas_bar)
+
+    # Precompute SNR-based loss weights
+    if loss_weighting == 'snr_plus_one':
+      # w(t) = SNR(t) + 1 = alpha_t^2 / sigma_t^2 + 1
+      snr = (sqrt_alphas_bar ** 2) / (sqrt_one_minus_alphas_bar ** 2 + 1e-8)
+      weights = snr + 1.0
+    elif loss_weighting == 'uniform':
+      weights = torch.ones(T)
+    elif loss_weighting == 'truncated_snr':
+      snr = (sqrt_alphas_bar ** 2) / (sqrt_one_minus_alphas_bar ** 2 + 1e-8)
+      weights = torch.clamp(snr, min=1.0)
+    else:
+      weights = torch.ones(T)
+
+    # Normalize weights to have mean 1
+    weights = weights / weights.mean()
+    self.register_buffer('loss_weights', weights)
+
+    self.cache = DeepCache(CacheConfig(intervals={}, warmup=0, layers=[], sampling_steps=T))
+
+  def forward(self, x_0, condition):
+    t = torch.randint(self.T, size=(x_0.shape[0], ), device=x_0.device)
+
+    noise = torch.randn_like(x_0)
+    alpha_t = self.__extract(self.sqrt_alphas_bar, t, x_0.shape)
+    sigma_t = self.__extract(self.sqrt_one_minus_alphas_bar, t, x_0.shape)
+
+    # Compute noisy sample: x_t = alpha_t * x_0 + sigma_t * noise
+    x_t = alpha_t * x_0 + sigma_t * noise
+
+    # Compute target v = alpha_t * noise - sigma_t * x_0
+    v_target = alpha_t * noise - sigma_t * x_0
+
+    # Model predicts v
+    v_pred = self.model(x_t, condition, t, self.cache)
+
+    # Compute weighted MSE loss
+    weights = self.__extract(self.loss_weights, t, x_0.shape)
+    loss = weights * F.mse_loss(v_pred, v_target, reduction='none')
+
+    return loss.mean()
+
+  def __extract(self, v, t, x_shape):
+    """
+    Extract some coefficients at specified timesteps, then reshape to
+    [batch_size, 1, 1, 1, 1, ...] for broadcasting purposes.
+    """
+    return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
+
+
 class UnetTrainerModule(nn.Module):
   def __init__(self, model):
     super().__init__()
@@ -153,12 +229,23 @@ class Trainer:
     self.net_model = build_model(self.config, train_dataset.selector).to(self.device)
 
     if 'diffusion' in self.config:
-      self.model = DiffusionModelTrainerModule(
-        denoising_model=self.net_model,
-        beta_1=self.config['diffusion']['beta_1'],
-        beta_T=self.config['diffusion']['beta_T'],
-        T=self.config['diffusion']['T']
-      ).to(self.device)
+      parameterization = self.config['diffusion'].get('parameterization', 'epsilon')
+
+      if parameterization == 'v':
+        self.model = VPredictionTrainerModule(
+          denoising_model=self.net_model,
+          beta_1=self.config['diffusion']['beta_1'],
+          beta_T=self.config['diffusion']['beta_T'],
+          T=self.config['diffusion']['T'],
+          loss_weighting=self.config['diffusion'].get('loss_weighting', 'snr_plus_one')
+        ).to(self.device)
+      else:
+        self.model = DiffusionModelTrainerModule(
+          denoising_model=self.net_model,
+          beta_1=self.config['diffusion']['beta_1'],
+          beta_T=self.config['diffusion']['beta_T'],
+          T=self.config['diffusion']['T']
+        ).to(self.device)
     elif 'c3d' in self.config:
       alpha = self.config['c3d'].get('alpha', 0.5)
       self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)

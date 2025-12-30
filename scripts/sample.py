@@ -9,7 +9,7 @@ import sys
 import atexit
 from datetime import timedelta
 
-from config import read_sampling_config
+from config import read_sampling_config, build_distilled_model_name
 from sampler import Sampler
 
 
@@ -27,10 +27,20 @@ if __name__ == '__main__':
   parser.add_argument('--config', type=str, required=True, help='Name of the sampling configuration file (without .yaml extension)')
   parser.add_argument('--data-split', type=str, choices=['train', 'val', 'test'], default='test', help='Data split to use for sampling.')
   parser.add_argument('--epoch', type=parse_epoch, default=None, help='Use checkpoint from this epoch. Use "latest" for the most recent checkpoint.')
+  parser.add_argument('--distill', type=str, default=None, help='Distillation config name (if sampling distilled model)')
+  parser.add_argument('--round', type=str, default=None, help='Distillation round (e.g., "8-to-4")')
   parser.add_argument('--distributed', action='store_true', help='Set to True to use distributed sampling across multiple GPUs.')
   args = parser.parse_args()
 
+  # Build full model name from args
+  if args.distill and args.round:
+    model_name = build_distilled_model_name(args.model, args.distill, args.round)
+  else:
+    model_name = args.model
+
   print('Sampling with arguments', args)
+  if args.distill and args.round:
+    print(f'Full model name: {model_name}')
   print()
 
   sampling_config = read_sampling_config(args.config)
@@ -70,7 +80,7 @@ if __name__ == '__main__':
 
     try:
       sampler = Sampler(
-        model_name=args.model,
+        model_name=model_name,
         sampling_config=sampling_config,
         data_split=args.data_split,
         epoch=args.epoch if args.epoch else None,
@@ -104,10 +114,10 @@ if __name__ == '__main__':
     print()
 
     sampler = Sampler(
-      model_name=args.model,
+      model_name=model_name,
       sampling_config=sampling_config,
       data_split=args.data_split,
-      epoch=args.epochs,
+      epoch=args.epoch,
     )
 
     def cleanup():

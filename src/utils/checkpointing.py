@@ -11,11 +11,15 @@ def load_last_checkpoint(model_name):
 
   return torch.load(max(checkpoint_files, key=lambda f: int(f.stem)))
 
-def load_checkpoint(model_name, epoch):
+def find_checkpoint(model_name, epoch):
+  """Find the path to a checkpoint file for a specific epoch."""
   checkpoint_path = CHECKPOINTS_PATH / model_name / f'{epoch}.pt'
   if not checkpoint_path.exists():
     raise FileNotFoundError(f'Checkpoint for epoch {epoch} not found at {checkpoint_path}')
-  return torch.load(checkpoint_path)
+  return checkpoint_path
+
+def load_checkpoint(model_name, epoch):
+  return torch.load(find_checkpoint(model_name, epoch))
 
 def save_checkpoint(model_name, checkpoint_data):
   (CHECKPOINTS_PATH / model_name).mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,36 @@
+# Progressive Distillation Configuration
+# Model-independent settings for progressive distillation
+#
+# Usage:
+#   python scripts/distill.py --model 101-beamdiff --distill progressive-v1
+
+# Teacher checkpoint configuration
+teacher:
+  checkpoint_epoch: latest  # or specific epoch number (e.g., 99)
+  use_ema: true             # Use EMA weights as teacher (recommended)
+
+# Distillation schedule
+# Initial teacher T is taken from model config (diffusion.T)
+# Each round halves the number of steps: T -> T/2 -> T/4 -> ... -> target_T
+distillation:
+  target_T: 2               # Final target steps
+
+# Per-round training settings
+round:
+  epochs: 100               # Epochs per distillation round
+  lr: 0.0001                # Learning rate for distillation
+  warmup_epochs: 2          # LR warmup epochs
+  batch_size: 128           # May need smaller batch due to teacher memory
+  loss_weighting: snr_plus_one  # 'uniform', 'snr', 'snr_plus_one', or 'truncated_snr'
+  checkpoint_interval: 10   # Keep every Nth checkpoint
+
+# Student initialization
+student_init: copy_teacher  # 'copy_teacher' or 'random'
+
+# Training settings
+mixed_precision: false
+grad_clip: 1.0
+ema_decay: 0.9999
+
+# Evaluation settings
+eval_after_round: true      # Run full evaluation after each round

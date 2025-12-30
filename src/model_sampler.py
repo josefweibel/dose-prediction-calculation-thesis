@@ -28,6 +28,9 @@ def build_sampler(model_config, sampling_config, model):
   else:
     cache_config = CacheConfig(sampling_steps=sampling_config['T'], layers=[], intervals={}, warmup=0)
 
+  # Get parameterization from model config (default: epsilon)
+  parameterization = model_config['diffusion'].get('parameterization', 'epsilon')
+
   if sampling_config['sampler'] == 'ddpm':
     return GaussianDiffusionSampler(
       model,
@@ -37,6 +40,7 @@ def build_sampler(model_config, sampling_config, model):
       cache_config,
       sampling_config['T'],
       schedule=sampling_config['schedule'],
+      parameterization=parameterization,
     )
   elif sampling_config['sampler'] == 'ddim':
     return DDIMSampler(
@@ -48,6 +52,7 @@ def build_sampler(model_config, sampling_config, model):
       sampling_config['T'],
       eta=sampling_config['eta'],
       schedule=sampling_config['schedule'],
+      parameterization=parameterization,
     )
   elif sampling_config['sampler'] == 'deis':
     return DEISSampler(
@@ -59,6 +64,7 @@ def build_sampler(model_config, sampling_config, model):
       sampling_config['T'],
       order=sampling_config['order'],
       schedule=sampling_config['schedule'],
+      parameterization=parameterization,
     )
   elif sampling_config['sampler'] == 'unet':
     return UnetSampler(model)
@@ -128,6 +134,7 @@ class GaussianDiffusionSampler(nn.Module):
     cache_config,
     sampling_T=None,
     schedule: str = "linear", # "linear", "cosine", or "karras"
+    parameterization: str = "epsilon", # "epsilon" or "v"
   ):
     super().__init__()
 
@@ -135,6 +142,7 @@ class GaussianDiffusionSampler(nn.Module):
     self.train_T = train_T
     self.sampling_T = sampling_T or train_T
     self.cache_config = cache_config
+    self.parameterization = parameterization
 
     # Compute full training schedule
     betas = torch.linspace(beta_1, beta_T, train_T).float()
@@ -177,10 +185,21 @@ class GaussianDiffusionSampler(nn.Module):
       cache.set_current_step(i)
 
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
-      eps = self.model(x, condition, t_vec, cache)
+      model_output = self.model(x, condition, t_vec, cache)
 
-      # Predict x0 using cached coefficients
-      x0_pred = self.sqrt_recip_alphas_bar[i] * (x - self.sqrt_one_minus_alphas_bar[i] * eps)
+      # Convert model output to x0 based on parameterization
+      if self.parameterization == 'v':
+        # v = alpha_t * eps - sigma_t * x0
+        # => x0 = alpha_t * x - sigma_t * v
+        # Here we use sqrt_recip_alphas_bar = 1/sqrt(alpha_bar)
+        # and sqrt_one_minus_alphas_bar = sqrt(1 - alpha_bar) = sigma
+        sqrt_alpha_bar = 1.0 / self.sqrt_recip_alphas_bar[i]
+        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_bar[i]
+        x0_pred = sqrt_alpha_bar * x - sqrt_one_minus_alpha_bar * model_output
+      else:
+        # epsilon parameterization (default)
+        eps = model_output
+        x0_pred = self.sqrt_recip_alphas_bar[i] * (x - self.sqrt_one_minus_alphas_bar[i] * eps)
 
       # Compute mean using precomputed coefficients
       mean = self.mean_coef1[i] * x0_pred + self.mean_coef2[i] * x # Eq. 7 in DDPM paper
@@ -205,6 +224,7 @@ class DDIMSampler(nn.Module):
     sampling_T=None,
     eta=0.0,
     schedule: str = "linear", # "linear", "cosine", or "karras"
+    parameterization: str = "epsilon", # "epsilon" or "v"
   ):
     super().__init__()
     self.model = model
@@ -212,6 +232,7 @@ class DDIMSampler(nn.Module):
     self.sampling_T = sampling_T or train_T
     self.cache_config = cache_config
     self.eta = eta
+    self.parameterization = parameterization
 
     # Compute full training schedule
     betas = torch.linspace(beta_1, beta_T, train_T).float()
@@ -250,7 +271,7 @@ class DDIMSampler(nn.Module):
       cache.set_current_step(i)
 
       t_vec = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
-      eps = self.model(x, condition, t_vec, cache)
+      model_output = self.model(x, condition, t_vec, cache)
 
       sqrt_alpha_bar_t = self.sqrt_alphas_bar[i]
       sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_bar[i]
@@ -258,7 +279,18 @@ class DDIMSampler(nn.Module):
       sigma = self.sigma[i]
       dir_coeff = self.dir_coeff[i]
 
-      x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
+      # Convert model output to x0 based on parameterization
+      if self.parameterization == 'v':
+        # v = alpha_t * eps - sigma_t * x0
+        # => x0 = alpha_t * x - sigma_t * v
+        x0 = sqrt_alpha_bar_t * x - sqrt_one_minus_alpha_bar_t * model_output
+        # Compute eps from x0 for the direction term
+        eps = (x - sqrt_alpha_bar_t * x0) / sqrt_one_minus_alpha_bar_t
+      else:
+        # epsilon parameterization (default)
+        eps = model_output
+        x0 = (x - sqrt_one_minus_alpha_bar_t * eps) / sqrt_alpha_bar_t
+
       x = sqrt_alpha_bar_prev * x0 + dir_coeff * eps
 
       if i < len(self.sampling_indices) - 1 and sigma > 0:
@@ -280,6 +312,7 @@ class DEISSampler(nn.Module):
     sampling_T: Optional[int] = None,
     order: int = 2,
     schedule: str = "linear",
+    parameterization: str = "epsilon", # "epsilon" or "v"
   ):
     super().__init__()
 
@@ -289,6 +322,7 @@ class DEISSampler(nn.Module):
     self.order = order
     self.schedule = schedule
     self.cache_config = cache_config
+    self.parameterization = parameterization
 
     betas = torch.linspace(beta_1, beta_T, train_T, dtype=torch.float32)
 
@@ -456,7 +490,19 @@ class DEISSampler(nn.Module):
       cache.set_current_step(step_idx)
       t_vec = torch.full((x.shape[0],), t, dtype=torch.long, device=x.device)
       model_output = self.model(x, condition, t_vec, cache)
-      x = self.__step(model_output, step_idx, x, model_outputs)
+
+      # Convert model output to epsilon for DEIS updates
+      if self.parameterization == 'v':
+        # v = alpha_t * eps - sigma_t * x0
+        # From x_t = alpha_t * x0 + sigma_t * eps:
+        # eps = alpha_t * v + sigma_t * x_t
+        sigma = self.sigmas[step_idx]
+        alpha_t, sigma_t = self.__sigma_to_alpha_sigma_t(sigma)
+        eps = alpha_t * model_output + sigma_t * x
+      else:
+        eps = model_output
+
+      x = self.__step(eps, step_idx, x, model_outputs)
 
     return x
 
