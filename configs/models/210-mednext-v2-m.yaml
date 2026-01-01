@@ -1,0 +1,39 @@
+data:
+  dataset_name: gdphmm-hn-vmat
+  img_size: [176, 160]
+  train_cache_size: inf
+  valid_cache_size: inf
+  valid_limit: 512
+
+batch_size: 128
+epochs: 200
+
+lr: 0.0001
+
+mednext:
+  id: medium
+  kernel_size: 3
+  deep_supervision: false
+  grn: true
+
+conditioning:
+  types:
+    - ct
+    - body
+    - ptv_sdms
+    - oar_v3_sdm
+    - beam_plate
+    - angle_plate
+
+mixed_precision: false
+num_workers: 4
+prefetch_factor: 12
+prefetch_on_gpu: true
+
+grad_clip: 0.5
+ema_decay: 0.9999
+
+eval_interval: 10
+checkpoint_interval: 10
+
+validation_sampler: unet

@@ -464,7 +464,8 @@ class MedNeXt(nn.Module):
       kernel_size=enc_kernel_size,
       do_res=do_res_up_down,
       norm_type=norm_type,
-      dim=dim
+      dim=dim,
+      grn=grn,
     )
 
     self.enc_block_1 = nn.Sequential(*[
