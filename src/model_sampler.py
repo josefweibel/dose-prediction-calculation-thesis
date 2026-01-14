@@ -29,7 +29,7 @@ def build_sampler(model_config, sampling_config, model):
     cache_config = CacheConfig(sampling_steps=sampling_config['T'], layers=[], intervals={}, warmup=0)
 
   # Get parameterization from model config (default: epsilon)
-  parameterization = model_config['diffusion'].get('parameterization', 'epsilon')
+  parameterization = model_config.get('diffusion', {}).get('parameterization', 'epsilon')
 
   if sampling_config['sampler'] == 'ddpm':
     return GaussianDiffusionSampler(
