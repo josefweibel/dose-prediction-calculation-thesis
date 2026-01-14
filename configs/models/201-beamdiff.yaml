@@ -6,7 +6,7 @@ data:
   valid_limit: 512
 
 batch_size: 64
-epochs: 100
+epochs: 200
 
 lr: 0.0001
 
@@ -21,7 +21,8 @@ conditioning:
   types:
     - ct
     - body
-    - ptv_sdms
+    - ptv_doses
+    - ptv_sdm
     - oar_v3_sdm
     - beam_plate
     - angle_plate

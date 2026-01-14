@@ -24,7 +24,8 @@ conditioning:
   types:
     - ct
     - body
-    - ptv_sdms
+    - ptv_doses
+    - ptv_sdm
     - oar_v3_sdm
 
 mixed_precision: false
