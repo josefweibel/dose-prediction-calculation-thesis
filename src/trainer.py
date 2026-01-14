@@ -326,7 +326,7 @@ class Trainer:
         target = target.to(self.device, non_blocking=True)
         condition = structure # Training dataset already loads only conditioning groups, so structure IS the condition
 
-        with torch.amp.autocast('cuda', dtype=torch.float16) if self.use_mixed_precision else contextlib.nullcontext():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_mixed_precision else contextlib.nullcontext():
           loss = self.model(target, condition)
 
         current_lr = self.optim.param_groups[0]['lr']
@@ -336,13 +336,17 @@ class Trainer:
           self.scaler.unscale_(self.optim)
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.scaler.step(self.optim)
+
+          old_scale = self.scaler.get_scale()
           self.scaler.update()
+
+          if old_scale <= self.scaler.get_scale():
+            self.lr_scheduler.step()
         else:
           loss.backward()
           torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
           self.optim.step()
-
-        self.lr_scheduler.step()
+          self.lr_scheduler.step()
 
         self.__update_ema_weigths(self.net_model, self.ema_model, self.config['ema_decay'])
 
