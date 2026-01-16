@@ -576,8 +576,12 @@ class NoisePredictor(nn.Module):
       # Skip connection with AFM
       skip = encoder_outputs[-(level + 1)]
 
-      if self.use_afm and level > 0:
-        h = self.afm_modules[level - 1](skip, h)
+      if level > 0:
+        if self.use_afm:
+          h = self.afm_modules[level - 1](skip, h)
+        else:
+          # Fallback: simple addition-based skip connection
+          h = h + skip
 
       h = self.decoder[level](h, t_emb)
       h = self.upsamples[level](h)
