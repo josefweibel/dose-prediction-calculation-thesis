@@ -9,9 +9,11 @@ LOG_DIR=/storage/homefs/jw19s096/logs
 JOB_ID=$(sbatch --parsable <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
+#SBATCH --account=invest
 #SBATCH -q job_gpu_caim
 #SBATCH --gpus-per-node=rtx4090:1
 #SBATCH --cpus-per-task=4
+#SBATCH --nodes=1
 #SBATCH --mem=16G
 #SBATCH --time=04:00:00
 #SBATCH --job-name=jupyter_lab
