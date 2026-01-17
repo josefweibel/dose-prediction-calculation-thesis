@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+from model_cache import DeepCache
+
 
 class SinusoidalPositionEmbedding(nn.Module):
   """Sinusoidal position encoding for timestep embedding."""
@@ -487,7 +489,7 @@ class NoisePredictor(nn.Module):
     self.norm_out = nn.GroupNorm(8, base_channels)
     self.conv_out = nn.Conv2d(base_channels, 1, kernel_size=3, padding=1)
 
-  def forward(self, x_noisy, condition, timesteps, cache=None):
+  def forward(self, x_noisy, condition, timesteps, cache: DeepCache):
     """
     Forward pass compatible with DiffusionModelTrainerModule.
 
@@ -495,7 +497,7 @@ class NoisePredictor(nn.Module):
         x_noisy: Noisy dose map [B, 1, H, W]
         condition: Structural information (CT + PTV + OARs + optionally beam fields) [B, C, H, W]
         timesteps: Diffusion timesteps [B]
-        cache: DeepCache (unused, for compatibility)
+        cache: DeepCache for caching encoder and decoder features
 
     Returns:
         Predicted noise [B, 1, H, W]
@@ -522,22 +524,54 @@ class NoisePredictor(nn.Module):
 
     # Initial convolutions
     h_noisy = self.conv_in_noisy(x_noisy)
-    h_struct = self.conv_in_struct(x_struct)
+    h_struct = cache.get_or_compute('head_struct', lambda: self.conv_in_struct(x_struct))
 
     if self.use_beam_field:
-      h_beam = self.conv_in_beam(x_beam)
+      h_beam = cache.get_or_compute('head_beam', lambda: self.conv_in_beam(x_beam))
 
     # Encoder
     encoder_outputs = []
 
     for level in range(len(self.encoder_noisy)):
-      # Process noisy and structural branches
+      cache_key_enc = f'enc{level+1}'
+
+      # Check if we can use cached encoder output
+      if cache.should_use(cache_key_enc):
+        h_noisy = cache.get(cache_key_enc)
+        encoder_outputs.append(h_noisy)
+        h_noisy = self.downsamples[level](h_noisy)
+
+        # Still need to update struct/beam for next level (cached)
+        cache_key_down_struct = f'down{level+1}_struct'
+        h_struct = cache.get_or_compute(
+          cache_key_down_struct,
+          lambda down=self.downsamples[level], inp=h_struct: down(inp)
+        )
+        if self.use_beam_field:
+          cache_key_down_beam = f'down{level+1}_beam'
+          h_beam = cache.get_or_compute(
+            cache_key_down_beam,
+            lambda down=self.downsamples[level], inp=h_beam: down(inp)
+          )
+        continue
+
+      # Process noisy branch
       h_noisy = self.encoder_noisy[level](h_noisy, t_emb)
-      h_struct = self.encoder_struct[level](h_struct, t_emb)
+
+      # Process structural branch (can be cached)
+      cache_key_struct = f'enc{level+1}_struct'
+      h_struct = cache.get_or_compute(
+        cache_key_struct,
+        lambda enc=self.encoder_struct[level], inp=h_struct: enc(inp, t_emb)
+      )
 
       if self.use_beam_field:
-        # Process beam field branch
-        h_beam = self.encoder_beam[level](h_beam, t_emb)
+        # Process beam field branch (can be cached)
+        cache_key_beam = f'enc{level+1}_beam'
+        h_beam = cache.get_or_compute(
+          cache_key_beam,
+          lambda enc=self.encoder_beam[level], inp=h_beam: enc(inp, t_emb)
+        )
 
         # Fuse all three branches (except last level)
         if level < len(self.encoder_noisy) - 1:
@@ -547,14 +581,25 @@ class NoisePredictor(nn.Module):
         if level < len(self.encoder_noisy) - 1:
           h_noisy = h_noisy + h_struct
 
-      # Store for skip connections
+      # Cache and store for skip connections
+      cache.set(cache_key_enc, h_noisy)
       encoder_outputs.append(h_noisy)
 
       # Downsample
       h_noisy = self.downsamples[level](h_noisy)
-      h_struct = self.downsamples[level](h_struct)
+
+      cache_key_down_struct = f'down{level+1}_struct'
+      h_struct = cache.get_or_compute(
+        cache_key_down_struct,
+        lambda down=self.downsamples[level], inp=h_struct: down(inp)
+      )
+
       if self.use_beam_field:
-        h_beam = self.downsamples[level](h_beam)
+        cache_key_down_beam = f'down{level+1}_beam'
+        h_beam = cache.get_or_compute(
+          cache_key_down_beam,
+          lambda down=self.downsamples[level], inp=h_beam: down(inp)
+        )
 
     # Multi-Condition Aggregation Module or simple fusion
     if self.use_beam_field and self.use_mam:
@@ -576,6 +621,12 @@ class NoisePredictor(nn.Module):
       # Skip connection with AFM
       skip = encoder_outputs[-(level + 1)]
 
+      cache_key = f'dec{len(self.decoder) - level}'
+      if cache.should_use(cache_key):
+        h = cache.get(cache_key)
+        h = self.upsamples[level](h)
+        continue
+
       if level > 0:
         if self.use_afm:
           h = self.afm_modules[level - 1](skip, h)
@@ -584,6 +635,7 @@ class NoisePredictor(nn.Module):
           h = h + skip
 
       h = self.decoder[level](h, t_emb)
+      cache.set(cache_key, h)
       h = self.upsamples[level](h)
 
     # Output
