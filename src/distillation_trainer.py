@@ -493,7 +493,7 @@ class DistillationTrainer:
         dist.barrier()
 
     # Return path to final checkpoint
-    return self.checkpoint_dir / f'epoch-{n_epochs - 1}.pt'
+    return self.checkpoint_dir / f'{n_epochs - 1}.pt'
 
   def _update_ema_weights(self, source, target, decay):
     """Update EMA model weights."""
@@ -525,7 +525,7 @@ class DistillationTrainer:
     if self.scaler is not None:
       checkpoint_data['scaler_state_dict'] = self.scaler.state_dict()
 
-    checkpoint_path = self.checkpoint_dir / f'epoch-{epoch}.pt'
+    checkpoint_path = self.checkpoint_dir / f'{epoch}.pt'
     torch.save(checkpoint_data, checkpoint_path)
     print(f'Saved checkpoint: {checkpoint_path}')
 

@@ -50,7 +50,7 @@ sbatch <<EOF
 #SBATCH --gpus-per-task=h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --out=${HOME_PATH}/logs/distill-${MODEL_NAME}-${DISTILL_CONFIG}-%j.log
-#SBATCH --job-name=distill-${MODEL_NAME}
+#SBATCH --job-name=distill-${MODEL_NAME}-${DISTILL_CONFIG}
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=joseph.weibel@students.unibe.ch
 
