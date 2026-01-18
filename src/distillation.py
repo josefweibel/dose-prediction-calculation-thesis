@@ -129,13 +129,65 @@ class ProgressiveDistillationOrchestrator:
 
     return checkpoints[-1]
 
-  def run_round(self, round_idx, teacher_checkpoint_path):
+  def _is_round_complete(self, round_idx, teacher_T, student_T):
+    """Check if a round has been completed (reached target epochs)."""
+    checkpoint = self._find_round_checkpoint(round_idx, teacher_T, student_T)
+    if checkpoint is None:
+      return False
+
+    # Extract epoch from filename (e.g., "49.pt" -> 49)
+    epoch = int(checkpoint.stem)
+    target_epochs = self.distill_config['round'].get('epochs', 50)
+    return epoch >= target_epochs - 1
+
+  def _find_resume_point(self):
+    """
+    Find the round and checkpoint to resume from.
+
+    Returns:
+      tuple: (round_idx, teacher_checkpoint_path, student_checkpoint_path)
+        - round_idx: The round to resume/start from
+        - teacher_checkpoint_path: Path to teacher checkpoint for this round
+        - student_checkpoint_path: Path to student checkpoint if resuming mid-round, else None
+    """
+    # Check each round from the end to find where to resume
+    for round_idx in range(len(self.rounds) - 1, -1, -1):
+      teacher_T, student_T = self.rounds[round_idx]
+      student_ckpt = self._find_round_checkpoint(round_idx, teacher_T, student_T)
+
+      if student_ckpt is not None:
+        # Found a checkpoint for this round
+        if self._is_round_complete(round_idx, teacher_T, student_T):
+          # Round is complete, start from next round
+          if round_idx + 1 < len(self.rounds):
+            # Use this completed student as teacher for next round
+            return round_idx + 1, student_ckpt, None
+          else:
+            # All rounds complete
+            return len(self.rounds), student_ckpt, None
+        else:
+          # Round was interrupted, resume it
+          # Need to find the teacher checkpoint for this round
+          if round_idx == 0:
+            teacher_ckpt = self._get_initial_teacher_checkpoint()
+          else:
+            prev_teacher_T, prev_student_T = self.rounds[round_idx - 1]
+            teacher_ckpt = self._find_round_checkpoint(round_idx - 1, prev_teacher_T, prev_student_T)
+            if teacher_ckpt is None:
+              raise ValueError(f"Cannot find teacher checkpoint for interrupted round {round_idx}")
+          return round_idx, teacher_ckpt, student_ckpt
+
+    # No checkpoints found, start from round 0
+    return 0, self._get_initial_teacher_checkpoint(), None
+
+  def run_round(self, round_idx, teacher_checkpoint_path, student_checkpoint_path=None):
     """
     Execute a single distillation round with wandb logging.
 
     Args:
       round_idx: Round index (0-based)
       teacher_checkpoint_path: Path to teacher checkpoint
+      student_checkpoint_path: Optional path to student checkpoint for resuming
 
     Returns:
       Path to student checkpoint after training
@@ -146,6 +198,8 @@ class ProgressiveDistillationOrchestrator:
       print(f"\n{'='*60}")
       print(f"Round {round_idx}: {teacher_T} -> {student_T} steps")
       print(f"Teacher checkpoint: {teacher_checkpoint_path}")
+      if student_checkpoint_path:
+        print(f"Resuming from student checkpoint: {student_checkpoint_path}")
       print(f"{'='*60}\n")
 
     # Initialize wandb for this round
@@ -176,6 +230,7 @@ class ProgressiveDistillationOrchestrator:
       student_T=student_T,
       round_idx=round_idx,
       teacher_checkpoint_path=teacher_checkpoint_path,
+      student_checkpoint_path=student_checkpoint_path,
       device=self.device,
       rank=self.rank,
       world_size=self.world_size,
@@ -265,19 +320,41 @@ class ProgressiveDistillationOrchestrator:
     # Cleanup
     val_dataset.finish()
 
-  def run_all(self, start_round=0, end_round=None):
+  def run_all(self, start_round=None, end_round=None, auto_resume=True):
     """
     Execute all distillation rounds sequentially.
 
     Args:
-      start_round: Round to start from (0-based)
+      start_round: Round to start from (0-based). If None and auto_resume=True,
+                   automatically detects from checkpoints.
       end_round: Round to end at (exclusive, None for all)
+      auto_resume: If True and start_round is None, automatically detect
+                   resume point from existing checkpoints.
     """
     if end_round is None:
       end_round = len(self.rounds)
 
-    # Determine starting teacher checkpoint
-    if start_round == 0:
+    # Determine starting point
+    student_ckpt_resume = None
+    if start_round is None and auto_resume:
+      # Auto-detect resume point
+      start_round, teacher_ckpt, student_ckpt_resume = self._find_resume_point()
+
+      if start_round >= len(self.rounds):
+        if self.is_main_process:
+          print(f"\nAll {len(self.rounds)} distillation rounds already complete.")
+          print(f"Final model: {teacher_ckpt}")
+        return teacher_ckpt
+
+      if self.is_main_process:
+        if student_ckpt_resume:
+          print(f"\nResuming interrupted round {start_round}")
+        else:
+          print(f"\nResuming from round {start_round}")
+    elif start_round is None:
+      start_round = 0
+      teacher_ckpt = self._get_initial_teacher_checkpoint()
+    elif start_round == 0:
       teacher_ckpt = self._get_initial_teacher_checkpoint()
     else:
       # Load from previous round's checkpoint
@@ -292,11 +369,16 @@ class ProgressiveDistillationOrchestrator:
 
     if self.is_main_process:
       print(f"\nStarting distillation from round {start_round}")
-      print(f"Initial teacher: {teacher_ckpt}\n")
+      print(f"Initial teacher: {teacher_ckpt}")
+      if student_ckpt_resume:
+        print(f"Resuming student from: {student_ckpt_resume}")
+      print()
 
     # Run each round
     for round_idx in range(start_round, end_round):
-      student_ckpt = self.run_round(round_idx, teacher_ckpt)
+      # Only pass student checkpoint for the first round if resuming
+      student_ckpt_to_pass = student_ckpt_resume if round_idx == start_round else None
+      student_ckpt = self.run_round(round_idx, teacher_ckpt, student_ckpt_to_pass)
       teacher_ckpt = student_ckpt  # Student becomes teacher for next round
 
     if self.is_main_process:

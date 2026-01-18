@@ -287,6 +287,7 @@ class DistillationTrainer:
     rank=None,
     world_size=None,
     local_rank=None,
+    student_checkpoint_path=None,
   ):
     self.model_config = model_config
     self.distill_config = distill_config
@@ -299,6 +300,7 @@ class DistillationTrainer:
     self.world_size = world_size if world_size is not None else 1
     self.is_distributed = rank is not None and world_size is not None
     self.is_main_process = not self.is_distributed or rank == 0
+    self.student_checkpoint_path = student_checkpoint_path
 
     # Create dataset
     conditioning_groups = model_config['conditioning']['types']
@@ -419,6 +421,50 @@ class DistillationTrainer:
     )
     self.checkpoint_interval = distill_config['round'].get('checkpoint_interval', 10)
 
+    # Track starting epoch for resume
+    self.start_epoch = 0
+
+    # Load student checkpoint if provided (for resuming interrupted training)
+    if student_checkpoint_path is not None:
+      self._load_student_checkpoint(student_checkpoint_path)
+
+  def _load_student_checkpoint(self, checkpoint_path):
+    """
+    Load student checkpoint to resume training.
+
+    Args:
+      checkpoint_path: Path to the student checkpoint file
+    """
+    if self.is_main_process:
+      print(f'Loading student checkpoint from {checkpoint_path}')
+
+    checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+    # Load student model weights
+    self.student_model.load_state_dict(checkpoint['net_model_state_dict'])
+
+    # Load EMA weights
+    if 'ema_model_state_dict' in checkpoint:
+      self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+
+    # Load optimizer state
+    if 'optimizer_state_dict' in checkpoint:
+      self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    # Load LR scheduler state
+    if 'lr_scheduler_state_dict' in checkpoint:
+      self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+
+    # Load scaler state if using mixed precision
+    if self.scaler is not None and 'scaler_state_dict' in checkpoint:
+      self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
+    # Set starting epoch (resume from next epoch)
+    self.start_epoch = checkpoint['epoch'] + 1
+
+    if self.is_main_process:
+      print(f'Resuming from epoch {self.start_epoch}')
+
   def train(self, n_epochs, wandb_run=None):
     """
     Run distillation training for n_epochs.
@@ -430,7 +476,18 @@ class DistillationTrainer:
     Returns:
       Path to final checkpoint
     """
-    pbar_epochs = tqdm(range(n_epochs), desc='Distillation', disable=not self.is_main_process)
+    if self.start_epoch >= n_epochs:
+      if self.is_main_process:
+        print(f'Training already complete (start_epoch={self.start_epoch} >= n_epochs={n_epochs})')
+      return self.checkpoint_dir / f'{n_epochs - 1}.pt'
+
+    pbar_epochs = tqdm(
+      range(self.start_epoch, n_epochs),
+      desc='Distillation',
+      disable=not self.is_main_process,
+      initial=self.start_epoch,
+      total=n_epochs,
+    )
     for epoch in pbar_epochs:
       if self.is_distributed and self.train_sampler is not None:
         self.train_sampler.set_epoch(epoch)
