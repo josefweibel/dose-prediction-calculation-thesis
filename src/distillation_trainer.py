@@ -58,6 +58,7 @@ class ProgressiveDistillationTrainerModule(nn.Module):
     student_T,
     parameterization='epsilon',
     loss_weighting='snr_plus_one',
+    spatial_dims=2,
   ):
     """
     Args:
@@ -70,10 +71,12 @@ class ProgressiveDistillationTrainerModule(nn.Module):
       student_T: Number of steps student learns (teacher_T / 2, e.g., 256)
       parameterization: 'epsilon' or 'v'
       loss_weighting: 'uniform', 'snr', 'snr_plus_one', or 'truncated_snr'
+      spatial_dims: Number of spatial dimensions (2 for 2D models, 3 for 3D)
     """
     super().__init__()
 
     assert teacher_T == 2 * student_T, "Teacher T must be exactly 2x student T"
+    assert spatial_dims in (2, 3), "spatial_dims must be 2 or 3"
 
     self.student_model = student_model
     self.teacher_model = teacher_model
@@ -82,6 +85,9 @@ class ProgressiveDistillationTrainerModule(nn.Module):
     self.student_T = student_T
     self.parameterization = parameterization
     self.loss_weighting = loss_weighting
+    self.spatial_dims = spatial_dims
+    # Broadcast shape for noise schedule parameters: [B, 1, 1, 1] for 2D, [B, 1, 1, 1, 1] for 3D
+    self.broadcast_shape = (-1,) + (1,) * (spatial_dims + 1)
 
     # Freeze teacher
     for param in self.teacher_model.parameters():
@@ -163,18 +169,18 @@ class ProgressiveDistillationTrainerModule(nn.Module):
       # Convert to x0 prediction
       x0_pred = predict_x0(
         model_output, z,
-        alpha_from.view(-1, 1, 1, 1, 1),
-        sigma_from.view(-1, 1, 1, 1, 1),
+        alpha_from.view(self.broadcast_shape),
+        sigma_from.view(self.broadcast_shape),
         self.parameterization
       )
 
       # DDIM step
       z_next = ddim_step(
         z, x0_pred,
-        alpha_from.view(-1, 1, 1, 1, 1),
-        sigma_from.view(-1, 1, 1, 1, 1),
-        alpha_to.view(-1, 1, 1, 1, 1),
-        sigma_to.view(-1, 1, 1, 1, 1),
+        alpha_from.view(self.broadcast_shape),
+        sigma_from.view(self.broadcast_shape),
+        alpha_to.view(self.broadcast_shape),
+        sigma_to.view(self.broadcast_shape),
         eta=0.0  # Deterministic
       )
 
@@ -215,8 +221,8 @@ class ProgressiveDistillationTrainerModule(nn.Module):
     # Add noise to get z_t
     noise = torch.randn_like(x_0)
     z_t = (
-      alpha_t.view(-1, 1, 1, 1, 1) * x_0 +
-      sigma_t.view(-1, 1, 1, 1, 1) * noise
+      alpha_t.view(self.broadcast_shape) * x_0 +
+      sigma_t.view(self.broadcast_shape) * noise
     )
 
     # Teacher takes 2 DDIM steps (frozen, no gradients)
@@ -233,10 +239,10 @@ class ProgressiveDistillationTrainerModule(nn.Module):
     # such that one DDIM step from z_t arrives at z_t''?
     x_tilde = compute_distillation_target(
       z_t, z_t_double_prime,
-      alpha_t.view(-1, 1, 1, 1, 1),
-      sigma_t.view(-1, 1, 1, 1, 1),
-      alpha_t_double_prime.view(-1, 1, 1, 1, 1),
-      sigma_t_double_prime.view(-1, 1, 1, 1, 1),
+      alpha_t.view(self.broadcast_shape),
+      sigma_t.view(self.broadcast_shape),
+      alpha_t_double_prime.view(self.broadcast_shape),
+      sigma_t_double_prime.view(self.broadcast_shape),
     )
 
     # Student predicts x0 from z_t (uses student's timestep mapping)
@@ -246,13 +252,13 @@ class ProgressiveDistillationTrainerModule(nn.Module):
     # Convert student output to x0 prediction
     student_x0_pred = predict_x0(
       student_output, z_t,
-      alpha_t.view(-1, 1, 1, 1, 1),
-      sigma_t.view(-1, 1, 1, 1, 1),
+      alpha_t.view(self.broadcast_shape),
+      sigma_t.view(self.broadcast_shape),
       self.parameterization
     )
 
     # Weighted MSE loss
-    weights = self.loss_weights[student_step_idx].view(-1, 1, 1, 1, 1)
+    weights = self.loss_weights[student_step_idx].view(self.broadcast_shape)
     loss = weights * F.mse_loss(student_x0_pred, x_tilde, reduction='none')
 
     return loss.mean()
@@ -357,6 +363,7 @@ class DistillationTrainer:
       student_T=student_T,
       parameterization=parameterization,
       loss_weighting=distill_config['round'].get('loss_weighting', 'snr_plus_one'),
+      spatial_dims=2,
     ).to(device)
 
     # EMA of student
