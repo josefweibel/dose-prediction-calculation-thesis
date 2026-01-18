@@ -260,8 +260,9 @@ class GDPHMMSlicesDataset(Dataset):
   def __getitem__(self, idx):
     file, slice_idx = self.index_map[idx]
 
-    # Extract patient ID from filename (e.g., "PT_ABC123.npz" -> "PT_ABC123")
-    patient_id = file.stem
+    # Extract patient ID from filename (e.g., "0522c0027+A4Ac+MOS_30413.npz" -> "0522c0027")
+    # The filename format is <patient_id>+<plan_info>+MOS_<seed>
+    patient_id = file.stem.split('+')[0]
 
     dose_vol, dose_shm = self.cache.get(file.name + ':dose')
     ptv_doses_vol, ptv_doses_shm = self.cache.get(file.name + ':ptv_doses')

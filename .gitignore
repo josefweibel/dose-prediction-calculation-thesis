@@ -232,3 +232,4 @@ checkpoints/
 wandb/
 samples/
 .claude/
+imgs/

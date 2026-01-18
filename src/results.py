@@ -6,7 +6,7 @@ from typing import List, Dict, Optional
 from itertools import cycle
 from pathlib import Path
 
-from data import GDPHMM_OAR, GDPHMM_DOSE_MAX
+from data import GDPHMM_OAR, GDPHMM_DOSE_MAX, GDPHMM_OAR_V3
 from data_legacy import GDPHMMSlicesDataset, LRUCacheBytes
 from constraints import (
     ConstraintLibrary, ConstraintEvaluator,
@@ -14,10 +14,11 @@ from constraints import (
     GDPHMM_TO_CONSTRAINT_ORGAN
 )
 
+plt.style.use("ggplot")
 
 SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
 
-METRC_LABELS = {
+METRIC_LABELS = {
   'mse': 'Mean Squared Error (MSE)',
   'rmse': 'Root Mean Squared Error (RMSE)',
   'psnr': 'Peak Signal-to-Noise Ratio (PSNR)',
@@ -32,6 +33,16 @@ METRC_LABELS = {
   'dose_score_body': 'Dose Score (MAE) Body',
   'var_laplacian_diff': 'Sharpness Metric (Variance of Laplacian Difference)',
   'mae_challenge': 'Mean Absolute Error (MAE) Challenge',
+  'agreement/agreement_all': 'Criteria Agreement',
+  'gamma_3_3/pass_rate': 'Gamma Index 3%/3mm Pass Rate',
+  'gamma_2_2/pass_rate': 'Gamma Index 2%/2mm Pass Rate',
+  'gamma_3_3/pass_rate': 'Gamma Index 3%/3mm Pass Rate',
+  'gamma_5_5/pass_rate': 'Gamma Index 5%/5mm Pass Rate',
+  'dvh_auc/OAR/diff': 'DVH Area Between Curves for all OARs',
+  'mean_dose/high/abs_diff': 'Mean Dose Diff. (High Dose PTV)',
+  'homogeneity_index/high/abs_diff': 'Homogeneity Index Diff. (High Dose PTV)',
+  'paddick_conformity_index/high/abs_diff': 'Paddick Conformity Index Diff. (High Dose PTV)',
+  'gradient_index/high/abs_diff': 'Paddick Gradient Index Diff. (High Dose PTV)',
 }
 
 METRIC_ABBRS = {
@@ -49,19 +60,143 @@ METRIC_ABBRS = {
   'dose_score_body': 'Dose Score (MAE) Body',
   'var_laplacian_diff': 'Sharpness',
   'mae_challenge': 'MAE Challenge',
+  'agreement/agreement_all': 'Agreement',
+  'gamma_5_5/pass_rate': 'Gamma 5%/5mm',
+  'gamma_3_3/pass_rate': 'Gamma 3%/3mm',
+  'gamma_2_2/pass_rate': 'Gamma 2%/2mm',
+  'gamma_1_1/pass_rate': 'Gamma 1%/1mm',
+  'dvh_auc/OAR/diff': 'DVH ABC (OAR)',
+  'mean_dose/high/abs_diff': 'Mean Dose Diff (PTV)',
+  'homogeneity_index/high/abs_diff': 'HI Diff (PTV)',
+  'paddick_conformity_index/high/abs_diff': 'PCI Diff (PTV)',
+  'gradient_index/high/abs_diff': 'PGI Diff (PTV)',
 }
 
-DEFAULT_METRICS = [
+METRICS_DEFAULT = [
   'rmse', 'dose_score', 'dvh',
   'var_laplacian_diff', 'dose_score_body', 'homogeneity_index',
   'ssim', 'mae_challenge', 'psnr_body'
 ]
 
+METRICS_PRED = [
+  'vol_agreement/agreement_all', 'vol_dvh_auc/OAR/diff', 'vol_dvh',
+  'vol_mean_dose/high/abs_diff', 'vol_paddick_conformity_index/high/abs_diff', 'vol_gradient_index/high/abs_diff'
+]
+
+METRICS_PLAN = [
+  'vol_rmse', 'vol_gamma_3_3/pass_rate', 'vol_agreement/agreement_all', 'vol_dvh_auc/OAR/diff',
+]
+
+METRICS_PLAN_EXTENDED = METRICS_PLAN + [
+  'vol_mean_dose/high/abs_diff',
+  'vol_homogeneity_index/high/abs_diff',
+  'vol_paddick_conformity_index/high/abs_diff',
+  'vol_gradient_index/high/abs_diff'
+]
+
 HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body', 'var_laplacian_diff']
+
+# Patterns for volume metrics where higher values are better
+HIGHER_IS_BETTER_PATTERNS = [
+  'agreement',
+  'conformity_index',
+  'csr_pred',
+  'csr_target',
+  'psnr',
+  'ssim',
+  'ms_ssim',
+  'gamma',
+]
+
+# Patterns for volume metrics where lower values are better
+LOWER_IS_BETTER_PATTERNS = [
+  'rmse',
+  'mse',
+  'mae',
+  'dose_score',
+  'abs_diff',
+  'diff',
+  'homogeneity_index',
+  'gradient_index',
+]
 
 # PTV line styles: solid for PTV70, dashed for PTV63, dotted for PTV56
 PTV_LINESTYLES = ['solid', 'dashed', 'dotted']
 PTV_LABELS = ['PTV70', 'PTV63', 'PTV56']
+
+
+def get_metric_label(metric_name: str) -> str:
+  """
+  Get a human-readable label for a given metric name.
+
+  Args:
+    metric_name: Name of the metric (can be simple like 'rmse' or
+                  compound like 'vol_agreement/agreement_all')
+  Returns:
+    A human-readable label for the metric.
+  """
+  if metric_name.startswith('vol_'):
+    metric_name = metric_name[4:]  # Remove 'vol_' prefix
+
+  if metric_name in METRIC_LABELS:
+    return METRIC_LABELS[metric_name]
+
+  for key in METRIC_LABELS.keys():
+    if key.startswith(metric_name):
+      return METRIC_LABELS[key]
+
+  return metric_name
+
+def get_metric_abbr(metric_name: str) -> str:
+  """
+  Get a human-readable abbreviation for a given metric name.
+
+  Args:
+    metric_name: Name of the metric (can be simple like 'rmse' or
+                  compound like 'vol_agreement/agreement_all')
+
+  Returns:
+    A human-readable abbreviation for the metric.
+  """
+  if metric_name.startswith('vol_'):
+    metric_name = metric_name[4:]  # Remove 'vol_' prefix
+
+  if metric_name in METRIC_ABBRS:
+    return METRIC_ABBRS[metric_name]
+
+  for key in METRIC_ABBRS.keys():
+    if key.startswith(metric_name):
+      return METRIC_ABBRS[key]
+
+  return metric_name
+
+def is_higher_better(metric_name: str) -> bool:
+  """
+  Check if a metric is 'higher is better' based on its name.
+
+  Args:
+    metric_name: Name of the metric (can be simple like 'rmse' or
+                  compound like 'vol_agreement/agreement_all')
+
+  Returns:
+    True if higher values are better, False if lower values are better.
+    Defaults to False (lower is better) for unknown metrics.
+  """
+  metric_lower = metric_name.lower()
+
+  # Check simple metrics first
+  if metric_name in HIGHER_IS_BETTER:
+    return True
+
+  # Check patterns for higher is better
+  for pattern in HIGHER_IS_BETTER_PATTERNS:
+    if pattern in metric_lower:
+      # Make sure it's not a diff/abs_diff variant (those are lower is better)
+      if 'diff' not in metric_lower or pattern == 'diff':
+        return True
+
+  # Default to lower is better (most error metrics)
+  return False
 
 def draw_ptv_contours(ax, ptv_doses, color='white', linewidths=0.5):
   """
@@ -76,6 +211,21 @@ def draw_ptv_contours(ax, ptv_doses, color='white', linewidths=0.5):
   for mask, linestyle in zip(ptv_doses, PTV_LINESTYLES):
     if mask.any():
       ax.contour(mask > 0, colors=[color], linewidths=linewidths, linestyles=[linestyle])
+
+def draw_oar_contours(ax, oar_masks, color='cyan', linewidths=0.5, alpha=0.7):
+  """
+  Draw contours for all OAR structures on the given axes.
+
+  Args:
+      ax: Matplotlib axes
+      oar_masks: Array of shape (N, H, W) with OAR masks
+      color: Color for all contours
+      linewidths: Line width for contours
+      alpha: Transparency for contours
+  """
+  for mask in oar_masks:
+    if mask.any():
+      ax.contour(mask > 0, colors=[color], linewidths=linewidths, alpha=alpha)
 
 def draw_ptv_overlay(ax, ptv_doses, color='red', alpha=0.3):
   """
@@ -137,6 +287,66 @@ def compute_dvh(dose, mask, bins):
   cdf = np.cumsum(hist[::-1])[::-1] / np.sum(hist)
   return bin_edges[:-1], cdf
 
+
+def iqr_limits_from_df(
+  df,
+  group_col,
+  value_col,
+  whis=1.5,
+  margin=0.05,
+):
+  """
+  Compute global ymin/ymax based on whis * IQR across all groups.
+
+  Parameters
+  ----------
+  df : pandas.DataFrame
+  group_col : str
+    Column used for grouping (box categories).
+  value_col : str
+    Numeric values.
+  whis : float, default 1.5
+    Whisker length in units of IQR.
+  margin : float, default 0.05
+    Additional margin to add to ymin/ymax.
+
+  Returns
+  -------
+  ymin, ymax : float
+  """
+  whisker_mins = []
+  whisker_maxs = []
+
+  for _, g in df.groupby(group_col):
+    values = g[value_col].dropna().to_numpy()
+    if values.size == 0:
+      continue
+
+    q1 = np.percentile(values, 25)
+    q3 = np.percentile(values, 75)
+    iqr = q3 - q1
+
+    lower_fence = q1 - whis * iqr
+    upper_fence = q3 + whis * iqr
+
+    # Actual whiskers = most extreme points inside the fences
+    inside = values[(values >= lower_fence) & (values <= upper_fence)]
+
+    if inside.size == 0:
+      continue
+
+    whisker_mins.append(inside.min())
+    whisker_maxs.append(inside.max())
+
+  if not whisker_mins:
+    raise ValueError("No valid data found to compute whisker limits.")
+
+  vmin = min(whisker_mins)
+  vmax = max(whisker_maxs)
+  margin_value = margin * (vmax - vmin)
+  return vmin, vmax, min(whisker_mins) - margin_value, vmax + margin_value
+
+
 class BaseResults:
   def __init__(self, model_name, sampling_name, epoch, dataset_split, dataset):
     self.model_name = model_name
@@ -187,10 +397,10 @@ class BaseResults:
 
       ax.errorbar(means.index, means.values, yerr=stds.values, fmt='o-', capsize=3, label=label, alpha=0.7)
 
-    dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
-    ax.set_title(f'{METRIC_ABBRS.get(metric, metric)} vs Slice Index (Mean ± SD) \n{dir_symbol} is better')
+    dir_symbol = '↑' if is_higher_better(metric) else '↓'
+    ax.set_title(f'{get_metric_abbr(metric)} vs Slice Index (Mean ± SD) \n{dir_symbol} is better')
     ax.set_xlabel('Slice Index')
-    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    ax.set_ylabel(get_metric_label(metric))
 
     # Only show legend if there are multiple results
     if len(self.results_list) > 1:
@@ -217,7 +427,7 @@ class BaseResults:
       sample_name = file_name.replace('.npz', '')
       sample_results = first_result.for_sample(sample_name)
       structure, original_dose = sample_results.load_orig_volume()
-      mask = structure[structure_index]
+      mask = structure[structure_index] > 0
       cached_masks[sample_name] = mask
 
       # Compute original DVH immediately, then discard original_dose
@@ -301,9 +511,6 @@ class BaseResults:
         None: '-'
       }
 
-      # Track which constraint types we've added to legend
-      legend_added = set()
-
       for i, constraint in enumerate(constraints):
         color = colors[i % len(colors)]
         linestyle = linestyles.get(constraint.grade, '-')
@@ -384,6 +591,12 @@ class ModelResults(BaseResults):
     self.volume_metrics['duration'] = self.slice_metrics.groupby(self.slice_metrics['file_name'].str.replace('.npz', ''))['duration'].sum().values
     self.volume_metrics = self.volume_metrics.reset_index()
 
+    self.volume_metrics['vol_rmse/OAR'] = self.volume_metrics[[f'vol_rmse/{organ}' for organ in GDPHMM_OAR_V3]].mean(axis=1)
+    self.volume_metrics['vol_mse/OAR'] = self.volume_metrics[[f'vol_mse/{organ}' for organ in GDPHMM_OAR_V3]].mean(axis=1)
+    self.volume_metrics['vol_dose_score/OAR'] = self.volume_metrics[[f'vol_dose_score/{organ}' for organ in GDPHMM_OAR_V3]].mean(axis=1)
+    self.volume_metrics['vol_dvh/OAR'] = self.volume_metrics[[f'vol_dvh/{organ}' for organ in GDPHMM_OAR_V3]].mean(axis=1)
+    self.volume_metrics['vol_dvh_auc/OAR/diff'] = self.volume_metrics[[f'vol_dvh_auc/{organ}/diff' for organ in GDPHMM_OAR_V3]].mean(axis=1)
+
     # For uniform interface with ModelComparison
     self.results_list = [self]
     self.result_labels = [f'{model_name} ({sampling_name})']
@@ -440,10 +653,19 @@ class SampleResults(BaseResults):
     structure, original_dose = self.load_orig_volume()
     pred_dose = self.load_pred_volume()
 
+    structure = structure[np.newaxis, ...]  # Add batch dimension
+    ptv_masks = self.dataset.selector.get_ptv_doses(structure) > 0
+    oar_masks = self.dataset.selector.get_component(structure, 'oar_v3') > 0
+
+    print('ptv_masks', ptv_masks.shape)
+    print('oar_masks', oar_masks.shape)
+    masks = np.concatenate([ptv_masks[:, 0:1], oar_masks], axis=1)[0]
+    print('masks', masks.shape)
+
     bins = np.linspace(0, np.max(original_dose), 200)
     colors = cycle(plt.cm.tab10.colors)
     handles, labels = [], []
-    for name, mask in zip(['PTV'] + GDPHMM_OAR, structure[1:]):
+    for name, mask in zip(['PTV'] + GDPHMM_OAR_V3, masks):
       if mask.sum() == 0:
         continue
 
@@ -451,7 +673,7 @@ class SampleResults(BaseResults):
       x, y_orig = compute_dvh(original_dose, mask, bins)
       _, y_pred = compute_dvh(pred_dose, mask, bins)
       ax.plot(x, y_orig, color=color, linestyle='-')
-      ax.plot(x, y_pred, color=color, linestyle='--')
+      # ax.plot(x, y_pred, color=color, linestyle='--')
       handles.append(plt.Line2D([0], [0], color=color, lw=2))
       labels.append(name)
 
@@ -515,7 +737,7 @@ class SampleResults(BaseResults):
 
     return ax
 
-  def visualise_slice_with_ct(self, slice_index, axis='sagittal', ax=None, dose_cmap='jet', dose_alpha=0.5):
+  def visualise_slice_with_ct(self, slice_index, axis='sagittal', ax=None, dose_cmap='jet', dose_alpha=0.5, show_oar=True):
     """
     Visualize a slice with the CT scan underneath transparent dose distributions.
 
@@ -525,6 +747,7 @@ class SampleResults(BaseResults):
         ax: Optional matplotlib axes array (expects 4 axes)
         dose_cmap: Colormap for dose overlay (default: 'jet')
         dose_alpha: Transparency of dose overlay (default: 0.5)
+        show_oar: Whether to show OAR contours (default: True)
 
     Returns:
         Matplotlib axes
@@ -539,6 +762,10 @@ class SampleResults(BaseResults):
       structure = structure_vol[:, :, :, slice_index]
       original_dose = original_dose_vol[:, :, slice_index]
       pred_dose = pred_dose_vol[:, :, slice_index]
+
+      structure = np.flip(structure, [1, 2])
+      original_dose = np.flip(original_dose)
+      pred_dose = np.flip(pred_dose)
     elif axis == "axial":
       structure = structure_vol[:, slice_index, :, :]
       original_dose = original_dose_vol[slice_index, :, :]
@@ -554,13 +781,20 @@ class SampleResults(BaseResults):
     ct_slice = self.dataset.selector.get_ct(structure)[0]
     ptv_doses = self.dataset.selector.get_component(structure, 'ptv_doses')
 
+    # Get OAR masks if needed
+    oar_masks = None
+    if show_oar:
+      oar_masks = self.dataset.selector.get_component(structure, 'oar_v3')
+
     dose_max = original_dose.max()
 
     # Panel 0: CT with PTV overlay
     ax[0].imshow(ct_slice, cmap='gray')
     draw_ptv_overlay(ax[0], ptv_doses)
     draw_ptv_contours(ax[0], ptv_doses)
-    ax[0].set_title('CT with PTV')
+    if show_oar and oar_masks is not None:
+      draw_oar_contours(ax[0], oar_masks)
+    ax[0].set_title('CT with PTV' + (' & OAR' if show_oar else ''))
     ax[0].axis('off')
 
     # Panel 1: CT with original dose overlay
@@ -568,6 +802,8 @@ class SampleResults(BaseResults):
     dose_masked = np.ma.masked_where(original_dose < 0.01 * dose_max, original_dose)
     im1 = ax[1].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
     draw_ptv_contours(ax[1], ptv_doses)
+    if show_oar and oar_masks is not None:
+      draw_oar_contours(ax[1], oar_masks)
     ax[1].set_title('Original Dose on CT')
     ax[1].axis('off')
     plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04, label='Dose (Gy)')
@@ -577,6 +813,8 @@ class SampleResults(BaseResults):
     pred_masked = np.ma.masked_where(pred_dose < 0.01 * dose_max, pred_dose)
     im2 = ax[2].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
     draw_ptv_contours(ax[2], ptv_doses)
+    if show_oar and oar_masks is not None:
+      draw_oar_contours(ax[2], oar_masks)
     ax[2].set_title('Predicted Dose on CT')
     ax[2].axis('off')
     plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04, label='Dose (Gy)')
@@ -588,6 +826,8 @@ class SampleResults(BaseResults):
     error_masked = np.ma.masked_where(np.abs(error) < 0.01 * error_max, error)
     im3 = ax[3].imshow(error_masked, cmap='bwr', alpha=dose_alpha, vmin=-error_max, vmax=error_max)
     draw_ptv_contours(ax[3], ptv_doses)
+    if show_oar and oar_masks is not None:
+      draw_oar_contours(ax[3], oar_masks)
     ax[3].set_title('Error on CT (original - predicted)')
     ax[3].axis('off')
     plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04, label='Error (Gy)')
@@ -595,7 +835,7 @@ class SampleResults(BaseResults):
     return ax
 
 class ModelComparison(BaseResults):
-  def __init__(self, results_list: List[ModelResults], result_labels=None):
+  def __init__(self, results_list: List[ModelResults], result_labels=None, result_groups=None):
     if len(results_list) == 0:
       raise ValueError('results_list must contain at least one ModelResults')
 
@@ -611,10 +851,23 @@ class ModelComparison(BaseResults):
 
     self.results_list = results_list
     self.result_labels = result_labels if result_labels is not None else [f'{r.model_name} ({r.sampling_name})' for r in results_list]
+    self.has_groups = result_groups is not None
+    self.result_groups = result_groups or [''] * len(results_list)
 
     # Aggregate slice_metrics and volume_metrics from all results
-    self.slice_metrics = pd.concat([r.slice_metrics for r in results_list], ignore_index=True)
-    self.volume_metrics = pd.concat([r.volume_metrics for r in results_list], ignore_index=True)
+    slice_metrics = []
+    volume_metrics = []
+    for r, label in zip(results_list, result_labels):
+      sm = r.slice_metrics
+      sm['label'] = label
+      slice_metrics.append(sm)
+
+      vm = r.volume_metrics
+      vm['label'] = label
+      volume_metrics.append(vm)
+
+    self.slice_metrics = pd.concat(slice_metrics, ignore_index=True)
+    self.volume_metrics = pd.concat(volume_metrics, ignore_index=True)
 
   def __add__(self, other):
     """
@@ -689,51 +942,91 @@ class ModelComparison(BaseResults):
       'or access individual results via results_list[i].for_sample(sample)'
     )
 
-  def plot_metric_distribution(self, metric, ax=None, sort=False):
+  def plot_metric_distribution(self, metric, ax=None, sort=False, outliers=True):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
     data = []
     labels = []
-    for result, label in zip(self.results_list, self.result_labels):
+    groups = []
+    for result, label, group in zip(self.results_list, self.result_labels, self.result_groups):
       if metric not in result.volume_metrics.columns:
         print(f'Warning: Metric {metric} not found in result for model {label}. Skipping.')
         continue
       data.extend(result.volume_metrics[metric].tolist())
       labels.extend([label] * len(result.volume_metrics[metric]))
+      groups.extend([group] * len(result.volume_metrics[metric]))
 
-    df = pd.DataFrame({'model': labels, 'value': data})
+    df = pd.DataFrame({'model': labels, 'value': data, 'group': groups})
 
-    # Sort by median if requested
+    # Sort by median, then IQR, then range if requested
     if sort:
-      higher_is_better = metric in HIGHER_IS_BETTER
-      median_order = df.groupby('model')['value'].median().sort_values(ascending=not higher_is_better).index.tolist()
-      order = median_order
+      higher_is_better = is_higher_better(metric)
+      ascending = [not higher_is_better, True, True]
+      grouped = df.groupby('model')['value']
+      sort_df = pd.DataFrame({
+        'median': grouped.median(),
+        'iqr': grouped.quantile(0.75) - grouped.quantile(0.25),
+        'range': grouped.max() - grouped.min()
+      })
+      order = sort_df.sort_values(by=['median', 'iqr', 'range'], ascending=ascending).index.tolist()
     else:
       order = None
 
-    sns.boxplot(x='model', y='value', data=df, ax=ax, order=order)
+    medianprops = {'color': 'black', 'linewidth': 2}
+    if outliers:
+      sns.boxplot(x='model', y='value', data=df, ax=ax, order=order, hue='group', dodge=False, medianprops=medianprops)
+    else:
+      sns.boxplot(x='model', y='value', data=df, ax=ax, order=order, hue='group', dodge=False, whis=1.5, medianprops=medianprops)
+      vmin, vmax, ymin, ymax = iqr_limits_from_df(df, 'model', 'value', whis=1.5)
+      ax.set_ylim(ymin, ymax)
+
+      model_order = order if order is not None else df['model'].unique().tolist()
+      model_to_x = {model: i for i, model in enumerate(model_order)}
+
+      above_mask = df['value'] > vmax
+      below_mask = df['value'] < vmin
+      above_x = df.loc[above_mask, 'model'].map(model_to_x)
+      below_x = df.loc[below_mask, 'model'].map(model_to_x)
+      ax.plot(above_x, np.full(len(above_x), vmax), marker="^", linestyle="none", color="black")
+      ax.plot(below_x, np.full(len(below_x), vmin), marker="v", linestyle="none", color="black")
+
     ax.tick_params(axis='x', rotation=90)
 
-    dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
-    ax.set_title(f'Distribution of {METRIC_ABBRS.get(metric, metric)} Across Models \n{dir_symbol} is better')
-    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    dir_symbol = '↑' if is_higher_better(metric) else '↓'
+    ax.set_title(f'{get_metric_label(metric)}\n{dir_symbol} is better')
+    ax.set_ylabel(get_metric_abbr(metric))
     ax.set_xlabel('')
+
+    if self.has_groups:
+      ax.legend(title='')
 
     return ax
 
-  def plot_metric_distributions(self, metrics=DEFAULT_METRICS):
-    n_metrics = len(metrics)
-    n_cols = min(3, n_metrics)
-    n_rows = (n_metrics + n_cols - 1) // n_cols
+  def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True):
+    if len(metrics) % 4 == 0:
+      n_cols = 4
+      n_rows = len(metrics) // 4
+    else:
+      n_metrics = len(metrics)
+      n_cols = min(3, n_metrics)
+      n_rows = (n_metrics + n_cols - 1) // n_cols
+
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
     axes = axes.flatten()
 
     for i, metric in enumerate(metrics):
-      self.plot_metric_distribution(metric, ax=axes[i])
+      self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=outliers)
 
     fig.suptitle('Metric Distributions Across Models', fontsize=16)
     fig.tight_layout()
+
+    if self.has_groups:
+      handles, labels = axes[0].get_legend_handles_labels()
+      fig.legend(handles, labels, loc='upper right', title='', ncol=8)
+
+      for ax in axes:
+        ax.get_legend().remove()
 
     return fig, axes
 
@@ -743,18 +1036,79 @@ class ModelComparison(BaseResults):
 
     data = []
     labels = []
-    for result, label in zip(self.results_list, self.result_labels):
+    groups = []
+    for result, label, group in zip(self.results_list, self.result_labels, self.result_groups):
       data.extend(result.volume_metrics['duration'] / 60)
       labels.extend([label] * len(result.volume_metrics['duration']))
+      groups.extend([group] * len(result.volume_metrics['duration']))
 
-    df = pd.DataFrame({'model': labels, 'inference_time': data})
-    sns.boxplot(x='model', y='inference_time', data=df, ax=ax)
+    df = pd.DataFrame({'model': labels, 'inference_time': data, 'group': groups})
+    sns.boxplot(x='model', y='inference_time', data=df, ax=ax, hue='group', dodge=False)
     ax.tick_params(axis='x', rotation=90)
     ax.set_title('Inference Time Distribution Across Models')
     ax.set_ylabel('Inference Time (minutes)')
     ax.set_xlabel('')
 
+    if self.has_groups:
+      ax.legend(title='')
+
     return ax
+
+  def plot_ptv_evaluation(self, ax=None):
+    if ax is None:
+      fig, axes = plt.subplots(1, 4, figsize=(15, 4))
+
+    axes[0].fill_between([55, 75], [55, 75], 75, color='green', alpha=0.1)
+    axes[0].fill_between([55, 75], [55, 75], 55, color='red', alpha=0.1)
+    sns.scatterplot(self.volume_metrics, x=f'vol_mean_dose/high/target', y=f'vol_mean_dose/high/pred', style='label', hue='label', ax=axes[0], legend='full')
+    #axes[0].set_title(r'Mean Dose $\tilde{x} = ' + str(self.volume_metrics['vol_mean_dose/high/abs_diff'].median().round(2)) + '$')
+    axes[0].set_title('Mean Dose')
+    axes[0].set_xlabel('Target Mean Dose [Gy]')
+    axes[0].set_ylabel('Predicted Mean Dose [Gy]')
+    axes[0].set_xlim(55, 75)
+    axes[0].set_ylim(55, 75)
+    axes[0].xaxis.get_major_locator().set_params(integer=True)
+    axes[0].yaxis.get_major_locator().set_params(integer=True)
+
+    axes[1].fill_between([0, 0.4], [0, 0.4], 0.4, color='red', alpha=0.1)
+    axes[1].fill_between([0, 0.4], [0, 0.4], 0, color='green', alpha=0.1)
+    sns.scatterplot(self.volume_metrics, x=f'vol_homogeneity_index/high/target', y=f'vol_homogeneity_index/high/pred', style='label', hue='label', ax=axes[1])
+    axes[1].set_title(f'Homogeneity Index')
+    axes[1].set_xlabel('Target Homogeneity Index')
+    axes[1].set_ylabel('Predicted Homogeneity Index')
+    axes[1].set_xlim(0, 0.40)
+    axes[1].set_ylim(0, 0.40)
+
+    axes[2].fill_between([0, 1], [0, 1], 1, color='green', alpha=0.1)
+    axes[2].fill_between([0, 1], [0, 1], 0, color='red', alpha=0.1)
+    sns.scatterplot(self.volume_metrics, x=f'vol_paddick_conformity_index/high/target', y=f'vol_paddick_conformity_index/high/pred', style='label', hue='label', ax=axes[2])
+    axes[2].set_title(f'Paddick Conformity Index')
+    axes[2].set_xlabel('Target Conformity Index')
+    axes[2].set_ylabel('Predicted Conformity Index')
+    axes[2].set_xlim(0, 1.0)
+    axes[2].set_ylim(0, 1.0)
+
+    axes[3].fill_between([0, 93], [0, 93], 93, color='red', alpha=0.1)
+    axes[3].fill_between([0, 93], [0, 93], 0, color='green', alpha=0.1)
+    sns.scatterplot(self.volume_metrics, x=f'vol_gradient_index/high/target', y=f'vol_gradient_index/high/pred', style='label', hue='label', ax=axes[3])
+    axes[3].set_title(f'Gradient Index')
+    axes[3].set_xlabel('Target Gradient Index')
+    axes[3].set_ylabel('Predicted Gradient Index')
+    axes[3].set_xlim(0, 93)
+    axes[3].set_ylim(0, 93)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', title='', ncol=8, bbox_to_anchor=(0.5, -0.1))
+
+    for ax in axes:
+      ax.grid(True, color='lightgray', linestyle='--', linewidth=0.5)
+      ax.set_aspect('equal')
+      ax.get_legend().remove()
+      ax.set_facecolor('white')
+
+    if fig is not None:
+      fig.suptitle('PTV Evaluation')
+      fig.tight_layout()
 
   def plot_quality_over_time_by_volume(self, metric, ax=None):
     if ax is None:
@@ -786,29 +1140,29 @@ class ModelComparison(BaseResults):
       df = result.volume_metrics
       ax.scatter(df['duration'] / 60, df[metric], label=label, alpha=0.8)
 
-    dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
-    ax.set_title(f'{METRIC_ABBRS.get(metric, metric)} vs Inference Time Across Models \n{dir_symbol} is better')
+    dir_symbol = '↑' if is_higher_better(metric) else '↓'
+    ax.set_title(f'{get_metric_abbr(metric)} vs Inference Time Across Models \n{dir_symbol} is better')
     ax.set_xlabel('Inference Time (minutes)')
-    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    ax.set_ylabel(get_metric_label(metric))
     ax.legend()
 
     return ax
 
   def plot_quality_over_time(self, metric, ax=None):
-    # scatter plot with mean values per model
+    # scatter plot with median values per model
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
     for result, label in zip(self.results_list, self.result_labels):
       df = result.volume_metrics
-      x = df['duration'].mean() / 60
-      y = df[metric].mean()
+      x = df['duration'].median() / 60
+      y = df[metric].median()
       ax.scatter(x, y, label=label, s=100, alpha=0.6)
 
-    dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
-    ax.set_title(f'Mean {METRIC_ABBRS.get(metric, metric)} vs Mean Inference Time Across Models \n{dir_symbol} is better')
-    ax.set_xlabel('Mean Inference Time (minutes)')
-    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    dir_symbol = '↑' if is_higher_better(metric) else '↓'
+    ax.set_title(f'Median {get_metric_abbr(metric)} vs Median Inference Time Across Models \n{dir_symbol} is better')
+    ax.set_xlabel('Median Inference Time (minutes)')
+    ax.set_ylabel('Median ' + get_metric_label(metric))
     ax.legend()
 
     return ax
@@ -842,10 +1196,10 @@ class ModelComparison(BaseResults):
         alpha=0.2,
       )
 
-    dir_symbol = '↑' if metric in HIGHER_IS_BETTER else '↓'
-    ax.set_title(f'Mean (±std) {METRIC_ABBRS.get(metric, metric)} vs Sampling T Across Models \n{dir_symbol} is better')
+    dir_symbol = '↑' if is_higher_better(metric) else '↓'
+    ax.set_title(f'Mean (±std) {get_metric_abbr(metric)} vs Sampling T Across Models \n{dir_symbol} is better')
     ax.set_xlabel('Sampling T')
-    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    ax.set_ylabel(get_metric_label(metric))
     ax.legend()
 
     return ax
@@ -915,8 +1269,8 @@ class ModelComparison(BaseResults):
     sns.boxplot(data=metric_std, x='sampling_name', order=sampling_names, y=metric, ax=ax)
     ax.tick_params(axis='x', rotation=90)
 
-    ax.set_title(f'Uncertainty in {METRIC_ABBRS.get(metric, metric)} Across Models')
-    ax.set_ylabel(METRC_LABELS.get(metric, metric))
+    ax.set_title(f'Uncertainty in {get_metric_abbr(metric)} Across Models')
+    ax.set_ylabel(get_metric_label(metric))
     ax.set_xlabel('')
     ax.set_xticks(sampling_names, labels)
 
@@ -989,7 +1343,7 @@ class ModelComparison(BaseResults):
 
     return fig, axes
 
-  def visualise_slice_comparison_with_ct(self, sample, slice_index, axis='sagittal', dose_cmap='jet', dose_alpha=0.5):
+  def visualise_slice_comparison_with_ct(self, sample, slice_index, axis='sagittal', dose_cmap='jet', dose_alpha=0.5, show_oar=True):
     """
     Visualize slice comparison with CT underneath transparent dose distributions.
 
@@ -999,6 +1353,7 @@ class ModelComparison(BaseResults):
         axis: 'sagittal', 'axial', or 'coronal'
         dose_cmap: Colormap for dose overlay (default: 'jet')
         dose_alpha: Transparency of dose overlay (default: 0.5)
+        show_oar: Whether to show OAR contours (default: True)
 
     Returns:
         Tuple of (figure, axes)
@@ -1012,6 +1367,8 @@ class ModelComparison(BaseResults):
     if axis == "sagittal":
       structure = structure_vol[:, :, :, slice_index]
       original_dose = original_dose_vol[:, :, slice_index]
+      structure = np.flip(structure, [1, 2])
+      original_dose = np.flip(original_dose)
     elif axis == "axial":
       structure = structure_vol[:, slice_index, :, :]
       original_dose = original_dose_vol[slice_index, :, :]
@@ -1025,6 +1382,11 @@ class ModelComparison(BaseResults):
     ct_slice = first_result.dataset.selector.get_ct(structure)[0]
     ptv_doses = first_result.dataset.selector.get_component(structure, 'ptv_doses')
 
+    # Get OAR masks if needed
+    oar_masks = None
+    if show_oar:
+      oar_masks = first_result.dataset.selector.get_component(structure, 'oar_v3')
+
     dose_max = original_dose.max()
 
     # Row 0, Col 0: CT with original dose overlay
@@ -1032,6 +1394,8 @@ class ModelComparison(BaseResults):
     dose_masked = np.ma.masked_where(original_dose < 0.01 * dose_max, original_dose)
     im1 = axes[0, 0].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
     draw_ptv_contours(axes[0, 0], ptv_doses)
+    if show_oar and oar_masks is not None:
+      draw_oar_contours(axes[0, 0], oar_masks)
     axes[0, 0].set_title('Original Dose on CT')
     axes[0, 0].axis('off')
     plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04, label='Dose (Gy)')
@@ -1040,7 +1404,9 @@ class ModelComparison(BaseResults):
     axes[1, 0].imshow(ct_slice, cmap='gray')
     draw_ptv_overlay(axes[1, 0], ptv_doses)
     draw_ptv_contours(axes[1, 0], ptv_doses)
-    axes[1, 0].set_title('CT with PTV')
+    if show_oar and oar_masks is not None:
+      draw_oar_contours(axes[1, 0], oar_masks)
+    axes[1, 0].set_title('CT with PTV' + (' & OAR' if show_oar else ''))
     axes[1, 0].axis('off')
 
     for i, result in enumerate(self.results_list):
@@ -1048,6 +1414,7 @@ class ModelComparison(BaseResults):
       pred_dose_vol = sample_results.load_pred_volume()
       if axis == "sagittal":
         pred_dose = pred_dose_vol[:, :, slice_index]
+        pred_dose = np.flip(pred_dose)
       elif axis == "axial":
         pred_dose = pred_dose_vol[slice_index, :, :]
       else:  # coronal
@@ -1058,6 +1425,8 @@ class ModelComparison(BaseResults):
       pred_masked = np.ma.masked_where(pred_dose < 0.01 * dose_max, pred_dose)
       im = axes[0, i + 1].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
       draw_ptv_contours(axes[0, i + 1], ptv_doses)
+      if show_oar and oar_masks is not None:
+        draw_oar_contours(axes[0, i + 1], oar_masks)
       axes[0, i + 1].set_title(f'{self.result_labels[i]} - Predicted')
       axes[0, i + 1].axis('off')
       plt.colorbar(im, ax=axes[0, i + 1], fraction=0.046, pad=0.04, label='Dose (Gy)')
@@ -1069,6 +1438,8 @@ class ModelComparison(BaseResults):
       error_masked = np.ma.masked_where(np.abs(error) < 0.01 * error_max, error)
       im_err = axes[1, i + 1].imshow(error_masked, cmap='bwr', alpha=dose_alpha, vmin=-error_max, vmax=error_max)
       draw_ptv_contours(axes[1, i + 1], ptv_doses)
+      if show_oar and oar_masks is not None:
+        draw_oar_contours(axes[1, i + 1], oar_masks)
       axes[1, i + 1].set_title(f'{self.result_labels[i]} - Error')
       axes[1, i + 1].axis('off')
       plt.colorbar(im_err, ax=axes[1, i + 1], fraction=0.046, pad=0.04, label='Error (Gy)')
