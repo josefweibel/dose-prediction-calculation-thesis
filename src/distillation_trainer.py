@@ -527,7 +527,6 @@ class DistillationTrainer:
 
     checkpoint_path = self.checkpoint_dir / f'{epoch}.pt'
     torch.save(checkpoint_data, checkpoint_path)
-    print(f'Saved checkpoint: {checkpoint_path}')
 
   def finish(self):
     if hasattr(self, 'train_dataloader') and self.train_dataloader is not None:

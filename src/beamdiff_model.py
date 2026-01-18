@@ -350,6 +350,11 @@ class NoisePredictor(nn.Module):
     The model automatically detects if 'beam_plate' and/or 'angle_plate' are present
     in the conditioning via the structure_selector and extracts them accordingly.
     Both beam fields can be used simultaneously.
+
+  Encoder modes:
+    - 'separate': Original 3-branch encoder (noisy, struct, beam) - most expressive
+    - 'merged_condition': 2-branch encoder (noisy, struct+beam) - faster
+    - 'merged_all': Single encoder (noisy+struct+beam concatenated) - fastest
   """
 
   def __init__(
@@ -362,12 +367,14 @@ class NoisePredictor(nn.Module):
     num_heads=4,
     use_mam=True,
     use_afm=True,
+    encoder_mode='separate',  # 'separate', 'merged_condition', or 'merged_all'
   ):
     super().__init__()
 
     self.use_mam = use_mam
     self.use_afm = use_afm
     self.structure_selector = structure_selector
+    self.encoder_mode = encoder_mode
 
     # Auto-detect beam fields from structure selector
     self.beam_field_keys = []
@@ -399,17 +406,33 @@ class NoisePredictor(nn.Module):
       nn.Linear(time_embed_dim, time_embed_dim)
     )
 
-    # Initial convolutions
-    self.conv_in_noisy = nn.Conv2d(1, base_channels, kernel_size=3, padding=1)
-    self.conv_in_struct = nn.Conv2d(in_channels_struct, base_channels, kernel_size=3, padding=1)
-    if self.use_beam_field:
-      self.conv_in_beam = nn.Conv2d(in_channels_beam, base_channels, kernel_size=3, padding=1)
+    # Initial convolutions based on encoder mode
+    if encoder_mode == 'merged_all':
+      # Single encoder: noisy + all condition channels
+      in_channels_combined = 1 + structure_selector.total_channels
+      self.conv_in_combined = nn.Conv2d(in_channels_combined, base_channels, kernel_size=3, padding=1)
+    elif encoder_mode == 'merged_condition':
+      # Two encoders: noisy separate, struct+beam merged
+      self.conv_in_noisy = nn.Conv2d(1, base_channels, kernel_size=3, padding=1)
+      in_channels_condition = structure_selector.total_channels
+      self.conv_in_condition = nn.Conv2d(in_channels_condition, base_channels, kernel_size=3, padding=1)
+    else:  # 'separate' (default)
+      self.conv_in_noisy = nn.Conv2d(1, base_channels, kernel_size=3, padding=1)
+      self.conv_in_struct = nn.Conv2d(in_channels_struct, base_channels, kernel_size=3, padding=1)
+      if self.use_beam_field:
+        self.conv_in_beam = nn.Conv2d(in_channels_beam, base_channels, kernel_size=3, padding=1)
 
-    # Encoder stages
-    self.encoder_noisy = nn.ModuleList()
-    self.encoder_struct = nn.ModuleList()
-    if self.use_beam_field:
-      self.encoder_beam = nn.ModuleList()
+    # Encoder stages based on encoder mode
+    if encoder_mode == 'merged_all':
+      self.encoder = nn.ModuleList()  # Single encoder
+    elif encoder_mode == 'merged_condition':
+      self.encoder_noisy = nn.ModuleList()
+      self.encoder_condition = nn.ModuleList()  # Merged struct+beam
+    else:  # 'separate'
+      self.encoder_noisy = nn.ModuleList()
+      self.encoder_struct = nn.ModuleList()
+      if self.use_beam_field:
+        self.encoder_beam = nn.ModuleList()
     self.downsamples = nn.ModuleList()
 
     channels = [base_channels * m for m in channel_mult]
@@ -418,21 +441,33 @@ class NoisePredictor(nn.Module):
     for level, out_ch in enumerate(channels):
       use_attn = (level + 1) in attention_levels
 
-      # Noisy image encoder
-      self.encoder_noisy.append(
-        EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
-      )
-
-      # Structural information encoder
-      self.encoder_struct.append(
-        EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
-      )
-
-      # Beam field encoder (only if using beam field)
-      if self.use_beam_field:
-        self.encoder_beam.append(
+      if encoder_mode == 'merged_all':
+        # Single encoder for everything
+        self.encoder.append(
           EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
         )
+      elif encoder_mode == 'merged_condition':
+        # Two encoders: noisy and merged condition
+        self.encoder_noisy.append(
+          EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
+        )
+        self.encoder_condition.append(
+          EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
+        )
+      else:  # 'separate'
+        # Noisy image encoder
+        self.encoder_noisy.append(
+          EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
+        )
+        # Structural information encoder
+        self.encoder_struct.append(
+          EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
+        )
+        # Beam field encoder (only if using beam field)
+        if self.use_beam_field:
+          self.encoder_beam.append(
+            EncoderStage(in_ch, out_ch, time_embed_dim, num_res_blocks, use_attn, num_heads)
+          )
 
       # Downsample (except last level)
       if level < len(channels) - 1:
@@ -442,8 +477,8 @@ class NoisePredictor(nn.Module):
 
       in_ch = out_ch
 
-    # Multi-Condition Aggregation Module (only if using beam field and MAM)
-    if self.use_mam and self.use_beam_field:
+    # Multi-Condition Aggregation Module (only for 'separate' mode with beam field and MAM)
+    if self.use_mam and self.use_beam_field and encoder_mode == 'separate':
       self.mam = MultiConditionAggregationModule(
         channels=channels[-1],
         patch_size=4,
@@ -505,109 +540,13 @@ class NoisePredictor(nn.Module):
     # Timestep embedding
     t_emb = self.time_embed(timesteps)
 
-    # Extract beam fields from condition if present
-    if self.use_beam_field:
-      beam_components = []
-      for key in self.beam_field_keys:
-        beam_components.append(self.structure_selector.get_component(condition, key))
-      x_beam = torch.cat(beam_components, dim=1) if len(beam_components) > 1 else beam_components[0]
-
-      # Build structural condition without beam fields
-      struct_components = []
-      for group in self.structure_selector.groups:
-        if group not in self.beam_field_keys:
-          struct_components.append(self.structure_selector.get_component(condition, group))
-      x_struct = torch.cat(struct_components, dim=1)
-    else:
-      x_struct = condition
-      x_beam = None
-
-    # Initial convolutions
-    h_noisy = self.conv_in_noisy(x_noisy)
-    h_struct = cache.get_or_compute('head_struct', lambda: self.conv_in_struct(x_struct))
-
-    if self.use_beam_field:
-      h_beam = cache.get_or_compute('head_beam', lambda: self.conv_in_beam(x_beam))
-
-    # Encoder
-    encoder_outputs = []
-
-    for level in range(len(self.encoder_noisy)):
-      cache_key_enc = f'enc{level+1}'
-
-      # Check if we can use cached encoder output
-      if cache.should_use(cache_key_enc):
-        h_noisy = cache.get(cache_key_enc)
-        encoder_outputs.append(h_noisy)
-        h_noisy = self.downsamples[level](h_noisy)
-
-        # Still need to update struct/beam for next level (cached)
-        cache_key_down_struct = f'down{level+1}_struct'
-        h_struct = cache.get_or_compute(
-          cache_key_down_struct,
-          lambda down=self.downsamples[level], inp=h_struct: down(inp)
-        )
-        if self.use_beam_field:
-          cache_key_down_beam = f'down{level+1}_beam'
-          h_beam = cache.get_or_compute(
-            cache_key_down_beam,
-            lambda down=self.downsamples[level], inp=h_beam: down(inp)
-          )
-        continue
-
-      # Process noisy branch
-      h_noisy = self.encoder_noisy[level](h_noisy, t_emb)
-
-      # Process structural branch (can be cached)
-      cache_key_struct = f'enc{level+1}_struct'
-      h_struct = cache.get_or_compute(
-        cache_key_struct,
-        lambda enc=self.encoder_struct[level], inp=h_struct: enc(inp, t_emb)
-      )
-
-      if self.use_beam_field:
-        # Process beam field branch (can be cached)
-        cache_key_beam = f'enc{level+1}_beam'
-        h_beam = cache.get_or_compute(
-          cache_key_beam,
-          lambda enc=self.encoder_beam[level], inp=h_beam: enc(inp, t_emb)
-        )
-
-        # Fuse all three branches (except last level)
-        if level < len(self.encoder_noisy) - 1:
-          h_noisy = h_noisy + h_struct + h_beam
-      else:
-        # Fuse only noisy and structural branches (except last level)
-        if level < len(self.encoder_noisy) - 1:
-          h_noisy = h_noisy + h_struct
-
-      # Cache and store for skip connections
-      cache.set(cache_key_enc, h_noisy)
-      encoder_outputs.append(h_noisy)
-
-      # Downsample
-      h_noisy = self.downsamples[level](h_noisy)
-
-      cache_key_down_struct = f'down{level+1}_struct'
-      h_struct = cache.get_or_compute(
-        cache_key_down_struct,
-        lambda down=self.downsamples[level], inp=h_struct: down(inp)
-      )
-
-      if self.use_beam_field:
-        cache_key_down_beam = f'down{level+1}_beam'
-        h_beam = cache.get_or_compute(
-          cache_key_down_beam,
-          lambda down=self.downsamples[level], inp=h_beam: down(inp)
-        )
-
-    # Multi-Condition Aggregation Module or simple fusion
-    if self.use_beam_field and self.use_mam:
-      h = self.mam(h_noisy, h_struct, h_beam)
-    elif self.use_beam_field:
-      h = h_noisy + h_struct + h_beam
-    else:
-      h = h_noisy + h_struct
+    # Dispatch to appropriate encoder based on mode
+    if self.encoder_mode == 'merged_all':
+      h, encoder_outputs = self._forward_merged_all(x_noisy, condition, t_emb, cache)
+    elif self.encoder_mode == 'merged_condition':
+      h, encoder_outputs = self._forward_merged_condition(x_noisy, condition, t_emb, cache)
+    else:  # 'separate'
+      h, encoder_outputs = self._forward_separate(x_noisy, condition, t_emb, cache)
 
     # Middle block
     for module in self.middle:
@@ -645,13 +584,221 @@ class NoisePredictor(nn.Module):
 
     return h
 
+  def _forward_merged_all(self, x_noisy, condition, t_emb, cache: DeepCache):
+    """
+    Forward pass for merged_all mode: single encoder with concatenated inputs.
+    Fastest mode - no parallel branches.
+    """
+    # Concatenate noisy image with all conditioning
+    x_combined = torch.cat([x_noisy, condition], dim=1)
+
+    # Initial convolution
+    h = self.conv_in_combined(x_combined)
+
+    # Encoder
+    encoder_outputs = []
+    num_levels = len(self.encoder)
+
+    for level in range(num_levels):
+      cache_key_enc = f'enc{level+1}'
+
+      if cache.should_use(cache_key_enc):
+        h = cache.get(cache_key_enc)
+        encoder_outputs.append(h)
+        h = self.downsamples[level](h)
+        continue
+
+      h = self.encoder[level](h, t_emb)
+      cache.set(cache_key_enc, h)
+      encoder_outputs.append(h)
+      h = self.downsamples[level](h)
+
+    return h, encoder_outputs
+
+  def _forward_merged_condition(self, x_noisy, condition, t_emb, cache: DeepCache):
+    """
+    Forward pass for merged_condition mode: two encoders (noisy + merged condition).
+    Faster than separate - struct and beam share a single encoder.
+    """
+    # Initial convolutions
+    h_noisy = self.conv_in_noisy(x_noisy)
+    h_cond = cache.get_or_compute('head_cond', lambda: self.conv_in_condition(condition))
+
+    # Encoder
+    encoder_outputs = []
+    num_levels = len(self.encoder_noisy)
+
+    for level in range(num_levels):
+      cache_key_enc = f'enc{level+1}'
+
+      if cache.should_use(cache_key_enc):
+        h_noisy = cache.get(cache_key_enc)
+        encoder_outputs.append(h_noisy)
+        h_noisy = self.downsamples[level](h_noisy)
+
+        cache_key_down_cond = f'down{level+1}_cond'
+        h_cond = cache.get_or_compute(
+          cache_key_down_cond,
+          lambda down=self.downsamples[level], inp=h_cond: down(inp)
+        )
+        continue
+
+      # Process noisy branch
+      h_noisy = self.encoder_noisy[level](h_noisy, t_emb)
+
+      # Process condition branch (cached)
+      cache_key_cond = f'enc{level+1}_cond'
+      h_cond = cache.get_or_compute(
+        cache_key_cond,
+        lambda enc=self.encoder_condition[level], inp=h_cond: enc(inp, t_emb)
+      )
+
+      # Fuse branches (except last level)
+      if level < num_levels - 1:
+        h_noisy = h_noisy + h_cond
+
+      cache.set(cache_key_enc, h_noisy)
+      encoder_outputs.append(h_noisy)
+
+      # Downsample
+      h_noisy = self.downsamples[level](h_noisy)
+      cache_key_down_cond = f'down{level+1}_cond'
+      h_cond = cache.get_or_compute(
+        cache_key_down_cond,
+        lambda down=self.downsamples[level], inp=h_cond: down(inp)
+      )
+
+    # Final fusion
+    h = h_noisy + h_cond
+    return h, encoder_outputs
+
+  def _forward_separate(self, x_noisy, condition, t_emb, cache: DeepCache):
+    """
+    Forward pass for separate mode: original 3-branch encoder (noisy, struct, beam).
+    Most expressive but slowest.
+    """
+    # Extract beam fields from condition if present
+    if self.use_beam_field:
+      beam_components = []
+      for key in self.beam_field_keys:
+        beam_components.append(self.structure_selector.get_component(condition, key))
+      x_beam = torch.cat(beam_components, dim=1) if len(beam_components) > 1 else beam_components[0]
+
+      # Build structural condition without beam fields
+      struct_components = []
+      for group in self.structure_selector.groups:
+        if group not in self.beam_field_keys:
+          struct_components.append(self.structure_selector.get_component(condition, group))
+      x_struct = torch.cat(struct_components, dim=1)
+    else:
+      x_struct = condition
+      x_beam = None
+
+    # Initial convolutions
+    h_noisy = self.conv_in_noisy(x_noisy)
+    h_struct = cache.get_or_compute('head_struct', lambda: self.conv_in_struct(x_struct))
+
+    if self.use_beam_field:
+      h_beam = cache.get_or_compute('head_beam', lambda: self.conv_in_beam(x_beam))
+
+    # Encoder
+    encoder_outputs = []
+    num_levels = len(self.encoder_noisy)
+
+    for level in range(num_levels):
+      cache_key_enc = f'enc{level+1}'
+
+      if cache.should_use(cache_key_enc):
+        h_noisy = cache.get(cache_key_enc)
+        encoder_outputs.append(h_noisy)
+        h_noisy = self.downsamples[level](h_noisy)
+
+        cache_key_down_struct = f'down{level+1}_struct'
+        h_struct = cache.get_or_compute(
+          cache_key_down_struct,
+          lambda down=self.downsamples[level], inp=h_struct: down(inp)
+        )
+        if self.use_beam_field:
+          cache_key_down_beam = f'down{level+1}_beam'
+          h_beam = cache.get_or_compute(
+            cache_key_down_beam,
+            lambda down=self.downsamples[level], inp=h_beam: down(inp)
+          )
+        continue
+
+      # Process noisy branch
+      h_noisy = self.encoder_noisy[level](h_noisy, t_emb)
+
+      # Process structural branch (cached)
+      cache_key_struct = f'enc{level+1}_struct'
+      h_struct = cache.get_or_compute(
+        cache_key_struct,
+        lambda enc=self.encoder_struct[level], inp=h_struct: enc(inp, t_emb)
+      )
+
+      if self.use_beam_field:
+        # Process beam field branch (cached)
+        cache_key_beam = f'enc{level+1}_beam'
+        h_beam = cache.get_or_compute(
+          cache_key_beam,
+          lambda enc=self.encoder_beam[level], inp=h_beam: enc(inp, t_emb)
+        )
+
+        # Fuse all three branches (except last level)
+        if level < num_levels - 1:
+          h_noisy = h_noisy + h_struct + h_beam
+      else:
+        # Fuse only noisy and structural branches (except last level)
+        if level < num_levels - 1:
+          h_noisy = h_noisy + h_struct
+
+      cache.set(cache_key_enc, h_noisy)
+      encoder_outputs.append(h_noisy)
+
+      # Downsample
+      h_noisy = self.downsamples[level](h_noisy)
+
+      cache_key_down_struct = f'down{level+1}_struct'
+      h_struct = cache.get_or_compute(
+        cache_key_down_struct,
+        lambda down=self.downsamples[level], inp=h_struct: down(inp)
+      )
+
+      if self.use_beam_field:
+        cache_key_down_beam = f'down{level+1}_beam'
+        h_beam = cache.get_or_compute(
+          cache_key_down_beam,
+          lambda down=self.downsamples[level], inp=h_beam: down(inp)
+        )
+
+    # Multi-Condition Aggregation Module or simple fusion
+    if self.use_beam_field and self.use_mam:
+      h = self.mam(h_noisy, h_struct, h_beam)
+    elif self.use_beam_field:
+      h = h_noisy + h_struct + h_beam
+    else:
+      h = h_noisy + h_struct
+
+    return h, encoder_outputs
+
 
 def build_beamdiff(config, structure_selector):
   """
   Build BeamDiff model from configuration.
 
   Args:
-      config: BeamDiff configuration dict
+      config: BeamDiff configuration dict with keys:
+        - base_channels: Base channel count (default: 128)
+        - channel_mult: Channel multipliers per level (default: [1, 1, 2, 3, 4])
+        - num_res_blocks: ResNet blocks per stage (default: 2)
+        - attention_levels: Levels with attention (default: [4])
+        - num_heads: Attention heads (default: 4)
+        - use_mam: Use Multi-Condition Aggregation Module (default: True)
+        - use_afm: Use Asymmetric Fusion Module (default: True)
+        - encoder_mode: Encoder architecture mode (default: 'separate')
+          - 'separate': 3 parallel encoders (noisy, struct, beam) - most expressive
+          - 'merged_condition': 2 encoders (noisy, struct+beam) - faster
+          - 'merged_all': 1 encoder (all concatenated) - fastest
       structure_selector: StructureSelector instance for extracting components from conditioning tensor
 
   Returns:
@@ -666,5 +813,6 @@ def build_beamdiff(config, structure_selector):
     num_heads=config.get('num_heads', 4),
     use_mam=config.get('use_mam', True),
     use_afm=config.get('use_afm', True),
+    encoder_mode=config.get('encoder_mode', 'separate'),
   )
   return model
