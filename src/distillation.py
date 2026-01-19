@@ -306,6 +306,13 @@ class ProgressiveDistillationOrchestrator:
       'T': student_T,
       'eta': 0,
       'schedule': 'linear',
+      'data_cache_size': 'inf',
+      'num_workers': 4,
+      'prefetch_factor': 4,
+      'prefetch_on_gpu': False,
+      'seed': 1,
+      'batch_size_per_gpu': 16,
+      'precision': None,
     }
 
     # Create evaluator
