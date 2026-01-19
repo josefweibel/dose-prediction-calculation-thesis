@@ -19,6 +19,7 @@ Features:
 """
 
 import wandb
+import torch
 from torch.utils.data import DataLoader, DistributedSampler
 
 from utils.checkpointing import CHECKPOINTS_PATH, load_last_checkpoint, find_checkpoint
@@ -206,6 +207,15 @@ class ProgressiveDistillationOrchestrator:
     wandb_run = None
     if self.is_main_process:
       wandb.login()
+
+      # Check if we should resume an existing wandb run
+      wandb_run_id = None
+      if student_checkpoint_path is not None:
+        checkpoint = torch.load(student_checkpoint_path, map_location='cpu')
+        wandb_run_id = checkpoint.get('wandb_run_id')
+        if wandb_run_id:
+          print(f"Resuming wandb run: {wandb_run_id}")
+
       wandb_run = wandb.init(
         project=self.wandb_project,
         entity=self.wandb_entity,
@@ -220,6 +230,8 @@ class ProgressiveDistillationOrchestrator:
         },
         group=self.run_group,
         reinit=True,
+        id=wandb_run_id,
+        resume='must' if wandb_run_id else None,
       )
 
     # Create distillation trainer
@@ -336,7 +348,7 @@ class ProgressiveDistillationOrchestrator:
 
     # Determine starting point
     student_ckpt_resume = None
-    if start_round is None and auto_resume:
+    if auto_resume:
       # Auto-detect resume point
       start_round, teacher_ckpt, student_ckpt_resume = self._find_resume_point()
 
