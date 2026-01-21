@@ -102,8 +102,8 @@ class ProgressiveDistillationOrchestrator:
         raise ValueError(f"No checkpoint found for model {self.model_config['name']}")
       # load_last_checkpoint returns the checkpoint dict, we need the path
       checkpoint_dir = CHECKPOINTS_PATH / self.model_config['name']
-      # Find the latest checkpoint file
-      checkpoints = sorted(checkpoint_dir.glob('*.pt'))
+      # Find the latest checkpoint file (sort numerically by epoch)
+      checkpoints = sorted(checkpoint_dir.glob('*.pt'), key=lambda p: int(p.stem))
       if not checkpoints:
         raise ValueError(f"No checkpoints found in {checkpoint_dir}")
       return checkpoints[-1]
@@ -124,7 +124,7 @@ class ProgressiveDistillationOrchestrator:
     if not checkpoint_dir.exists():
       return None
 
-    checkpoints = sorted(checkpoint_dir.glob('*.pt'))
+    checkpoints = sorted(checkpoint_dir.glob('*.pt'), key=lambda p: int(p.stem))
     if not checkpoints:
       return None
 
