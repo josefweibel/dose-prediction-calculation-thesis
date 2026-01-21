@@ -47,27 +47,27 @@ cache:
     - dec2
   intervals:
     head_struct: inf
-    enc1_struct: inf
-    enc2_struct: inf
-    enc3_struct: inf
-    enc4_struct: inf
-    enc5_struct: inf
-    down1_struct: inf
-    down2_struct: inf
-    down3_struct: inf
-    down4_struct: inf
-    down5_struct: inf
+    enc1_struct: 20
+    enc2_struct: 20
+    enc3_struct: 20
+    enc4_struct: 20
+    enc5_struct: 20
+    down1_struct: 20
+    down2_struct: 20
+    down3_struct: 20
+    down4_struct: 20
+    down5_struct: 20
     head_beam: inf
-    enc1_beam: inf
-    enc2_beam: inf
-    enc3_beam: inf
-    enc4_beam: inf
-    enc5_beam: inf
-    down1_beam: inf
-    down2_beam: inf
-    down3_beam: inf
-    down4_beam: inf
-    down5_beam: inf
+    enc1_beam: 20
+    enc2_beam: 20
+    enc3_beam: 20
+    enc4_beam: 20
+    enc5_beam: 20
+    down1_beam: 20
+    down2_beam: 20
+    down3_beam: 20
+    down4_beam: 20
+    down5_beam: 20
     enc1: 20
     enc2: 20
     enc3: 20
