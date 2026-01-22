@@ -565,7 +565,7 @@ class DiffDP(nn.Module):
     return noise_pred
 
 
-def build_diffdp(config, structure_selector):
+def build_diffdp(config, structure_selector, out_channels=1):
   """
   Build DiffDP model from configuration.
 
@@ -590,10 +590,14 @@ def build_diffdp(config, structure_selector):
   Args:
       config: DiffDP configuration dict
       structure_selector: StructureSelector instance
+      out_channels: Number of output channels (default: 1, only 1 supported for diffusion)
 
   Returns:
       DiffDP model
   """
+  if out_channels != 1:
+    raise ValueError("DiffDP only supports out_channels=1 for noise prediction")
+
   model = DiffDP(
     structure_selector=structure_selector,
     base_channels=config.get('base_channels', 64),

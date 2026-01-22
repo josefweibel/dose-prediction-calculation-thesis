@@ -768,7 +768,7 @@ class SPDiffDose(nn.Module):
     return noise_pred
 
 
-def build_spdiffdose(config, structure_selector):
+def build_spdiffdose(config, structure_selector, out_channels=1):
   """
   Build SP-DiffDose model from configuration.
 
@@ -807,10 +807,14 @@ def build_spdiffdose(config, structure_selector):
             - [3, 4]: Last 2 levels (best ablation result - "attn-last2")
             - [2, 3, 4]: Last 3 levels (paper text - "last three")
       structure_selector: StructureSelector instance
+      out_channels: Number of output channels (default: 1, only 1 supported for diffusion)
 
   Returns:
       SPDiffDose model
   """
+  if out_channels != 1:
+    raise ValueError("SPDiffDose only supports out_channels=1 for noise prediction")
+
   # Get cross-attention levels from config
   # If not specified, use [4] as conservative default
   # Paper's best ablation uses [3, 4] ("attn-last2")

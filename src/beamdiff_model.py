@@ -368,8 +368,10 @@ class NoisePredictor(nn.Module):
     use_mam=True,
     use_afm=True,
     encoder_mode='separate',  # 'separate', 'merged_condition', or 'merged_all'
+    out_channels=1,  # Number of output channels (1 for dose, 2 for warm-start)
   ):
     super().__init__()
+    self.out_channels = out_channels
 
     self.use_mam = use_mam
     self.use_afm = use_afm
@@ -522,7 +524,7 @@ class NoisePredictor(nn.Module):
 
     # Output
     self.norm_out = nn.GroupNorm(8, base_channels)
-    self.conv_out = nn.Conv2d(base_channels, 1, kernel_size=3, padding=1)
+    self.conv_out = nn.Conv2d(base_channels, out_channels, kernel_size=3, padding=1)
 
   def forward(self, x_noisy, condition, timesteps, cache: DeepCache):
     """
@@ -782,7 +784,7 @@ class NoisePredictor(nn.Module):
     return h, encoder_outputs
 
 
-def build_beamdiff(config, structure_selector):
+def build_beamdiff(config, structure_selector, out_channels=1):
   """
   Build BeamDiff model from configuration.
 
@@ -800,6 +802,7 @@ def build_beamdiff(config, structure_selector):
           - 'merged_condition': 2 encoders (noisy, struct+beam) - faster
           - 'merged_all': 1 encoder (all concatenated) - fastest
       structure_selector: StructureSelector instance for extracting components from conditioning tensor
+      out_channels: Number of output channels (default: 1 for dose prediction)
 
   Returns:
       NoisePredictor model (not wrapped in BeamDiff, since trainer handles diffusion)
@@ -814,5 +817,6 @@ def build_beamdiff(config, structure_selector):
     use_mam=config.get('use_mam', True),
     use_afm=config.get('use_afm', True),
     encoder_mode=config.get('encoder_mode', 'separate'),
+    out_channels=out_channels,
   )
   return model

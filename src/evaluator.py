@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 import pandas as pd
 import contextlib
+import numpy as np
 
 from metrics import (
 	DVHScore,
@@ -32,8 +33,7 @@ from metrics import (
 from model_sampler import build_sampler
 from data import GDPHMM_OAR_V3
 from constraints import FractionationType, ConstraintGrade
-import numpy as np
-
+from warm_start import WarmStartCachedDataset
 
 def compute_metrics(metrics, preds, target, structure, dataset):
   """
@@ -456,7 +456,9 @@ class Evaluator:
     self.world_size = world_size
     self.conditioning_groups = self.model_config['conditioning']['types']
 
-    self.metrics = build_slice_metrics(dataloader.dataset, device)
+    self.use_warm_start_cache = 'warm_start' in self.model_config
+
+    self.metrics = build_slice_metrics(self.dataloader.dataset, device)
 
   def evaluate(self, model, dir=None):
     model.eval()
@@ -471,7 +473,16 @@ class Evaluator:
       sample_metrics = []
 
       pbar = tqdm(self.dataloader, desc='Evaluating', leave=False, disable=self.rank != 0)
-      for structure, target, info in pbar:
+      for batch in pbar:
+        # Handle both regular (3-element) and warm-start cached (5-element) batches
+        if self.use_warm_start_cache:
+          structure, target, mu, sigma, info = batch
+          mu = mu.to(self.device)
+          sigma = sigma.to(self.device)
+        else:
+          structure, target, info = batch
+          mu, sigma = None, None
+
         structure = structure.to(self.device)
         target = target.to(self.device)
         target = self.dataloader.dataset.denormalize_target(target)
@@ -488,7 +499,11 @@ class Evaluator:
         with autocast:
           start = time()
           x_T = torch.randn_like(target, device=self.device)
-          pred = sampler(x_T, condition)
+          # Only pass (mu, sigma) to WarmStartSampler
+          if self.use_warm_start_cache:
+            pred = sampler(x_T, condition, mu, sigma)
+          else:
+            pred = sampler(x_T, condition)
           duration = time() - start
 
         pred = torch.clamp(pred, 0., 1.)

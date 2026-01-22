@@ -1049,7 +1049,7 @@ class MedNeXtDiffusion(nn.Module):
 # ============================================================================
 
 
-def build_mednext_model(model_config, structure_selector):
+def build_mednext_model(model_config, structure_selector, out_channels=1):
   """
   Build MedNeXt model from configuration.
 
@@ -1059,7 +1059,7 @@ def build_mednext_model(model_config, structure_selector):
   Args:
       model_config: Full model configuration dict
       structure_selector: StructureSelector instance (provides input channels and conditioning)
-      for_diffusion: Whether to build a diffusion model
+      out_channels: Number of output channels (default: 1, only 1 supported for diffusion)
 
   Returns:
       MedNeXt or MedNeXtDiffusion model
@@ -1095,6 +1095,9 @@ def build_mednext_model(model_config, structure_selector):
 
   # Build diffusion model
   if 'diffusion' in model_config:
+    if out_channels != 1:
+      raise ValueError("MedNeXtDiffusion only supports out_channels=1 for noise prediction")
+
     model = MedNeXtDiffusion(
       structure_selector=structure_selector,
       base_channels=base_channels,
@@ -1116,7 +1119,7 @@ def build_mednext_model(model_config, structure_selector):
   return MedNeXt(
     in_channels=in_channels,
     n_channels=base_channels,
-    n_classes=1,
+    n_classes=out_channels,
     exp_r=exp_r,
     kernel_size=kernel_size,
     deep_supervision=deep_supervision,

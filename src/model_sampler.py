@@ -5,9 +5,20 @@ import numpy as np
 from typing import Optional
 
 from model_cache import DeepCache, CacheConfig
+from warm_start import WarmStartSampler, WarmStartUnetSampler, WarmStartCachingSampler
 
 
-def build_sampler(model_config, sampling_config, model):
+def build_sampler(model_config, sampling_config, model, warm_start_model=None):
+  # Handle warm_start_unet sampler (for Phase 1 validation during training)
+  if sampling_config['sampler'] == 'warm_start_unet':
+    return WarmStartUnetSampler(model)
+
+  # Handle warm_start_cache sampler (for Phase 1 caching after training)
+  if sampling_config['sampler'] == 'warm_start_cache':
+    model_name = model_config['name']
+    cache_dir = f"cache/{model_name}/"
+    return WarmStartCachingSampler(model, cache_dir)
+
   if sampling_config['sampler'] == 'unet':
     cache_config = None
   elif 'cache' in sampling_config:
@@ -32,7 +43,7 @@ def build_sampler(model_config, sampling_config, model):
   parameterization = model_config.get('diffusion', {}).get('parameterization', 'epsilon')
 
   if sampling_config['sampler'] == 'ddpm':
-    return GaussianDiffusionSampler(
+    base_sampler = GaussianDiffusionSampler(
       model,
       model_config['diffusion']['beta_1'],
       model_config['diffusion']['beta_T'],
@@ -43,7 +54,7 @@ def build_sampler(model_config, sampling_config, model):
       parameterization=parameterization,
     )
   elif sampling_config['sampler'] == 'ddim':
-    return DDIMSampler(
+    base_sampler = DDIMSampler(
       model,
       model_config['diffusion']['beta_1'],
       model_config['diffusion']['beta_T'],
@@ -55,7 +66,7 @@ def build_sampler(model_config, sampling_config, model):
       parameterization=parameterization,
     )
   elif sampling_config['sampler'] == 'deis':
-    return DEISSampler(
+    base_sampler = DEISSampler(
       model,
       model_config['diffusion']['beta_1'],
       model_config['diffusion']['beta_T'],
@@ -67,9 +78,17 @@ def build_sampler(model_config, sampling_config, model):
       parameterization=parameterization,
     )
   elif sampling_config['sampler'] == 'unet':
-    return UnetSampler(model)
+    base_sampler = UnetSampler(model)
   else:
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
+
+  # Wrap with WarmStartSampler if warm_start is enabled
+  # warm_start_model is optional - can use cached (mu, sigma) instead
+  if 'warm_start' in model_config:
+    warmth = model_config['warm_start'].get('warmth', 1.0)
+    return WarmStartSampler(base_sampler, warm_start_model, warmth=warmth)
+
+  return base_sampler
 
 
 def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train):

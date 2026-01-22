@@ -1,0 +1,13 @@
+sampler: warm_start_unet
+
+# Simple sampler for Phase 1 validation during training
+# Returns μ prediction for metrics computation (no caching)
+
+data_cache_size: inf
+num_workers: 4
+prefetch_factor: 4
+prefetch_on_gpu: false
+
+seed: 1
+batch_size_per_gpu: 32
+precision: null

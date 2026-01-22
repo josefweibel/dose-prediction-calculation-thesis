@@ -161,13 +161,14 @@ class HDUNet(nn.Module):
     return self.final(d0)
 
 
-def build_hdunet(model_config, structure_selector):
+def build_hdunet(model_config, structure_selector, out_channels=1):
   """
   Build HD U-net model from configuration.
 
   Args:
     model_config: Model configuration dictionary
     structure_selector: Structure selector for determining input channels
+    out_channels: Number of output channels (default: 1 for dose prediction)
 
   Returns:
     HDUNet model instance
@@ -178,7 +179,7 @@ def build_hdunet(model_config, structure_selector):
 
   model = HDUNet(
     in_channels=n_input_channels,
-    out_channels=1,
+    out_channels=out_channels,
     growth_rate=hdunet_config.get('growth_rate', 16),
     n_dense=hdunet_config.get('num_dense_layers', 2),
     n_bottleneck=hdunet_config.get('num_bottleneck_layers', 4),

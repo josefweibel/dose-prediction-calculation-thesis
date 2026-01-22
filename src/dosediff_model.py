@@ -561,7 +561,7 @@ class MMFNet(nn.Module):
     return h
 
 
-def build_dosediff(config, structure_selector):
+def build_dosediff(config, structure_selector, out_channels=1):
   """
   Build DoseDiff model from configuration.
 
@@ -584,10 +584,14 @@ def build_dosediff(config, structure_selector):
   Args:
       config: DoseDiff configuration dict
       structure_selector: StructureSelector instance
+      out_channels: Number of output channels (default: 1, only 1 supported for diffusion)
 
   Returns:
       MMFNet model
   """
+  if out_channels != 1:
+    raise ValueError("DoseDiff (MMFNet) only supports out_channels=1 for noise prediction")
+
   model = MMFNet(
     structure_selector=structure_selector,
     base_channels=config.get('base_channels', 128),

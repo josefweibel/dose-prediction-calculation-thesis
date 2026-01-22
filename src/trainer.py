@@ -1,5 +1,6 @@
 import contextlib
 import math
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,6 +20,7 @@ from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
 from c3d_model import C3DLoss
 from models import build_model
+from warm_start import WarmStartCachedDataset, WarmStartDiffusionTrainerModule, build_warm_start_model, WarmStartModelTrainerModule
 
 
 class DiffusionModelTrainerModule(nn.Module):
@@ -226,31 +228,85 @@ class Trainer:
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-    self.net_model = build_model(self.config, train_dataset.selector).to(self.device)
-
-    if 'diffusion' in self.config:
-      parameterization = self.config['diffusion'].get('parameterization', 'epsilon')
-
-      if parameterization == 'v':
-        self.model = VPredictionTrainerModule(
-          denoising_model=self.net_model,
-          beta_1=self.config['diffusion']['beta_1'],
-          beta_T=self.config['diffusion']['beta_T'],
-          T=self.config['diffusion']['T'],
-          loss_weighting=self.config['diffusion'].get('loss_weighting', 'snr_plus_one')
-        ).to(self.device)
-      else:
-        self.model = DiffusionModelTrainerModule(
-          denoising_model=self.net_model,
-          beta_1=self.config['diffusion']['beta_1'],
-          beta_T=self.config['diffusion']['beta_T'],
-          T=self.config['diffusion']['T']
-        ).to(self.device)
-    elif 'c3d' in self.config:
-      alpha = self.config['c3d'].get('alpha', 0.5)
-      self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
+    # Phase 1: Warm-start model training
+    if 'warm_start_model' in self.config:
+      self.net_model = build_warm_start_model(self.config, train_dataset.selector).to(self.device)
+      self.model = WarmStartModelTrainerModule(self.net_model).to(self.device)
+    # Phase 2: Diffusion with warm-start, or regular diffusion/U-Net training
     else:
-      self.model = UnetTrainerModule(self.net_model).to(self.device)
+      self.net_model = build_model(self.config, train_dataset.selector).to(self.device)
+
+      if 'diffusion' in self.config:
+        parameterization = self.config['diffusion'].get('parameterization', 'epsilon')
+
+        if parameterization == 'v':
+          self.model = VPredictionTrainerModule(
+            denoising_model=self.net_model,
+            beta_1=self.config['diffusion']['beta_1'],
+            beta_T=self.config['diffusion']['beta_T'],
+            T=self.config['diffusion']['T'],
+            loss_weighting=self.config['diffusion'].get('loss_weighting', 'snr_plus_one')
+          ).to(self.device)
+        else:
+          self.model = DiffusionModelTrainerModule(
+            denoising_model=self.net_model,
+            beta_1=self.config['diffusion']['beta_1'],
+            beta_T=self.config['diffusion']['beta_T'],
+            T=self.config['diffusion']['T']
+          ).to(self.device)
+      elif 'c3d' in self.config:
+        alpha = self.config['c3d'].get('alpha', 0.5)
+        self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
+      else:
+        self.model = UnetTrainerModule(self.net_model).to(self.device)
+
+    # Phase 2: Wrap dataset and trainer for warm-start diffusion
+    if 'warm_start' in self.config and 'diffusion' in self.config:
+      ws_cfg = self.config['warm_start']
+      ws_model_name = ws_cfg['model']
+
+      # Auto-resolve cache directory from model name
+      cache_dir = Path(f"cache/{ws_model_name}/")
+
+      # Wrap training dataset to include cached (μ, σ)
+      train_dataset = WarmStartCachedDataset(train_dataset, cache_dir)
+      val_dataset = WarmStartCachedDataset(val_dataset, cache_dir)
+
+      # Recreate dataloaders with wrapped datasets
+      self.train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=self.config['batch_size'] // self.world_size,
+        shuffle=self.train_sampler is None,
+        sampler=self.train_sampler,
+        num_workers=self.config['num_workers'],
+        pin_memory=True,
+        prefetch_factor=self.config['prefetch_factor'],
+        persistent_workers=self.config['num_workers'] > 0,
+      )
+      self.val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=self.config['batch_size'],
+        shuffle=False,
+        sampler=self.val_sampler,
+        num_workers=self.config['num_workers'],
+        pin_memory=True,
+        prefetch_factor=self.config['prefetch_factor'],
+        persistent_workers=self.config['num_workers'] > 0,
+      )
+
+      if self.config['prefetch_on_gpu'] and self.device.type == 'cuda':
+        self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
+        self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
+
+      # Wrap trainer module
+      self.model = WarmStartDiffusionTrainerModule(
+        base_trainer_module=self.model,
+        warmth_range=tuple(ws_cfg.get('warmth_range', [0.0, 1.0]))
+      ).to(self.device)
+
+      self.warm_start_enabled = True
+    else:
+      self.warm_start_enabled = False
 
     self.ema_model = copy.deepcopy(self.net_model).to(self.device)
 
@@ -320,14 +376,27 @@ class Trainer:
       self.model.train()
 
       pbar_batches = tqdm(self.train_dataloader, desc=f'Training epoch {self.epoch}', leave=False, disable=not self.is_main_process)
-      for batch_idx, (structure, target, _) in enumerate(pbar_batches):
+      for batch_idx, batch in enumerate(pbar_batches):
         self.optim.zero_grad()
+
+        # Handle both regular (3 elements) and warm-start Phase 2 (5 elements) batches
+        if self.warm_start_enabled:
+          structure, target, mu, sigma, _ = batch
+          mu = mu.to(self.device, non_blocking=True)
+          sigma = sigma.to(self.device, non_blocking=True)
+        else:
+          structure, target, _ = batch
+          mu, sigma = None, None
+
         structure = structure.to(self.device, non_blocking=True)
         target = target.to(self.device, non_blocking=True)
-        condition = structure # Training dataset already loads only conditioning groups, so structure IS the condition
+        condition = structure  # Training dataset already loads only conditioning groups, so structure IS the condition
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_mixed_precision else contextlib.nullcontext():
-          loss = self.model(target, condition)
+          if self.warm_start_enabled:
+            loss = self.model(target, condition, mu, sigma)
+          else:
+            loss = self.model(target, condition)
 
         current_lr = self.optim.param_groups[0]['lr']
 

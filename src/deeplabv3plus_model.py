@@ -403,13 +403,14 @@ class DeepLabv3PlusLoss(nn.Module):
       return mse_loss, {'mse': mse_loss.item()}
 
 
-def build_deeplabv3plus(config, structure_selector):
+def build_deeplabv3plus(config, structure_selector, out_channels=1):
   """
   Factory function to build DeepLabv3+ model
 
   Args:
     config: Model configuration dict with 'deeplabv3plus' key
     structure_selector: Structure selector defining input channels
+    out_channels: Number of output channels (default: 1 for dose prediction)
 
   Returns:
     DeepLabv3Plus model instance
@@ -421,7 +422,7 @@ def build_deeplabv3plus(config, structure_selector):
 
   model = DeepLabv3Plus(
     in_channels=n_input_channels,
-    num_classes=1,
+    num_classes=out_channels,
     pretrained_encoder=pretrained
   )
 

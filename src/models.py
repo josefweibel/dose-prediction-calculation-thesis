@@ -9,39 +9,50 @@ from spdiffdose_model import build_spdiffdose
 from hdunet_model import build_hdunet
 
 
-def build_model(model_config, structure_selector):
+def build_model(model_config, structure_selector, out_channels=1):
+  """
+  Build a model from configuration.
 
+  Args:
+    model_config: Model configuration dict
+    structure_selector: StructureSelector instance
+    out_channels: Number of output channels (default: 1 for dose prediction,
+                  use 2 for warm-start model predicting μ and log_σ)
+
+  Returns:
+    Model instance
+  """
   n_input_channels = structure_selector.total_channels
 
   if 'c3d' in model_config:
     if model_config['c3d'].get('use_2d', True):
       model = C3D_2D(
         in_channels=n_input_channels,
-        out_channels=1
+        out_channels=out_channels
       )
     else:
       model = C3D(
         in_channels=n_input_channels,
-        out_channels=1
+        out_channels=out_channels
       )
   elif 'beamdiff' in model_config:
     beamdiff_config = model_config['beamdiff']
-    model = build_beamdiff(beamdiff_config, structure_selector)
+    model = build_beamdiff(beamdiff_config, structure_selector, out_channels=out_channels)
   elif 'dosediff' in model_config:
     dosediff_config = model_config['dosediff']
-    model = build_dosediff(dosediff_config, structure_selector)
+    model = build_dosediff(dosediff_config, structure_selector, out_channels=out_channels)
   elif 'diffdp' in model_config:
     diffdp_config = model_config['diffdp']
-    model = build_diffdp(diffdp_config, structure_selector)
+    model = build_diffdp(diffdp_config, structure_selector, out_channels=out_channels)
   elif 'spdiffdose' in model_config:
     spdiffdose_config = model_config['spdiffdose']
-    model = build_spdiffdose(spdiffdose_config, structure_selector)
+    model = build_spdiffdose(spdiffdose_config, structure_selector, out_channels=out_channels)
   elif 'deeplabv3plus' in model_config:
-    model = build_deeplabv3plus(model_config, structure_selector)
+    model = build_deeplabv3plus(model_config, structure_selector, out_channels=out_channels)
   elif 'hdunet' in model_config:
-    model = build_hdunet(model_config, structure_selector)
+    model = build_hdunet(model_config, structure_selector, out_channels=out_channels)
   elif 'mednext' in model_config:
-    model = build_mednext_model(model_config, structure_selector)
+    model = build_mednext_model(model_config, structure_selector, out_channels=out_channels)
   else:
     model = MambaUnet(
       img_size=model_config['data']['img_size'],
