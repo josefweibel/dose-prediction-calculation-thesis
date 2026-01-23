@@ -12,6 +12,7 @@ from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
 from models import build_model
 from slice_combinator import SliceCombinator
+from warm_start import build_warm_start_model
 
 
 class Sampler:
@@ -66,7 +67,10 @@ class Sampler:
     if self.sampling_config['prefetch_on_gpu'] and self.device.type == 'cuda':
       self.dataloader = PrefetchLoader(self.dataloader, self.device)
 
-    self.ema_model = build_model(self.model_config, self.conditioning_selector).to(self.device)
+    if 'warm_start_model' in self.model_config:
+      self.ema_model = build_warm_start_model(self.model_config, self.conditioning_selector).to(self.device)
+    else:
+      self.ema_model = build_model(self.model_config, self.conditioning_selector).to(self.device)
 
     if epoch is None or epoch == 'latest':
       checkpoint = load_last_checkpoint(model_name)
