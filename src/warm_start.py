@@ -22,6 +22,7 @@ from torch.utils.data import Dataset
 from pathlib import Path
 
 from models import build_model
+from config import read_model_config
 
 
 class WarmStartModel(nn.Module):
@@ -202,11 +203,15 @@ class WarmStartCachedDataset(Dataset):
     - {volume}_sigma.npy for sigma (shape: [C, H, W, num_slices])
   """
 
-  def __init__(self, base_dataset, cache_dir, cache_volumes=True):
+  def __init__(self, base_dataset, ws_model_name, split, cache_volumes=True):
     self.base_dataset = base_dataset
-    self.cache_dir = Path(cache_dir)
     self.cache_volumes = cache_volumes
     self._volume_cache = {} if cache_volumes else None
+
+    # Resolve cache directory from warm-start model config
+    ws_model_config = read_model_config(ws_model_name)
+    ws_epoch = ws_model_config['epochs'] - 1
+    self.cache_dir = Path('samples') / ws_model_name / 'warm_start_unet' / f'{split}_{ws_epoch}'
 
     # Verify cache directory exists
     if not self.cache_dir.exists():

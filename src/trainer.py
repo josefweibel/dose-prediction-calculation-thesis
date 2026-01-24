@@ -1,6 +1,5 @@
 import contextlib
 import math
-from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -266,12 +265,9 @@ class Trainer:
       ws_model_name = ws_cfg['model']
       cache_volumes = ws_cfg.get('cache_volumes', True)
 
-      # Auto-resolve cache directory from model name
-      cache_dir = Path(f"cache/{ws_model_name}/")
-
       # Wrap training dataset to include cached (μ, σ)
-      train_dataset = WarmStartCachedDataset(train_dataset, cache_dir, cache_volumes=cache_volumes)
-      val_dataset = WarmStartCachedDataset(val_dataset, cache_dir, cache_volumes=cache_volumes)
+      train_dataset = WarmStartCachedDataset(train_dataset, ws_model_name, 'train', cache_volumes=cache_volumes)
+      val_dataset = WarmStartCachedDataset(val_dataset, ws_model_name, 'valid', cache_volumes=cache_volumes)
 
       # Recreate dataloaders with wrapped datasets
       self.train_dataloader = DataLoader(
