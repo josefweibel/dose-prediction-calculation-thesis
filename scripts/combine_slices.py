@@ -18,7 +18,7 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Combine individual slice files into volume files')
   parser.add_argument('--model', type=str, required=True, help='Name of the model configuration file (without .yaml extension)')
   parser.add_argument('--sampling', type=str, required=True, help='Name of the sampling configuration file (without .yaml extension)')
-  parser.add_argument('--data-split', type=str, choices=['train', 'val', 'test'], default='test', help='Data split to use for sampling.')
+  parser.add_argument('--data-split', type=str, choices=['train', 'valid', 'test'], default='test', help='Data split to use for sampling.')
   parser.add_argument('--epoch', type=parse_epoch, default=None, help='Epoch number to use or "latest".')
   parser.add_argument('--delete-slices', action='store_true', help='Delete individual slice files after combining into volumes.')
   args = parser.parse_args()

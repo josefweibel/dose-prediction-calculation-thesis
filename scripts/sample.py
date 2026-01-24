@@ -25,7 +25,7 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--model', type=str, required=True, help='Name of the model configuration file (without .yaml extension)')
   parser.add_argument('--config', type=str, required=True, help='Name of the sampling configuration file (without .yaml extension)')
-  parser.add_argument('--data-split', type=str, choices=['train', 'val', 'test'], default='test', help='Data split to use for sampling.')
+  parser.add_argument('--data-split', type=str, choices=['train', 'valid', 'test'], default='test', help='Data split to use for sampling.')
   parser.add_argument('--epoch', type=parse_epoch, default=None, help='Use checkpoint from this epoch. Use "latest" for the most recent checkpoint.')
   parser.add_argument('--distill', type=str, default=None, help='Distillation config name (if sampling distilled model)')
   parser.add_argument('--round', type=str, default=None, help='Distillation round (e.g., "8-to-4")')

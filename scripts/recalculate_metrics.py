@@ -16,7 +16,7 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--model', type=str, required=True, help='Name of the model configuration file (without .yaml extension)')
   parser.add_argument('--sampling', type=str, required=True, help='Name of the sampling configuration file (without .yaml extension)')
-  parser.add_argument('--data-split', type=str, choices=['train', 'val', 'test'], default='test', help='Data split to use for sampling.')
+  parser.add_argument('--data-split', type=str, choices=['train', 'valid', 'test'], default='test', help='Data split to use for sampling.')
   parser.add_argument('--epoch', type=int, default=None, help='Use checkpoint from this epoch.')
   parser.add_argument('--distributed', action='store_true', help='Set to True to use distributed computation across multiple GPUs.')
   args = parser.parse_args()
