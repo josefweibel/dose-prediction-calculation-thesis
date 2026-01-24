@@ -14,6 +14,7 @@ Two-phase training:
 - Phase 2: Train diffusion on normalized data using cached (μ, σ) predictions
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -163,9 +164,10 @@ class WarmStartDiffusionTrainerModule(nn.Module):
 
 class WarmStartUnetSampler(nn.Module):
   """
-  Simple sampler for Phase 1 validation that returns μ without caching.
+  Sampler for warm-start model that returns (μ, σ) predictions.
 
-  Used during Phase 1 training to compute metrics comparing μ to ground truth.
+  Used for Phase 1 validation and caching. Returns dict with 'pred' (μ)
+  and 'sigma' for evaluator to save.
   """
 
   def __init__(self, model):
@@ -174,81 +176,74 @@ class WarmStartUnetSampler(nn.Module):
 
   def forward(self, x_T_ignored, condition):
     """
-    Return μ prediction for metrics computation.
+    Compute (μ, σ) and return as dict.
 
     Args:
       x_T_ignored: Ignored (for API compatibility)
       condition: Conditioning tensor [B, C, H, W]
 
     Returns:
-      μ prediction [B, 1, H, W]
-    """
-    mu, _ = self.model(condition)
-    return mu
-
-
-class WarmStartCachingSampler(nn.Module):
-  """
-  'Sampler' that caches warm-start predictions to disk.
-
-  Used after Phase 1 training to precompute (μ, σ) for Phase 2.
-  Returns μ as the 'prediction' for metrics compatibility.
-  """
-
-  def __init__(self, model, cache_dir):
-    super().__init__()
-    self.model = model
-    self.cache_dir = Path(cache_dir)
-    self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-  def forward(self, x_T_ignored, condition, info=None):
-    """
-    Compute and cache (μ, σ) instead of sampling.
-
-    Args:
-      x_T_ignored: Ignored (for API compatibility)
-      condition: Conditioning tensor [B, C, H, W]
-      info: Batch info dict with 'volume' and 'index' keys
-
-    Returns:
-      μ prediction [B, 1, H, W] for metrics compatibility
+      dict with 'pred' (μ) and 'sigma' tensors [B, 1, H, W]
     """
     mu, sigma = self.model(condition)
 
-    # Save to disk using sample ID from info
-    if info is not None:
-      volumes = info.get('volume', [])
-      indices = info.get('index', [])
-
-      for i in range(mu.shape[0]):
-        if i < len(volumes) and i < len(indices):
-          volume = volumes[i]
-          slice_idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
-          sample_id = f"{volume}_{slice_idx}"
-
-          torch.save({
-            'mu': mu[i].cpu(),
-            'sigma': sigma[i].cpu()
-          }, self.cache_dir / f'{sample_id}.pt')
-
-    return mu
+    return {
+      'pred': mu,
+      'sigma': sigma
+    }
 
 
 class WarmStartCachedDataset(Dataset):
   """
   Wraps base dataset to include cached (μ, σ) predictions for Phase 2 training.
+
+  Expects combined volume files from SliceCombinator:
+    - {volume}.npy for pred/mu (shape: [C, H, W, num_slices])
+    - {volume}_sigma.npy for sigma (shape: [C, H, W, num_slices])
   """
 
-  def __init__(self, base_dataset, cache_dir):
+  def __init__(self, base_dataset, cache_dir, cache_volumes=True):
     self.base_dataset = base_dataset
     self.cache_dir = Path(cache_dir)
+    self.cache_volumes = cache_volumes
+    self._volume_cache = {} if cache_volumes else None
 
     # Verify cache directory exists
     if not self.cache_dir.exists():
       raise FileNotFoundError(
         f"Warm-start cache not found at {self.cache_dir}. "
-        f"Run Phase 1 training first with warm_start_cache sampler."
+        f"Run Phase 1 caching and SliceCombinator first."
       )
+
+  def _load_volume(self, volume_name):
+    """Load volume data, with optional caching."""
+    if self.cache_volumes and volume_name in self._volume_cache:
+      return self._volume_cache[volume_name]
+
+    mu_path = self.cache_dir / f'{volume_name}.npy'
+    sigma_path = self.cache_dir / f'{volume_name}_sigma.npy'
+
+    if not mu_path.exists():
+      raise FileNotFoundError(
+        f"Cached mu volume not found: {mu_path}. "
+        f"Ensure Phase 1 caching and SliceCombinator were run."
+      )
+    if not sigma_path.exists():
+      raise FileNotFoundError(
+        f"Cached sigma volume not found: {sigma_path}. "
+        f"Ensure Phase 1 caching and SliceCombinator were run."
+      )
+
+    if self.cache_volumes:
+      mu_vol = np.load(mu_path)
+      sigma_vol = np.load(sigma_path)
+      self._volume_cache[volume_name] = (mu_vol, sigma_vol)
+    else:
+      # Use memmap to avoid loading entire volume
+      mu_vol = np.load(mu_path, mmap_mode='r')
+      sigma_vol = np.load(sigma_path, mmap_mode='r')
+
+    return mu_vol, sigma_vol
 
   def __len__(self):
     return len(self.base_dataset)
@@ -266,21 +261,15 @@ class WarmStartCachedDataset(Dataset):
     """
     condition, dose, info = self.base_dataset[idx]
 
-    # Build sample ID matching the caching format
-    volume = info['volume']
+    volume_name = info['volume']
     slice_idx = info['index']
-    sample_id = f"{volume}_{slice_idx}"
 
-    cache_path = self.cache_dir / f'{sample_id}.pt'
-    if not cache_path.exists():
-      raise FileNotFoundError(
-        f"Cached warm-start prediction not found: {cache_path}. "
-        f"Ensure Phase 1 caching was run for all samples."
-      )
+    mu_vol, sigma_vol = self._load_volume(volume_name)
 
-    cached = torch.load(cache_path, weights_only=True)
+    mu = torch.from_numpy(mu_vol[..., slice_idx].copy())
+    sigma = torch.from_numpy(sigma_vol[..., slice_idx].copy())
 
-    return condition, dose, cached['mu'], cached['sigma'], info
+    return condition, dose, mu, sigma, info
 
   @property
   def selector(self):

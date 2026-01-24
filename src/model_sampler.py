@@ -5,19 +5,13 @@ import numpy as np
 from typing import Optional
 
 from model_cache import DeepCache, CacheConfig
-from warm_start import WarmStartSampler, WarmStartUnetSampler, WarmStartCachingSampler
+from warm_start import WarmStartSampler, WarmStartUnetSampler
 
 
 def build_sampler(model_config, sampling_config, model, warm_start_model=None):
   # Handle warm_start_unet sampler (for Phase 1 validation during training)
   if sampling_config['sampler'] == 'warm_start_unet':
     return WarmStartUnetSampler(model)
-
-  # Handle warm_start_cache sampler (for Phase 1 caching after training)
-  if sampling_config['sampler'] == 'warm_start_cache':
-    model_name = model_config['name']
-    cache_dir = f"cache/{model_name}/"
-    return WarmStartCachingSampler(model, cache_dir)
 
   if sampling_config['sampler'] == 'unet':
     cache_config = None

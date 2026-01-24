@@ -56,8 +56,14 @@ class SliceCombinator:
       print()
 
   def combine(self):
-    """Combine individual slice .npy files into volume .npy files."""
-    # Find all slice files (format: {sample_name}-{slice_index}.npy)
+    """Combine individual slice .npy files into volume .npy files.
+
+    Handles grouped outputs (e.g., pred and sigma) by combining slices per group.
+    File formats:
+      - {sample_name}-{slice_index}.npy -> {sample_name}.npy (pred/default)
+      - {sample_name}-{slice_index}_{group}.npy -> {sample_name}_{group}.npy
+    """
+    # Find all slice files (format: {sample_name}-{slice_index}.npy or {sample_name}-{slice_index}_{group}.npy)
     slice_files = list(self.samples_path.glob('*-*.npy'))
 
     if len(slice_files) == 0:
@@ -68,17 +74,25 @@ class SliceCombinator:
     if self.is_main_process:
       print(f'Found {len(slice_files)} slice files')
 
-    # Group slice files by sample name
-    samples_dict = {}
+    # Group slice files by (sample_name, group)
+    samples_dict = {}  # {(sample_name, group): [(slice_index, slice_file), ...]}
     for slice_file in slice_files:
-      # Parse filename: {sample_name}-{slice_index}.npy
+      # Parse filename: {sample_name}-{slice_index}.npy or {sample_name}-{slice_index}_{group}.npy
       parts = slice_file.stem.rsplit('-', 1)
       if len(parts) != 2:
         if self.is_main_process:
           print(f'Warning: Skipping file with unexpected format: {slice_file.name}')
         continue
 
-      sample_name, slice_index_str = parts
+      sample_name, slice_part = parts
+
+      # Check if slice_part contains a group suffix (e.g., "42_sigma")
+      if '_' in slice_part:
+        slice_index_str, group = slice_part.split('_', 1)
+      else:
+        slice_index_str = slice_part
+        group = 'pred'  # Default group
+
       try:
         slice_index = int(slice_index_str)
       except ValueError:
@@ -86,18 +100,22 @@ class SliceCombinator:
           print(f'Warning: Skipping file with non-integer slice index: {slice_file.name}')
         continue
 
-      if sample_name not in samples_dict:
-        samples_dict[sample_name] = []
+      key = (sample_name, group)
+      if key not in samples_dict:
+        samples_dict[key] = []
 
-      samples_dict[sample_name].append((slice_index, slice_file))
+      samples_dict[key].append((slice_index, slice_file))
 
+    # Count unique samples and groups
+    unique_samples = set(k[0] for k in samples_dict.keys())
+    unique_groups = set(k[1] for k in samples_dict.keys())
     if self.is_main_process:
-      print(f'Found {len(samples_dict)} unique samples')
+      print(f'Found {len(unique_samples)} unique samples with groups: {sorted(unique_groups)}')
       print()
 
-    # Process each sample
+    # Process each (sample, group) combination
     pbar = tqdm(samples_dict.items(), desc='Combining samples', disable=not self.is_main_process)
-    for sample_name, slices in pbar:
+    for (sample_name, group), slices in pbar:
       # Sort by slice index
       slices.sort(key=lambda x: x[0])
 
@@ -121,12 +139,15 @@ class SliceCombinator:
         volume[..., slice_index] = slice_data
 
       # Save the combined volume
-      output_path = self.samples_path / f'{sample_name}.npy'
+      if group == 'pred':
+        output_path = self.samples_path / f'{sample_name}.npy'
+      else:
+        output_path = self.samples_path / f'{sample_name}_{group}.npy'
       np.save(output_path, volume)
 
     if self.is_main_process:
       print()
-      print(f'Successfully combined {len(samples_dict)} samples into volumes')
+      print(f'Successfully combined {len(samples_dict)} sample-group combinations into volumes')
       print(f'Output location: {self.samples_path}')
 
     # Delete old slice files if requested

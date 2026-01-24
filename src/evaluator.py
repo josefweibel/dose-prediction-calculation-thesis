@@ -506,12 +506,18 @@ class Evaluator:
             pred = sampler(x_T, condition)
           duration = time() - start
 
-        pred = torch.clamp(pred, 0., 1.)
-        pred = self.dataloader.dataset.denormalize_target(pred)
+        # Handle dict returns (e.g., from WarmStartCachingSampler)
+        if isinstance(pred, dict):
+          pred_tensor = pred['pred']
+        else:
+          pred_tensor = pred
+
+        pred_tensor = torch.clamp(pred_tensor, 0., 1.)
+        pred_tensor = self.dataloader.dataset.denormalize_target(pred_tensor)
 
         # Calculate metrics for each sample in the batch
         for i, (file_name, slice_index) in enumerate(zip(info['file_name'], info['index'])):
-          sample_pred = pred[i:i+1]  # Keep batch dimension
+          sample_pred = pred_tensor[i:i+1]  # Keep batch dimension
           sample_target = target[i:i+1]
           sample_body = body[i:i+1]
 
@@ -537,8 +543,19 @@ class Evaluator:
 
           if dir is not None:
             p = Path(file_name)
-            out_path = Path(dir) / f"{p.stem}-{slice_index.item()}.npy"
-            np.save(out_path, sample_pred[0].cpu().numpy())
+            base_name = f"{p.stem}-{slice_index.item()}"
+            if isinstance(pred, dict):
+              # Save each dict entry to a separate file
+              for key, value in pred.items():
+                sample_value = value[i:i+1] * sample_body
+                if key == 'pred':
+                  # Default prediction file (no suffix)
+                  np.save(Path(dir) / f"{base_name}.npy", sample_value[0].cpu().numpy())
+                else:
+                  # Other entries get their key as suffix
+                  np.save(Path(dir) / f"{base_name}_{key}.npy", sample_value[0].cpu().numpy())
+            else:
+              np.save(Path(dir) / f"{base_name}.npy", sample_pred[0].cpu().numpy())
 
     dist.barrier()
 
