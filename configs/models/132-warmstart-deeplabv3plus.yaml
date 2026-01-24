@@ -5,8 +5,6 @@
 #
 # After training, run evaluation to cache (μ, σ) predictions for Phase 2.
 
-name: wsd-warmstart-deeplabv3plus
-
 data:
   dataset_name: gdphmm-hn-vmat
   img_size: [176, 160]
@@ -32,7 +30,7 @@ conditioning:
     - ptv_sdm
     - oar_v3_sdm
 
-mixed_precision: true 
+mixed_precision: true
 num_workers: 4
 prefetch_factor: 12
 prefetch_on_gpu: true
