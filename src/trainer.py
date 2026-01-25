@@ -263,11 +263,12 @@ class Trainer:
     if 'warm_start' in self.config and 'diffusion' in self.config:
       ws_cfg = self.config['warm_start']
       ws_model_name = ws_cfg['model']
-      cache_volumes = ws_cfg.get('cache_volumes', True)
+      cache_train_volumes = ws_cfg.get('cache_train_volumes', True)
+      cache_valid_volumes = ws_cfg.get('cache_valid_volumes', True)
 
       # Wrap training dataset to include cached (μ, σ)
-      train_dataset = WarmStartCachedDataset(train_dataset, ws_model_name, 'train', cache_volumes=cache_volumes)
-      val_dataset = WarmStartCachedDataset(val_dataset, ws_model_name, 'valid', cache_volumes=cache_volumes)
+      train_dataset = WarmStartCachedDataset(train_dataset, ws_model_name, 'train', cache_volumes=cache_train_volumes)
+      val_dataset = WarmStartCachedDataset(val_dataset, ws_model_name, 'valid', cache_volumes=cache_valid_volumes)
 
       # Recreate dataloaders with wrapped datasets
       self.train_dataloader = DataLoader(

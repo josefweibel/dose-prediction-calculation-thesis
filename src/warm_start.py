@@ -211,7 +211,7 @@ class WarmStartCachedDataset(Dataset):
     # Resolve cache directory from warm-start model config
     ws_model_config = read_model_config(ws_model_name)
     ws_epoch = ws_model_config['epochs'] - 1
-    self.cache_dir = Path('samples') / ws_model_name / 'warm_start_unet' / f'{split}_{ws_epoch}'
+    self.cache_dir = Path('samples') / ws_model_name / 'warm-start-unet' / f'{split}_{ws_epoch}'
 
     # Verify cache directory exists
     if not self.cache_dir.exists():
