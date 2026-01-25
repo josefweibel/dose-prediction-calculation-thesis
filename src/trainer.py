@@ -298,6 +298,7 @@ class Trainer:
         print('Warm-start cache preloaded')
 
       # Recreate dataloaders with wrapped datasets
+      # Use fork for DataLoader workers to share preloaded cache via copy-on-write
       self.train_dataloader = DataLoader(
         train_dataset,
         batch_size=self.config['batch_size'] // self.world_size,
@@ -307,6 +308,7 @@ class Trainer:
         pin_memory=True,
         prefetch_factor=self.config['prefetch_factor'],
         persistent_workers=self.config['num_workers'] > 0,
+        multiprocessing_context='fork' if self.config['num_workers'] > 0 else None,
       )
       self.val_dataloader = DataLoader(
         val_dataset,
@@ -317,6 +319,7 @@ class Trainer:
         pin_memory=True,
         prefetch_factor=val_prefetch_factor if val_num_workers > 0 else None,
         persistent_workers=val_num_workers > 0,
+        multiprocessing_context='fork' if val_num_workers > 0 else None,
       )
 
       if self.config.get('prefetch_on_gpu', False) and self.device.type == 'cuda':
