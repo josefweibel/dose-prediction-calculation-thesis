@@ -250,6 +250,23 @@ class WarmStartCachedDataset(Dataset):
 
     return mu_vol, sigma_vol
 
+  def preload_cache(self):
+    """
+    Pre-populate the volume cache in the main process.
+
+    Call this BEFORE creating DataLoader workers so that forked workers
+    inherit the populated cache via copy-on-write, avoiding duplicate loading.
+    """
+    if not self.cache_volumes:
+      return
+
+    # Get unique volume names from base dataset's index
+    volume_names = self.base_dataset.index['volume'].unique()
+
+    # Pre-load all volumes
+    for volume_name in volume_names:
+      self._load_volume(volume_name)
+
   def __len__(self):
     return len(self.base_dataset)
 

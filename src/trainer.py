@@ -236,7 +236,7 @@ class Trainer:
       sampler=self.val_sampler,
       num_workers=val_num_workers,
       pin_memory=True,
-      prefetch_factor=val_prefetch_factor,
+      prefetch_factor=val_prefetch_factor if val_num_workers > 0 else None,
       persistent_workers=val_num_workers > 0,
     )
 
@@ -288,6 +288,15 @@ class Trainer:
       train_dataset = WarmStartCachedDataset(train_dataset, ws_model_name, 'train', cache_volumes=cache_train_volumes)
       val_dataset = WarmStartCachedDataset(val_dataset, ws_model_name, 'valid', cache_volumes=cache_valid_volumes)
 
+      # Pre-populate caches before creating DataLoader workers
+      # This ensures forked workers inherit the cache via copy-on-write
+      if self.is_main_process:
+        print('Preloading warm-start cache...')
+      train_dataset.preload_cache()
+      val_dataset.preload_cache()
+      if self.is_main_process:
+        print('Warm-start cache preloaded')
+
       # Recreate dataloaders with wrapped datasets
       self.train_dataloader = DataLoader(
         train_dataset,
@@ -306,7 +315,7 @@ class Trainer:
         sampler=self.val_sampler,
         num_workers=val_num_workers,
         pin_memory=True,
-        prefetch_factor=val_prefetch_factor,
+        prefetch_factor=val_prefetch_factor if val_num_workers > 0 else None,
         persistent_workers=val_num_workers > 0,
       )
 
