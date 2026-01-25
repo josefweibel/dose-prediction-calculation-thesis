@@ -202,6 +202,13 @@ class Trainer:
         shuffle=False
       )
 
+    # Validation-specific dataloader settings (with fallbacks to main config)
+    val_config = self.config.get('validation', {})
+    val_batch_size = val_config.get('batch_size', self.config['batch_size'])
+    val_num_workers = val_config.get('num_workers', self.config['num_workers'])
+    val_prefetch_factor = val_config.get('prefetch_factor', self.config['prefetch_factor'])
+    val_prefetch_on_gpu = val_config.get('prefetch_on_gpu', self.config.get('prefetch_on_gpu', False))
+
     self.train_dataloader = DataLoader(
       train_dataset,
       batch_size=self.config['batch_size'] // self.world_size,
@@ -214,17 +221,18 @@ class Trainer:
     )
     self.val_dataloader = DataLoader(
       val_dataset,
-      batch_size=self.config['batch_size'],
+      batch_size=val_batch_size,
       shuffle=False,
       sampler=self.val_sampler,
-      num_workers=self.config['num_workers'],
+      num_workers=val_num_workers,
       pin_memory=True,
-      prefetch_factor=self.config['prefetch_factor'],
-      persistent_workers=self.config['num_workers'] > 0,
+      prefetch_factor=val_prefetch_factor,
+      persistent_workers=val_num_workers > 0,
     )
 
-    if self.config['prefetch_on_gpu'] and self.device.type == 'cuda':
+    if self.config.get('prefetch_on_gpu', False) and self.device.type == 'cuda':
       self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
+    if val_prefetch_on_gpu and self.device.type == 'cuda':
       self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
     # Phase 1: Warm-start model training
@@ -283,17 +291,18 @@ class Trainer:
       )
       self.val_dataloader = DataLoader(
         val_dataset,
-        batch_size=self.config['batch_size'],
+        batch_size=val_batch_size,
         shuffle=False,
         sampler=self.val_sampler,
-        num_workers=self.config['num_workers'],
+        num_workers=val_num_workers,
         pin_memory=True,
-        prefetch_factor=self.config['prefetch_factor'],
-        persistent_workers=self.config['num_workers'] > 0,
+        prefetch_factor=val_prefetch_factor,
+        persistent_workers=val_num_workers > 0,
       )
 
-      if self.config['prefetch_on_gpu'] and self.device.type == 'cuda':
+      if self.config.get('prefetch_on_gpu', False) and self.device.type == 'cuda':
         self.train_dataloader = PrefetchLoader(self.train_dataloader, self.device)
+      if val_prefetch_on_gpu and self.device.type == 'cuda':
         self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
       # Wrap trainer module
