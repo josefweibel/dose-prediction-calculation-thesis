@@ -499,7 +499,7 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     pass
 
 
-def create_gdphmm_dataset(config, split, structure_groups=None):
+def create_gdphmm_dataset(config, split, structure_groups=None, force_complete=True):
   """
   Factory function to create GDPHMM dataset based on configuration.
 
@@ -514,8 +514,8 @@ def create_gdphmm_dataset(config, split, structure_groups=None):
   """
   data_config = config['data']
   dataset_name = data_config['dataset_name']
-  limit = data_config.get(f'{split}_limit', None)
-  skip = data_config.get(f'{split}_skip', 0)
+  limit = None if force_complete else data_config.get(f'{split}_limit', None)
+  skip = None if force_complete else data_config.get(f'{split}_skip', 0)
 
   return GDPHMMPreprocessedSlicesDataset(
     dataset_name=dataset_name,

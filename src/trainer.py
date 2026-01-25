@@ -174,13 +174,23 @@ class Trainer:
 
     # Training dataset uses only conditioning groups
     conditioning_groups = self.config['conditioning']['types']
-    train_dataset = create_gdphmm_dataset(self.config, 'train', structure_groups=conditioning_groups)
+    train_dataset = create_gdphmm_dataset(
+      self.config,
+      'train',
+      structure_groups=conditioning_groups,
+      force_complete=False
+    )
 
     if self.config['data'].get('val_on_train', False):
       val_dataset = train_dataset
     else:
       # Validation dataset loads all structures for metrics computation
-      val_dataset = create_gdphmm_dataset(self.config, 'valid', structure_groups=None)
+      val_dataset = create_gdphmm_dataset(
+        self.config,
+        'valid',
+        structure_groups=None,
+        force_complete=False
+      )
 
     if self.is_main_process:
       print('Training dataset size', len(train_dataset))
@@ -375,7 +385,13 @@ class Trainer:
     )
 
   def train(self):
-    pbar_epochs = tqdm(range(self.epoch + 1, self.to_epoch), desc='Training', disable=not self.is_main_process)
+    pbar_epochs = tqdm(
+      range(self.epoch + 1, self.to_epoch),
+      desc='Training',
+      disable=not self.is_main_process,
+      initial=self.epoch + 1,
+      total=self.to_epoch
+    )
     for self.epoch in pbar_epochs:
       if self.is_distributed and self.train_sampler is not None:
         self.train_sampler.set_epoch(self.epoch)

@@ -303,8 +303,12 @@ class DistillationTrainer:
     self.student_checkpoint_path = student_checkpoint_path
 
     # Create dataset
-    conditioning_groups = model_config['conditioning']['types']
-    train_dataset = create_gdphmm_dataset(model_config, 'train', structure_groups=conditioning_groups)
+    train_dataset = create_gdphmm_dataset(
+      model_config,
+      'train',
+      structure_groups=model_config['conditioning']['types'],
+      force_complete=False
+    )
 
     if self.is_main_process:
       print(f'Training dataset size: {len(train_dataset)}')

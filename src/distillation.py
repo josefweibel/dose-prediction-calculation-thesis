@@ -278,7 +278,12 @@ class ProgressiveDistillationOrchestrator:
       print(f"\nEvaluating student model with T={student_T}...")
 
     # Create validation dataset
-    val_dataset = create_gdphmm_dataset(self.model_config, 'valid', structure_groups=None)
+    val_dataset = create_gdphmm_dataset(
+      self.model_config,
+      'valid',
+      structure_groups=None,
+      force_complete=False
+    )
 
     val_sampler = None
     if self.is_distributed:
