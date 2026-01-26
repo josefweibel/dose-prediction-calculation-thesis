@@ -515,7 +515,7 @@ def create_gdphmm_dataset(config, split, structure_groups=None, force_complete=T
   data_config = config['data']
   dataset_name = data_config['dataset_name']
   limit = None if force_complete else data_config.get(f'{split}_limit', None)
-  skip = None if force_complete else data_config.get(f'{split}_skip', 0)
+  skip = 0 if force_complete else data_config.get(f'{split}_skip', 0)
 
   return GDPHMMPreprocessedSlicesDataset(
     dataset_name=dataset_name,
