@@ -267,6 +267,11 @@ class WarmStartCachedDataset(Dataset):
     for volume_name in volume_names:
       self._load_volume(volume_name)
 
+  @property
+  def index(self):
+    """Delegate index access to base dataset for compatibility."""
+    return self.base_dataset.index
+
   def __len__(self):
     return len(self.base_dataset)
 
