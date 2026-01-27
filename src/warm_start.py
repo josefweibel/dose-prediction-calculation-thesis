@@ -371,6 +371,47 @@ class WarmStartSampler(nn.Module):
     return x_0
 
 
+class InDIWarmStartSampler(nn.Module):
+  """
+  Wrapper for InDI sampler that uses warm-start μ as degraded input.
+
+  Unlike WarmStartSampler which normalizes/unnormalizes, this wrapper
+  simply passes μ directly to the InDI sampler as the degraded input y.
+
+  Args:
+    base_sampler: InDISampler instance
+    warm_start_model: Trained WarmStartModel (optional if using cached values)
+  """
+
+  def __init__(self, base_sampler, warm_start_model=None):
+    super().__init__()
+    self.base_sampler = base_sampler
+    self.warm_start_model = warm_start_model
+
+  def forward(self, x_T_ignored, condition, mu=None, sigma=None):
+    """
+    Sample using InDI with warm-start μ as degraded input.
+
+    Args:
+      x_T_ignored: Ignored (for API compatibility with other samplers)
+      condition: Conditioning tensor [B, C, H, W]
+      mu: Pre-computed mean [B, 1, H, W] (degraded input y for InDI)
+      sigma: Pre-computed std [B, 1, H, W] (currently unused by InDI)
+
+    Returns:
+      Generated clean sample [B, 1, H, W]
+    """
+    # Use provided mu or compute from model
+    if mu is None:
+      if self.warm_start_model is None:
+        raise ValueError("Either provide mu or warm_start_model")
+      with torch.no_grad():
+        mu, sigma = self.warm_start_model(condition)
+
+    # InDI uses μ directly as the degraded input y
+    return self.base_sampler(mu, condition)
+
+
 def compute_sigma_norm(sigma, warmth):
   """
   Compute normalized sigma with warmth blending.

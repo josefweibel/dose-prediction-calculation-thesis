@@ -5,7 +5,7 @@ import numpy as np
 from typing import Optional
 
 from model_cache import DeepCache, CacheConfig
-from warm_start import WarmStartSampler, WarmStartUnetSampler
+from warm_start import WarmStartSampler, WarmStartUnetSampler, InDIWarmStartSampler
 
 
 def build_sampler(model_config, sampling_config, model, warm_start_model=None):
@@ -79,16 +79,30 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
       time_scale=fm_config.get('time_scale', 1000.0),
       cache_config=cache_config,
     )
+  elif sampling_config['sampler'] == 'indi':
+    indi_config = model_config.get('indi', {})
+    base_sampler = InDISampler(
+      model,
+      sampling_steps=sampling_config.get('T', 10),
+      noise_schedule=indi_config.get('noise_schedule', 'constant'),
+      epsilon=indi_config.get('epsilon', 0.01),
+      time_scale=indi_config.get('time_scale', 1000.0),
+      cache_config=cache_config,
+    )
   elif sampling_config['sampler'] == 'unet':
     base_sampler = UnetSampler(model)
   else:
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
 
-  # Wrap with WarmStartSampler if warm_start is enabled
+  # Wrap with appropriate warm-start sampler if warm_start is enabled
   # warm_start_model is optional - can use cached (mu, sigma) instead
   if 'warm_start' in model_config:
-    warmth = model_config['warm_start'].get('warmth', 1.0)
-    return WarmStartSampler(base_sampler, warm_start_model, warmth=warmth)
+    # InDI uses μ directly as degraded input, not normalization
+    if 'indi' in model_config:
+      return InDIWarmStartSampler(base_sampler, warm_start_model)
+    else:
+      warmth = model_config['warm_start'].get('warmth', 1.0)
+      return WarmStartSampler(base_sampler, warm_start_model, warmth=warmth)
 
   return base_sampler
 
@@ -595,6 +609,124 @@ class RectifiedFlowSampler(nn.Module):
 
       # Euler step: x_{t-dt} = x_t - dt * v
       x = x - dt * v
+
+    return x
+
+
+class InDISampler(nn.Module):
+  """
+  Inversion by Direct Iteration (InDI) sampler.
+
+  Iteratively refines a degraded input y towards the clean target x_0.
+  The model predicts F_θ(x_t, t) ≈ x_0 at each step.
+
+  Inference algorithm (Algorithm 1 from paper):
+    x̂_1 = y + ε_1 * n  (start from degraded + noise)
+    for t = 1 to 0 with step -δ:
+      x̂_{t-δ} = (δ/t) * F_θ(x̂_t, t) + (1 - δ/t) * x̂_t + noise_term
+    return x̂_0
+
+  Reference: Delbracio & Milanfar, "Inversion by Direct Iteration" (2023)
+  """
+  def __init__(
+    self,
+    model: nn.Module,
+    sampling_steps: int = 10,
+    noise_schedule: str = 'constant',
+    epsilon: float = 0.01,
+    time_scale: float = 1000.0,
+    cache_config=None,
+  ):
+    super().__init__()
+    self.model = model
+    self.sampling_steps = sampling_steps
+    self.noise_schedule = noise_schedule
+    self.epsilon = epsilon
+    self.time_scale = time_scale
+
+    if cache_config is None:
+      self.cache_config = CacheConfig(
+        sampling_steps=sampling_steps,
+        layers=[],
+        intervals={},
+        warmup=0
+      )
+    else:
+      self.cache_config = cache_config
+
+  def _get_epsilon_t(self, t: float) -> float:
+    """Get noise level at time t based on schedule."""
+    if self.noise_schedule == 'constant':
+      return self.epsilon
+    elif self.noise_schedule == 'brownian':
+      # ε_t = ε / sqrt(t) for Brownian motion
+      return self.epsilon / np.sqrt(max(t, 1e-8))
+    else:  # none
+      return 0.0
+
+  @torch.no_grad()
+  def forward(self, y: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+    """
+    Sample from degraded y to clean x_0 using iterative refinement.
+
+    Args:
+      y: Degraded input (e.g., warm-start prediction μ) [B, C, H, W]
+      condition: Conditioning information [B, C_cond, H, W]
+
+    Returns:
+      Generated clean sample x_0 [B, C, H, W]
+    """
+    cache = DeepCache(self.cache_config)
+    delta = 1.0 / self.sampling_steps
+
+    # Initialize: x̂_1 = y + ε_1 * n
+    epsilon_1 = self._get_epsilon_t(1.0)
+    n = torch.randn_like(y)
+    x = y + epsilon_1 * n
+
+    # Iterate from t=1 to t=0
+    for step_idx in range(self.sampling_steps):
+      cache.set_current_step(step_idx)
+
+      # Current time (starts at 1, decreases by delta each step)
+      t = 1.0 - step_idx * delta
+
+      # Scale time for model
+      t_scaled = torch.full(
+        (x.shape[0],),
+        int(t * (self.time_scale - 1)),
+        dtype=torch.long,
+        device=x.device
+      )
+
+      # Model predicts clean image x_0
+      x_0_pred = self.model(x, condition, t_scaled, cache)
+
+      # Next time step
+      t_next = t - delta
+
+      # InDI update rule (Eq. 5 from paper):
+      # x̂_{t-δ} = (δ/t) * F_θ(x̂_t, t) + (1 - δ/t) * x̂_t
+      if t > 1e-8:  # Avoid division by zero
+        coef_pred = delta / t
+        coef_current = 1.0 - delta / t
+        x = coef_pred * x_0_pred + coef_current * x
+
+        # Add stochastic perturbation if using noise (Eq. 10 from paper)
+        # noise_term = (t - δ) * √(ε²_{t-δ} - ε²_t) * ζ
+        if t_next > 1e-8 and self.noise_schedule != 'none':
+          epsilon_t = self._get_epsilon_t(t)
+          epsilon_t_next = self._get_epsilon_t(t_next)
+
+          # Compute noise coefficient
+          noise_var_diff = epsilon_t_next**2 - epsilon_t**2
+          if noise_var_diff > 0:
+            noise_coef = t_next * np.sqrt(noise_var_diff)
+            zeta = torch.randn_like(x)
+            x = x + noise_coef * zeta
+      else:
+        # At t=0, just use the prediction
+        x = x_0_pred
 
     return x
 

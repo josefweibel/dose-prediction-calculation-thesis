@@ -135,6 +135,137 @@ class VPredictionTrainerModule(nn.Module):
     return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
+class InDITrainerModule(nn.Module):
+  """
+  Inversion by Direct Iteration (InDI) training module.
+
+  Learns to predict the clean image x_0 from an intermediate degraded image x_t where:
+  - x_0 is the clean target
+  - y is the degraded input (e.g., warm-start prediction μ)
+  - x_t = (1 - t) * x_0 + t * y + t * ε_t * n is the interpolation with optional noise
+
+  The model learns F_θ(x_t, t) ≈ x_0.
+
+  Reference: Delbracio & Milanfar, "Inversion by Direct Iteration" (2023)
+
+  Supports configurable time sampling:
+  - 'uniform': t ~ U(0, 1)
+  - 'linear_bias': t ~ U(0, 1) with linear bias towards t=1
+  - 'sine_bias_t1': sine-based distribution biased towards t=1
+
+  Supports configurable noise schedules:
+  - 'constant': ε_t = epsilon (constant noise throughout)
+  - 'brownian': ε_t = epsilon / sqrt(t) (Brownian motion scaling)
+  - 'none': ε_t = 0 (no noise, deterministic interpolation)
+  """
+  def __init__(
+    self,
+    model,
+    time_sampling='uniform',
+    linear_bias=0.5,
+    noise_schedule='constant',
+    epsilon=0.01,
+    loss_type='l1',
+    time_scale=1000.0
+  ):
+    super().__init__()
+
+    self.model = model
+    self.time_sampling = time_sampling
+    self.linear_bias = linear_bias  # 'a' parameter for linear_bias sampling
+    self.noise_schedule = noise_schedule
+    self.epsilon = epsilon
+    self.loss_type = loss_type
+    self.time_scale = time_scale
+
+    # Dummy cache for model compatibility
+    self.cache = DeepCache(CacheConfig(intervals={}, warmup=0, layers=[], sampling_steps=1000))
+
+  def _sample_time(self, batch_size, device):
+    """Sample time t based on configured distribution."""
+    if self.time_sampling == 'linear_bias':
+      # t ~ 1/(1+a) * U[0,1] + a/(1+a) * δ_1
+      # With probability a/(1+a), t=1; otherwise uniform
+      a = self.linear_bias
+      uniform_mask = torch.rand(batch_size, device=device) > (a / (1 + a))
+      t = torch.where(
+        uniform_mask,
+        torch.rand(batch_size, device=device),
+        torch.ones(batch_size, device=device)
+      )
+    elif self.time_sampling == 'sine_bias_t1':
+      # t = sin(s * π/2)^2, s ~ U[0,1] - biased towards t=1
+      s = torch.rand(batch_size, device=device)
+      t = torch.sin(s * math.pi / 2) ** 2
+    elif self.time_sampling == 'sine_bias_t0':
+      # t = sin((s-1) * π/2) + 1, s ~ U[0,1] - biased towards t=0
+      s = torch.rand(batch_size, device=device)
+      t = torch.sin((s - 1) * math.pi / 2) + 1
+    else:  # uniform
+      t = torch.rand(batch_size, device=device)
+
+    # Clamp to avoid t=0 (division issues) and ensure valid range
+    t = torch.clamp(t, min=1e-5, max=1.0)
+    return t
+
+  def _get_epsilon_t(self, t):
+    """Get noise level at time t based on schedule."""
+    if self.noise_schedule == 'constant':
+      return self.epsilon
+    elif self.noise_schedule == 'brownian':
+      # ε_t = ε / sqrt(t) for Brownian motion
+      return self.epsilon / torch.sqrt(t + 1e-8)
+    else:  # none
+      return 0.0
+
+  def forward(self, x_0, condition, mu, sigma):
+    """
+    Training forward pass.
+
+    Args:
+      x_0: Clean target image [B, C, H, W]
+      condition: Conditioning information [B, C_cond, H, W]
+      mu: Warm-start prediction (degraded input y) [B, C, H, W]
+      sigma: Warm-start uncertainty (currently unused in InDI) [B, C, H, W]
+
+    Returns:
+      Loss value
+    """
+    batch_size = x_0.shape[0]
+    device = x_0.device
+
+    # y is the degraded input (warm-start prediction)
+    y = mu
+
+    # Sample time t
+    t = self._sample_time(batch_size, device)
+    t_expanded = t.view([batch_size] + [1] * (len(x_0.shape) - 1))
+
+    # Get noise level at time t
+    epsilon_t = self._get_epsilon_t(t_expanded)
+
+    # Sample noise
+    n = torch.randn_like(x_0)
+
+    # Compute intermediate sample: x_t = (1 - t) * x_0 + t * y + t * ε_t * n
+    # From Eq. 9: x_t = (1 - t)x + ty + tε_t*n
+    x_t = (1 - t_expanded) * x_0 + t_expanded * y + t_expanded * epsilon_t * n
+
+    # Scale t for model timestep embedding
+    t_scaled = (t * (self.time_scale - 1)).long()
+
+    # Model predicts clean image x_0
+    x_0_pred = self.model(x_t, condition, t_scaled, self.cache)
+
+    # Compute loss
+    if self.loss_type == 'l1':
+      loss = F.l1_loss(x_0_pred, x_0, reduction='mean')
+    else:  # l2
+      loss = F.mse_loss(x_0_pred, x_0, reduction='mean')
+
+    return loss
+
+
 class RectifiedFlowTrainerModule(nn.Module):
   """
   Rectified Flow Matching training module.
@@ -338,6 +469,17 @@ class Trainer:
           logit_normal_std=fm_config.get('logit_normal_std', 1.0),
           time_scale=fm_config.get('time_scale', 1000.0)
         ).to(self.device)
+      elif 'indi' in self.config:
+        indi_config = self.config['indi']
+        self.model = InDITrainerModule(
+          model=self.net_model,
+          time_sampling=indi_config.get('time_sampling', 'uniform'),
+          linear_bias=indi_config.get('linear_bias', 0.5),
+          noise_schedule=indi_config.get('noise_schedule', 'constant'),
+          epsilon=indi_config.get('epsilon', 0.01),
+          loss_type=indi_config.get('loss_type', 'l1'),
+          time_scale=indi_config.get('time_scale', 1000.0)
+        ).to(self.device)
       elif 'c3d' in self.config:
         alpha = self.config['c3d'].get('alpha', 0.5)
         self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
@@ -345,7 +487,7 @@ class Trainer:
         self.model = UnetTrainerModule(self.net_model).to(self.device)
 
     # Phase 2: Wrap dataset and trainer for warm-start diffusion or flow matching
-    if 'warm_start' in self.config and ('diffusion' in self.config or 'flow_matching' in self.config):
+    if 'warm_start' in self.config:
       ws_cfg = self.config['warm_start']
       ws_model_name = ws_cfg['model']
       cache_train_volumes = ws_cfg.get('cache_train_volumes', True)
@@ -394,11 +536,13 @@ class Trainer:
       if val_prefetch_on_gpu and self.device.type == 'cuda':
         self.val_dataloader = PrefetchLoader(self.val_dataloader, self.device)
 
-      # Wrap trainer module
-      self.model = WarmStartDiffusionTrainerModule(
-        base_trainer_module=self.model,
-        warmth_range=tuple(ws_cfg.get('warmth_range', [0.0, 1.0]))
-      ).to(self.device)
+      # Wrap trainer module with WarmStartDiffusionTrainerModule for normalization
+      # EXCEPT for InDI which uses μ directly as degraded input (no normalization)
+      if 'indi' not in self.config:
+        self.model = WarmStartDiffusionTrainerModule(
+          base_trainer_module=self.model,
+          warmth_range=tuple(ws_cfg.get('warmth_range', [0.0, 1.0]))
+        ).to(self.device)
 
       self.warm_start_enabled = True
     else:
