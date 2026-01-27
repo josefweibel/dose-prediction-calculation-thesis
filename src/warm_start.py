@@ -291,6 +291,10 @@ class WarmStartCachedDataset(Dataset):
     mu = torch.from_numpy(mu_vol[..., slice_idx].copy())
     sigma = torch.from_numpy(sigma_vol[..., slice_idx].copy())
 
+    # Normalize mu from Gy range to [0, 1] range
+    # (evaluator saves denormalized predictions, but training expects normalized values)
+    mu = self.base_dataset.normalize_target(mu)
+
     return condition, dose, mu, sigma, info
 
   @property

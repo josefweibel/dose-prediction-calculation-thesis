@@ -494,6 +494,10 @@ class GDPHMMPreprocessedSlicesDataset(Dataset):
     """Denormalize dose from [0, 1] to [0, 88] Gy."""
     return x * (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN) + GDPHMM_DOSE_MIN
 
+  def normalize_target(self, x):
+    """Normalize dose from [0, 88] Gy to [0, 1]."""
+    return (x - GDPHMM_DOSE_MIN) / (GDPHMM_DOSE_MAX - GDPHMM_DOSE_MIN)
+
   def finish(self):
     """Compatibility method (no cleanup needed for preprocessed dataset)."""
     pass
