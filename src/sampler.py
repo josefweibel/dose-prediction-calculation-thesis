@@ -12,7 +12,7 @@ from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
 from models import build_model
 from slice_combinator import SliceCombinator
-from warm_start import build_warm_start_model
+from warm_start import build_warm_start_model, WarmStartCachedDataset
 
 
 class Sampler:
@@ -39,6 +39,12 @@ class Sampler:
 
     self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None)
 
+    # Wrap with WarmStartCachedDataset for warm start diffusion models
+    if 'warm_start' in self.model_config:
+      ws_model_name = self.model_config['warm_start']['model']
+      self.dataset = WarmStartCachedDataset(self.dataset, ws_model_name, data_split)
+      self.dataset.preload_cache()
+
     conditioning_groups = self.model_config['conditioning']['types']
     self.conditioning_selector = StructureSelector(conditioning_groups)
 
@@ -62,6 +68,7 @@ class Sampler:
       pin_memory=True,
       prefetch_factor=self.sampling_config['prefetch_factor'],
       persistent_workers=self.sampling_config['num_workers'] > 0,
+      multiprocessing_context='fork' if self.sampling_config['num_workers'] > 0 else None,
     )
 
     if self.sampling_config['prefetch_on_gpu'] and self.device.type == 'cuda':
