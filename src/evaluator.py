@@ -545,14 +545,12 @@ class Evaluator:
             p = Path(file_name)
             base_name = f"{p.stem}-{slice_index.item()}"
             if isinstance(pred, dict):
-              # Save each dict entry to a separate file
+              # Save 'pred' (the main prediction) using the processed sample_pred
+              np.save(Path(dir) / f"{base_name}.npy", sample_pred[0].cpu().numpy())
+              # Save other dict entries (e.g., 'sigma') in their original form
               for key, value in pred.items():
-                sample_value = value[i:i+1] * sample_body
-                if key == 'pred':
-                  # Default prediction file (no suffix)
-                  np.save(Path(dir) / f"{base_name}.npy", sample_value[0].cpu().numpy())
-                else:
-                  # Other entries get their key as suffix
+                if key != 'pred':
+                  sample_value = value[i:i+1] * sample_body
                   np.save(Path(dir) / f"{base_name}_{key}.npy", sample_value[0].cpu().numpy())
             else:
               np.save(Path(dir) / f"{base_name}.npy", sample_pred[0].cpu().numpy())
