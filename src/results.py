@@ -346,15 +346,42 @@ def iqr_limits_from_df(
   margin_value = margin * (vmax - vmin)
   return vmin, vmax, min(whisker_mins) - margin_value, vmax + margin_value
 
+def setup_fig_axes(metrics):
+  if len(metrics) % 4 == 0:
+    n_cols = 4
+    n_rows = len(metrics) // 4
+  else:
+    n_metrics = len(metrics)
+    n_cols = min(3, n_metrics)
+    n_rows = (n_metrics + n_cols - 1) // n_cols
+
+  fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+  axes = axes.flatten()
+  return fig, axes
+
 
 class BaseResults:
-  def __init__(self, model_name, sampling_name, epoch, dataset_split, dataset):
+  def __init__(
+    self,
+    model_name,
+    sampling_name,
+    epoch,
+    dataset_split,
+    dataset,
+    distillation_name=None,
+    distillation_round=None,
+  ):
     self.model_name = model_name
     self.sampling_name = sampling_name
     self.epoch = epoch
     self.dataset_split = dataset_split
+    self.distillation_name = distillation_name
+    self.distillation_round = distillation_round
 
-    self.base_path = SAMPLES_PATH / model_name / sampling_name / f'{dataset_split}_{epoch}'
+    self.base_path = SAMPLES_PATH / model_name
+    if distillation_name and distillation_round:
+      self.base_path = self.base_path / f'distill-{distillation_name}' / f'round-{distillation_round}'
+    self.base_path = self.base_path / sampling_name / f'{dataset_split}_{epoch}'
 
     self.dataset = dataset
 
@@ -580,8 +607,8 @@ class BaseResults:
 
 
 class ModelResults(BaseResults):
-  def __init__(self, model_name, sampling_name, epoch, dataset_split, dataset):
-    super().__init__(model_name, sampling_name, epoch, dataset_split, dataset)
+  def __init__(self, model_name, sampling_name, epoch, dataset_split, dataset, distillation_name=None, distillation_round=None):
+    super().__init__(model_name, sampling_name, epoch, dataset_split, dataset, distillation_name, distillation_round)
 
     path = self.base_path / '_sample_metrics.csv'
     self.slice_metrics = pd.read_csv(path)
@@ -613,7 +640,9 @@ class SampleResults(BaseResults):
       model_results.sampling_name,
       model_results.epoch,
       model_results.dataset_split,
-      model_results.dataset
+      model_results.dataset,
+      model_results.distillation_name,
+      model_results.distillation_round
     )
     self.sample = sample
 
@@ -846,7 +875,9 @@ class ModelComparison(BaseResults):
       sampling_name=first_result.sampling_name,
       epoch=first_result.epoch,
       dataset_split=first_result.dataset_split,
-      dataset=first_result.dataset
+      dataset=first_result.dataset,
+      distillation_name=first_result.distillation_name,
+      distillation_round=first_result.distillation_round
     )
 
     self.results_list = results_list
@@ -882,23 +913,27 @@ class ModelComparison(BaseResults):
     if isinstance(other, ModelResults):
       to_add = [other]
       labels_to_add = [f'{other.model_name} ({other.sampling_name})']
+      groups_to_add = ['']  # Default group
     elif isinstance(other, ModelComparison):
       to_add = other.results_list
       labels_to_add = other.result_labels
+      groups_to_add = other.result_groups
     elif isinstance(other, (list, tuple)):
       to_add = list(other)
       labels_to_add = [f'{r.model_name} ({r.sampling_name})' for r in to_add]
+      groups_to_add = [''] * len(to_add)  # Default groups
     else:
       raise TypeError(f'Cannot add {type(other).__name__} to ModelComparison')
 
     new_results = list(self.results_list)
     new_labels = list(self.result_labels)
-    for result, label in zip(to_add, labels_to_add):
+    new_groups = list(self.result_groups)
+    for result, label, group in zip(to_add, labels_to_add, groups_to_add):
       if result not in new_results:
         new_results.append(result)
         new_labels.append(label)
-
-    return ModelComparison(new_results, new_labels)
+        new_groups.append(group)
+    return ModelComparison(new_results, new_labels, new_groups)
 
   def __sub__(self, other):
     """
@@ -919,15 +954,17 @@ class ModelComparison(BaseResults):
 
     new_results = []
     new_labels = []
-    for result, label in zip(self.results_list, self.result_labels):
+    new_groups = []
+    for result, label, group in zip(self.results_list, self.result_labels, self.result_groups):
       if result not in to_exclude:
         new_results.append(result)
         new_labels.append(label)
+        new_groups.append(group)
 
     if len(new_results) == 0:
       raise ValueError('Cannot create ModelComparison with no results')
 
-    return ModelComparison(new_results, new_labels)
+    return ModelComparison(new_results, new_labels, new_groups)
 
   def for_sample(self, sample):
     # For ModelComparison, we need to handle this differently
@@ -1004,16 +1041,7 @@ class ModelComparison(BaseResults):
     return ax
 
   def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True):
-    if len(metrics) % 4 == 0:
-      n_cols = 4
-      n_rows = len(metrics) // 4
-    else:
-      n_metrics = len(metrics)
-      n_cols = min(3, n_metrics)
-      n_rows = (n_metrics + n_cols - 1) // n_cols
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
-    axes = axes.flatten()
+    fig, axes = setup_fig_axes(metrics)
 
     for i, metric in enumerate(metrics):
       self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=outliers)
@@ -1030,7 +1058,7 @@ class ModelComparison(BaseResults):
 
     return fig, axes
 
-  def plot_inference_times(self, ax=None):
+  def plot_inference_times(self, entity='volume', unit='minutes', ax=None):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(6, 4))
 
@@ -1038,15 +1066,29 @@ class ModelComparison(BaseResults):
     labels = []
     groups = []
     for result, label, group in zip(self.results_list, self.result_labels, self.result_groups):
-      data.extend(result.volume_metrics['duration'] / 60)
-      labels.extend([label] * len(result.volume_metrics['duration']))
-      groups.extend([group] * len(result.volume_metrics['duration']))
+      if entity == 'volume':
+        data.extend(result.volume_metrics['duration'])
+        labels.extend([label] * len(result.volume_metrics['duration']))
+        groups.extend([group] * len(result.volume_metrics['duration']))
+      elif entity == 'slice':
+        data.extend(result.slice_metrics['duration'])
+        labels.extend([label] * len(result.slice_metrics['duration']))
+        groups.extend([group] * len(result.slice_metrics['duration']))
+      else:
+        raise ValueError(f"Unknown entity: {entity}")
 
     df = pd.DataFrame({'model': labels, 'inference_time': data, 'group': groups})
+    if unit == 'seconds':
+      pass  # already in seconds
+    elif unit == 'minutes':
+      df['inference_time'] = df['inference_time'] / 60.0
+    else:
+      raise ValueError(f"Unknown unit: {unit}")
+
     sns.boxplot(x='model', y='inference_time', data=df, ax=ax, hue='group', dodge=False)
     ax.tick_params(axis='x', rotation=90)
-    ax.set_title('Inference Time Distribution Across Models')
-    ax.set_ylabel('Inference Time (minutes)')
+    ax.set_title('Inference Time Distribution per ' + ('Volume' if entity == 'volume' else 'Slice'))
+    ax.set_ylabel(f'Inference Time ({unit})')
     ax.set_xlabel('')
 
     if self.has_groups:
@@ -1167,7 +1209,22 @@ class ModelComparison(BaseResults):
 
     return ax
 
-  def plot_quality_over_T(self, metric, ax=None):
+  def plot_quality_over_T(self, metrics, agg='mean', xscale='log', baseline=None):
+    fig, axes = setup_fig_axes(metrics)
+
+    for metric, ax in zip(metrics, axes):
+      self.plot_quality_over_T_single(metric, agg=agg, xscale=xscale, baseline=baseline, ax=ax)
+      ax.get_legend().remove()
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper right', title='', ncol=8)
+    fig.suptitle(f'{agg.capitalize()} (±{ "std" if agg == "mean" else "IQR" }) Metrics vs Sampling T Across Models', fontsize=16)
+    fig.tight_layout()
+
+    return fig, axes
+
+
+  def plot_quality_over_T_single(self, metric, agg='mean', xscale='log', baseline=None, ax=None):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
@@ -1176,8 +1233,12 @@ class ModelComparison(BaseResults):
       df = result.volume_metrics
       T = int(result.sampling_name.split('-')[-1])
       x = T
-      y = df[metric].mean()
-      y_std = df[metric].std()
+      if agg == 'mean':
+        y = df[metric].mean()
+        y_std = df[metric].std()
+      elif agg == 'median':
+        y = df[metric].median()
+        y_std = (df[metric].quantile(0.75) - df[metric].quantile(0.25)) / 2  # interquartile range as a robust std estimate
       label = result_label.replace(f' T={T}', '')
       data[label] = data.get(label, []) + [(x, y, y_std)]
 
@@ -1196,10 +1257,19 @@ class ModelComparison(BaseResults):
         alpha=0.2,
       )
 
+    if baseline is not None:
+      y_baseline = baseline.volume_metrics[metric].mean() if agg == 'mean' else baseline.volume_metrics[metric].median()
+      ax.axhline(y_baseline, color='black', linestyle='--', label='Baseline')
+
     dir_symbol = '↑' if is_higher_better(metric) else '↓'
-    ax.set_title(f'Mean (±std) {get_metric_abbr(metric)} vs Sampling T Across Models \n{dir_symbol} is better')
+    ax.set_title(f'{get_metric_label(metric)} \n{dir_symbol} is better')
     ax.set_xlabel('Sampling T')
-    ax.set_ylabel(get_metric_label(metric))
+    ax.set_xscale(xscale)
+    ticks = sorted({p[0] for points in data.values() for p in points})
+    ax.set_xticks(ticks)
+    ax.xaxis.set_major_locator(plt.FixedLocator(ticks))
+    ax.xaxis.set_major_formatter(plt.ScalarFormatter())
+    ax.set_ylabel(get_metric_abbr(metric))
     ax.legend()
 
     return ax
