@@ -71,6 +71,14 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
       schedule=sampling_config['schedule'],
       parameterization=parameterization,
     )
+  elif sampling_config['sampler'] == 'flow':
+    fm_config = model_config.get('flow_matching', {})
+    base_sampler = RectifiedFlowSampler(
+      model,
+      sampling_steps=sampling_config.get('T', 50),
+      time_scale=fm_config.get('time_scale', 1000.0),
+      cache_config=cache_config,
+    )
   elif sampling_config['sampler'] == 'unet':
     base_sampler = UnetSampler(model)
   else:
@@ -518,6 +526,78 @@ class DEISSampler(nn.Module):
       x = self.__step(eps, step_idx, x, model_outputs)
 
     return x
+
+class RectifiedFlowSampler(nn.Module):
+  """
+  Sampler for Rectified Flow models using Euler integration.
+
+  Samples by solving the ODE: dx/dt = v(x_t, t)
+  Starting from x_1 ~ N(0, I) at t=1, integrating to t=0.
+
+  The model predicts v = x_1 - x_0 (velocity from data to noise).
+  To go from noise to data, we integrate backwards: x_{t-dt} = x_t - dt * v(x_t, t)
+  """
+  def __init__(
+    self,
+    model: nn.Module,
+    sampling_steps: int = 50,
+    time_scale: float = 1000.0,
+    cache_config=None,
+  ):
+    super().__init__()
+    self.model = model
+    self.sampling_steps = sampling_steps
+    self.time_scale = time_scale
+
+    if cache_config is None:
+      self.cache_config = CacheConfig(
+        sampling_steps=sampling_steps,
+        layers=[],
+        intervals={},
+        warmup=0
+      )
+    else:
+      self.cache_config = cache_config
+
+  @torch.no_grad()
+  def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+    """
+    Sample from noise to data using Euler integration.
+
+    Args:
+      x: Initial noise tensor x_1 ~ N(0, I) [B, C, H, W]
+      condition: Conditioning information [B, C_cond, H, W]
+
+    Returns:
+      Generated sample x_0 [B, C, H, W]
+    """
+    cache = DeepCache(self.cache_config)
+    dt = 1.0 / self.sampling_steps
+
+    # Time steps from t=1 to t=0 (going backwards)
+    # We evaluate at t, then step to t - dt
+    for step_idx in range(self.sampling_steps):
+      cache.set_current_step(step_idx)
+
+      # Current time (starts at 1, decreases to near 0)
+      t = 1.0 - step_idx * dt
+
+      # Scale time for model (expects values in [0, time_scale-1])
+      t_scaled = torch.full(
+        (x.shape[0],),
+        int(t * (self.time_scale - 1)),
+        dtype=torch.long,
+        device=x.device
+      )
+
+      # Model predicts velocity v = x_1 - x_0
+      v = self.model(x, condition, t_scaled, cache)
+
+      # Euler step: x_{t-dt} = x_t - dt * v
+      x = x - dt * v
+
+    return x
+
 
 class UnetSampler(nn.Module):
   def __init__(

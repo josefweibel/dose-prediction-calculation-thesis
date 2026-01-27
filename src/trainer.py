@@ -135,6 +135,64 @@ class VPredictionTrainerModule(nn.Module):
     return v.gather(0, t).view([t.shape[0]] + [1] * (len(x_shape) - 1))
 
 
+class RectifiedFlowTrainerModule(nn.Module):
+  """
+  Rectified Flow Matching training module.
+
+  Learns to predict the velocity field v = x_1 - x_0 where:
+  - x_0 is the data (clean sample)
+  - x_1 is noise
+  - x_t = (1 - t) * x_0 + t * x_1 is the linear interpolation
+
+  The model learns to predict v = x_1 - x_0 (direction from data to noise).
+
+  Supports configurable time sampling:
+  - 'uniform': t ~ U(0, 1)
+  - 'logit_normal': t = sigmoid(z), z ~ N(mean, std) - samples more from middle timesteps
+  """
+  def __init__(self, model, time_sampling='uniform', logit_normal_mean=0.0, logit_normal_std=1.0, time_scale=1000.0):
+    super().__init__()
+
+    self.model = model
+    self.time_sampling = time_sampling
+    self.logit_normal_mean = logit_normal_mean
+    self.logit_normal_std = logit_normal_std
+    self.time_scale = time_scale  # Scale t for timestep embedding compatibility
+
+    # Dummy cache for model compatibility
+    self.cache = DeepCache(CacheConfig(intervals={}, warmup=0, layers=[], sampling_steps=1000))
+
+  def forward(self, x_0, condition):
+    batch_size = x_0.shape[0]
+    device = x_0.device
+
+    # Sample time t based on configured distribution
+    if self.time_sampling == 'logit_normal':
+      # Logit-normal: t = sigmoid(z), z ~ N(mean, std)
+      z = torch.randn(batch_size, device=device) * self.logit_normal_std + self.logit_normal_mean
+      t = torch.sigmoid(z)
+    else:  # uniform
+      t = torch.rand(batch_size, device=device)
+
+    # Sample noise x_1
+    x_1 = torch.randn_like(x_0)
+
+    # Compute interpolated sample: x_t = (1 - t) * x_0 + t * x_1
+    t_expanded = t.view([batch_size] + [1] * (len(x_0.shape) - 1))
+    x_t = (1 - t_expanded) * x_0 + t_expanded * x_1
+
+    # Velocity target: v = x_1 - x_0
+    v_target = x_1 - x_0
+
+    # Scale t for model timestep embedding (models expect values in [0, time_scale-1])
+    t_scaled = (t * (self.time_scale - 1)).long()
+
+    # Model predicts velocity
+    v_pred = self.model(x_t, condition, t_scaled, self.cache)
+
+    return F.mse_loss(v_pred, v_target, reduction='mean')
+
+
 class UnetTrainerModule(nn.Module):
   def __init__(self, model):
     super().__init__()
@@ -271,14 +329,23 @@ class Trainer:
             beta_T=self.config['diffusion']['beta_T'],
             T=self.config['diffusion']['T']
           ).to(self.device)
+      elif 'flow_matching' in self.config:
+        fm_config = self.config['flow_matching']
+        self.model = RectifiedFlowTrainerModule(
+          model=self.net_model,
+          time_sampling=fm_config.get('time_sampling', 'uniform'),
+          logit_normal_mean=fm_config.get('logit_normal_mean', 0.0),
+          logit_normal_std=fm_config.get('logit_normal_std', 1.0),
+          time_scale=fm_config.get('time_scale', 1000.0)
+        ).to(self.device)
       elif 'c3d' in self.config:
         alpha = self.config['c3d'].get('alpha', 0.5)
         self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
       else:
         self.model = UnetTrainerModule(self.net_model).to(self.device)
 
-    # Phase 2: Wrap dataset and trainer for warm-start diffusion
-    if 'warm_start' in self.config and 'diffusion' in self.config:
+    # Phase 2: Wrap dataset and trainer for warm-start diffusion or flow matching
+    if 'warm_start' in self.config and ('diffusion' in self.config or 'flow_matching' in self.config):
       ws_cfg = self.config['warm_start']
       ws_model_name = ws_cfg['model']
       cache_train_volumes = ws_cfg.get('cache_train_volumes', True)
