@@ -402,7 +402,9 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1):
     target_slices = []
 
     for idx in sample_indices:
-      structure, target, _ = dataset[idx]
+      item = dataset[idx]
+      # Handle both regular datasets (3 values) and WarmStartCachedDataset (5 values)
+      structure, target = item[0], item[1]
       structure_slices.append(structure)
       target_slices.append(target)
 

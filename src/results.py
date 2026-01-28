@@ -664,7 +664,9 @@ class SampleResults(BaseResults):
   def load_orig_volume(self):
     original_idx = [i for i, (file, _) in enumerate(self.dataset.index_map) if file.stem == self.sample][0]
 
-    structure, dose, _ = self.dataset[original_idx]
+    item = self.dataset[original_idx]
+    # Handle both regular datasets (3 values) and WarmStartCachedDataset (5 values)
+    structure, dose = item[0], item[1]
     structure = structure.numpy()
     dose = self.dataset.denormalize_target(dose)[0].numpy()
 
