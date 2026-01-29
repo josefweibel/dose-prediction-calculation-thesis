@@ -175,13 +175,15 @@ class WarmStartUnetSampler(nn.Module):
     super().__init__()
     self.model = model
 
-  def forward(self, x_T_ignored, condition):
+  def forward(self, x_T_ignored, condition, mu=None, sigma=None):
     """
     Compute (μ, σ) and return as dict.
 
     Args:
       x_T_ignored: Ignored (for API compatibility)
       condition: Conditioning tensor [B, C, H, W]
+      mu: Ignored (for API compatibility with warm-start cache pipeline)
+      sigma: Ignored (for API compatibility with warm-start cache pipeline)
 
     Returns:
       dict with 'pred' (μ) and 'sigma' tensors [B, 1, H, W]
