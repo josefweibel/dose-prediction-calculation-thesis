@@ -7,6 +7,7 @@ from deeplabv3plus_model import build_deeplabv3plus
 from diffdp_model import build_diffdp
 from spdiffdose_model import build_spdiffdose
 from hdunet_model import build_hdunet
+from analytical_dose import AnalyticalDoseModel
 
 
 def build_model(model_config, structure_selector, out_channels=1):
@@ -53,6 +54,18 @@ def build_model(model_config, structure_selector, out_channels=1):
     model = build_hdunet(model_config, structure_selector, out_channels=out_channels)
   elif 'mednext' in model_config:
     model = build_mednext_model(model_config, structure_selector, out_channels=out_channels)
+  elif 'analytical_dose' in model_config:
+    cfg = model_config.get('analytical_dose', {})
+    model = AnalyticalDoseModel(
+      structure_selector=structure_selector,
+      falloff_constant=cfg.get('falloff_constant', 25.0),
+      sparing_radius=cfg.get('sparing_radius', 15.0),
+      output_normalized=cfg.get('output_normalized', True),
+      output_uncertainty=(out_channels == 2),
+      n_samples=cfg.get('n_samples', 16),
+      falloff_range=tuple(cfg.get('falloff_range', [20.0, 35.0])),
+      sparing_range=tuple(cfg.get('sparing_range', [10.0, 20.0])),
+    )
   else:
     model = MambaUnet(
       img_size=model_config['data']['img_size'],

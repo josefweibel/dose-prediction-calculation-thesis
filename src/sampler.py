@@ -73,17 +73,20 @@ class Sampler:
     else:
       self.ema_model = build_model(self.model_config, self.conditioning_selector).to(self.device)
 
-    if epoch is None or epoch == 'latest':
-      checkpoint = load_last_checkpoint(model_name)
+    if 'analytical_dose' in self.model_config:
+      self.epoch = 0
     else:
-      checkpoint = load_checkpoint(model_name, epoch)
+      if epoch is None or epoch == 'latest':
+        checkpoint = load_last_checkpoint(model_name)
+      else:
+        checkpoint = load_checkpoint(model_name, epoch)
 
-    self.epoch = checkpoint['epoch']
+      self.epoch = checkpoint['epoch']
 
-    model_state_dict = checkpoint['ema_model_state_dict']
-    if "t_proj_enc1.proj.weight" in model_state_dict:
-      model_state_dict = remap_state_dict(model_state_dict)
-    self.ema_model.load_state_dict(model_state_dict)
+      model_state_dict = checkpoint['ema_model_state_dict']
+      if "t_proj_enc1.proj.weight" in model_state_dict:
+        model_state_dict = remap_state_dict(model_state_dict)
+      self.ema_model.load_state_dict(model_state_dict)
 
     # Load warm-start model for WSD Phase 2 models
     self.warm_start_model = None
