@@ -12,7 +12,7 @@ from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
 from models import build_model
 from slice_combinator import SliceCombinator
-from warm_start import build_warm_start_model, WarmStartCachedDataset
+from warm_start import build_warm_start_model
 
 
 class Sampler:
@@ -38,12 +38,6 @@ class Sampler:
     self.device = detect_device()
 
     self.dataset = create_gdphmm_dataset(self.model_config, data_split, structure_groups=None)
-
-    # Wrap with WarmStartCachedDataset for warm start diffusion models
-    if 'warm_start' in self.model_config:
-      ws_model_name = self.model_config['warm_start']['model']
-      self.dataset = WarmStartCachedDataset(self.dataset, ws_model_name, data_split)
-      self.dataset.preload_cache()
 
     conditioning_groups = self.model_config['conditioning']['types']
     self.conditioning_selector = StructureSelector(conditioning_groups)
@@ -91,6 +85,21 @@ class Sampler:
       model_state_dict = remap_state_dict(model_state_dict)
     self.ema_model.load_state_dict(model_state_dict)
 
+    # Load warm-start model for WSD Phase 2 models
+    self.warm_start_model = None
+    if 'warm_start' in self.model_config:
+      ws_model_name = self.model_config['warm_start']['model']
+      ws_model_config = read_model_config(ws_model_name)
+
+      self.warm_start_model = build_warm_start_model(
+        ws_model_config,
+        self.conditioning_selector
+      ).to(self.device)
+
+      ws_checkpoint = load_last_checkpoint(ws_model_name)
+      self.warm_start_model.load_state_dict(ws_checkpoint['ema_model_state_dict'])
+      self.warm_start_model.eval()
+
     self.evaluator = Evaluator(
       self.dataloader,
       self.model_config,
@@ -98,6 +107,7 @@ class Sampler:
       self.device,
       rank=self.rank,
       world_size=self.world_size,
+      warm_start_model=self.warm_start_model,
     )
 
   def sample(self):

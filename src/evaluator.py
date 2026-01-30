@@ -449,7 +449,7 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1):
 
 
 class Evaluator:
-  def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1):
+  def __init__(self, dataloader, model_config, sampling_config, device, rank=0, world_size=1, warm_start_model=None):
     self.dataloader = dataloader
     self.model_config = model_config
     self.sampling_config = sampling_config
@@ -457,14 +457,17 @@ class Evaluator:
     self.rank = rank
     self.world_size = world_size
     self.conditioning_groups = self.model_config['conditioning']['types']
+    self.warm_start_model = warm_start_model
 
-    self.use_warm_start_cache = 'warm_start' in self.model_config
+    # Use cache only when warm_start is in config AND no warm_start_model was provided
+    # (during training the dataset provides cached mu/sigma; during standalone sampling the model computes them)
+    self.use_warm_start_cache = 'warm_start' in self.model_config and warm_start_model is None
 
     self.metrics = build_slice_metrics(self.dataloader.dataset, device)
 
   def evaluate(self, model, dir=None):
     model.eval()
-    sampler = build_sampler(self.model_config, self.sampling_config, model).to(self.device)
+    sampler = build_sampler(self.model_config, self.sampling_config, model, warm_start_model=self.warm_start_model).to(self.device)
 
     if dir is not None and self.rank == 0:
       dir.mkdir(parents=True, exist_ok=True)
