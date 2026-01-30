@@ -5,10 +5,10 @@ import numpy as np
 from typing import Optional
 
 from model_cache import DeepCache, CacheConfig
-from warm_start import WarmStartSampler, WarmStartUnetSampler, InDIWarmStartSampler
+from warm_start import WarmStartSampler, WarmStartUnetSampler, InDIWarmStartSampler, WarmStartModel
 
 
-def build_sampler(model_config, sampling_config, model, warm_start_model=None):
+def build_sampler(model_config, sampling_config, model, warm_start_model=None, fast_model=None):
   # Handle warm_start_unet sampler (for Phase 1 validation during training)
   if sampling_config['sampler'] == 'warm_start_unet':
     return WarmStartUnetSampler(model)
@@ -36,6 +36,21 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
   # Get parameterization from model config (default: epsilon)
   parameterization = model_config.get('diffusion', {}).get('parameterization', 'epsilon')
 
+  # Extract start_t for LSDR or standalone use
+  start_t = sampling_config.get('start_t', None)
+
+  # Validate start_t
+  if start_t is not None and 'diffusion' in model_config:
+    train_T = model_config['diffusion']['T']
+    if not (1 <= start_t <= train_T - 1):
+      raise ValueError(f"start_t must be in [1, {train_T - 1}], got {start_t}")
+
+  # Validate LSDR only works with Gaussian diffusion samplers
+  if 'lsdr' in sampling_config:
+    supported = ['ddpm', 'ddim', 'deis']
+    if sampling_config['sampler'] not in supported:
+      raise ValueError(f"LSDR only supports {supported}, got '{sampling_config['sampler']}'")
+
   if sampling_config['sampler'] == 'ddpm':
     base_sampler = GaussianDiffusionSampler(
       model,
@@ -46,6 +61,7 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
       sampling_config['T'],
       schedule=sampling_config['schedule'],
       parameterization=parameterization,
+      start_t=start_t,
     )
   elif sampling_config['sampler'] == 'ddim':
     base_sampler = DDIMSampler(
@@ -58,6 +74,7 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
       eta=sampling_config['eta'],
       schedule=sampling_config['schedule'],
       parameterization=parameterization,
+      start_t=start_t,
     )
   elif sampling_config['sampler'] == 'deis':
     base_sampler = DEISSampler(
@@ -70,6 +87,7 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
       order=sampling_config['order'],
       schedule=sampling_config['schedule'],
       parameterization=parameterization,
+      start_t=start_t,
     )
   elif sampling_config['sampler'] == 'flow':
     fm_config = model_config.get('flow_matching', {})
@@ -94,6 +112,27 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
   else:
     raise ValueError(f"Unknown sampler: {sampling_config['sampler']}")
 
+  # Wrap with LSDR sampler if lsdr config is present
+  if 'lsdr' in sampling_config and fast_model is not None:
+    beta_1 = model_config['diffusion']['beta_1']
+    beta_T = model_config['diffusion']['beta_T']
+    train_T = model_config['diffusion']['T']
+    betas = torch.linspace(beta_1, beta_T, train_T).float()
+    alphas = 1. - betas
+    alphas_bar = torch.cumprod(alphas, dim=0)
+
+    alpha_bar_start = alphas_bar[start_t].item()
+    sqrt_alpha_bar = alpha_bar_start ** 0.5
+    sqrt_one_minus_alpha_bar = (1 - alpha_bar_start) ** 0.5
+
+    is_warm_start = isinstance(fast_model, WarmStartModel)
+
+    base_sampler = LSDRSampler(
+      base_sampler, fast_model,
+      sqrt_alpha_bar, sqrt_one_minus_alpha_bar,
+      is_warm_start_model=is_warm_start,
+    )
+
   # Wrap with appropriate warm-start sampler if warm_start is enabled
   # warm_start_model is optional - can use cached (mu, sigma) instead
   if 'warm_start' in model_config:
@@ -107,28 +146,35 @@ def build_sampler(model_config, sampling_config, model, warm_start_model=None):
   return base_sampler
 
 
-def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train):
+def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train, start_t=None):
   """
   Create sampling indices for different time schedules.
   Args:
       train_T: total training steps (e.g. 1000)
       sampling_T: number of inference steps (e.g. 50)
       schedule: 'linear', 'cosine', or 'karras'
+      start_t: optional starting timestep (default: train_T - 1).
+               When provided, the schedule starts from start_t instead of the
+               maximum noise level. Used by LSDR for late-stage refinement.
   Returns:
       sampling_indices (torch.LongTensor)
       alphas_bar to use for sampling (torch.Tensor)
   """
+  max_t = start_t if start_t is not None else train_T - 1
+
   if schedule == "linear":
     # Uniform in t
-    indices = torch.linspace(train_T - 1, 0, sampling_T, dtype=torch.long)
+    indices = torch.linspace(max_t, 0, sampling_T, dtype=torch.long)
     alphas_bar = alphas_bar_train[indices]
   elif schedule == "cosine":
     eps = 1e-8
     rho_train = torch.log(alphas_bar_train / (1 - alphas_bar_train + eps))
 
     # Sample evenly in log-SNR space (from high noise to low noise)
-    # rho_train[0] is at t=0 (low noise), rho_train[-1] is at t=T-1 (high noise)
-    rho_target = torch.linspace(rho_train[-1], rho_train[0], sampling_T)
+    # rho_train[0] is at t=0 (low noise), rho_train[max_t] is at start (high noise)
+    rho_start = rho_train[max_t]
+    rho_end = rho_train[0]
+    rho_target = torch.linspace(rho_start, rho_end, sampling_T)
 
     # Map to closest training timesteps
     distances = torch.abs(rho_train.unsqueeze(1) - rho_target.unsqueeze(0))
@@ -137,11 +183,19 @@ def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train):
     alphas_bar = alphas_bar_train[indices]
   elif schedule == "karras":
     # Log-spaced sigmas between high and low noise
-    sigma_min, sigma_max, rho_val = 0.002, 80, 7.0
+    sigma_min = 0.002
+    rho_val = 7.0
+
+    if start_t is not None:
+      alpha_bar_start = alphas_bar_train[start_t]
+      sigma_max = ((1 - alpha_bar_start) / alpha_bar_start) ** 0.5
+    else:
+      sigma_max = 80.0
+
     i = torch.linspace(0, 1, sampling_T, device=alphas_bar_train.device)
 
     min_inv_rho = sigma_min ** (1 / rho_val)
-    max_inv_rho = sigma_max ** (1 / rho_val)
+    max_inv_rho = sigma_max.item() ** (1 / rho_val) if torch.is_tensor(sigma_max) else sigma_max ** (1 / rho_val)
 
     # Interpolate in rho-space and transform back
     sigmas = (max_inv_rho + i * (min_inv_rho - max_inv_rho)) ** rho_val
@@ -170,6 +224,7 @@ class GaussianDiffusionSampler(nn.Module):
     sampling_T=None,
     schedule: str = "linear", # "linear", "cosine", or "karras"
     parameterization: str = "epsilon", # "epsilon" or "v"
+    start_t=None,
   ):
     super().__init__()
 
@@ -185,7 +240,7 @@ class GaussianDiffusionSampler(nn.Module):
     alphas_bar_train = torch.cumprod(alphas, dim=0)
 
     # Get sampling indices
-    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train)
+    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train, start_t=start_t)
     self.sampling_indices = sampling_idx.tolist()
 
     alphas_bar_prev = torch.cat([alphas_bar_t[1:], torch.ones(1, device=alphas_bar_t.device)])
@@ -260,6 +315,7 @@ class DDIMSampler(nn.Module):
     eta=0.0,
     schedule: str = "linear", # "linear", "cosine", or "karras"
     parameterization: str = "epsilon", # "epsilon" or "v"
+    start_t=None,
   ):
     super().__init__()
     self.model = model
@@ -275,7 +331,7 @@ class DDIMSampler(nn.Module):
     alphas_bar_train = torch.cumprod(alphas, 0)
 
     # Get sampling indices
-    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train)
+    sampling_idx, alphas_bar_t = make_sampling_schedule(train_T, self.sampling_T, schedule, alphas_bar_train, start_t=start_t)
     self.sampling_indices = sampling_idx.tolist()
 
     alphas_bar_prev = torch.cat([alphas_bar_t[1:], torch.ones(1, device=alphas_bar_t.device)])
@@ -348,6 +404,7 @@ class DEISSampler(nn.Module):
     order: int = 2,
     schedule: str = "linear",
     parameterization: str = "epsilon", # "epsilon" or "v"
+    start_t=None,
   ):
     super().__init__()
 
@@ -375,7 +432,7 @@ class DEISSampler(nn.Module):
 
     # Precompute sampling schedule
     sampling_indices, alphas_bar_sampling = make_sampling_schedule(
-      train_T, self.sampling_T, schedule, alphas_cumprod
+      train_T, self.sampling_T, schedule, alphas_cumprod, start_t=start_t
     )
 
     # Store sampling timesteps as buffer
@@ -752,3 +809,60 @@ class UnetSampler(nn.Module):
       Predicted sample [B, C, H, W]
     """
     return self.model(condition)
+
+
+class LSDRSampler(nn.Module):
+  """
+  Late-Stage Diffusion Refinement (LSDR) sampler.
+
+  Uses a fast U-Net to predict an initial x_hat_0, then adds noise to
+  timestep start_t, and runs reverse diffusion from start_t to 0
+  using any existing base sampler (DDPM, DDIM, DEIS).
+
+  This is inference-only -- no special training is needed for the diffusion model.
+
+  Args:
+    base_sampler: Any existing diffusion sampler configured to start from start_t.
+    fast_model: A separately-trained fast model that produces x_hat_0 from condition.
+                Can be a regular model (returns tensor) or WarmStartModel (returns mu, sigma).
+    sqrt_alpha_bar_start_t: sqrt(alpha_bar at start_t) for the forward diffusion formula.
+    sqrt_one_minus_alpha_bar_start_t: sqrt(1 - alpha_bar at start_t).
+    is_warm_start_model: Whether fast_model is a WarmStartModel that returns (mu, sigma).
+  """
+
+  def __init__(self, base_sampler, fast_model, sqrt_alpha_bar_start_t,
+               sqrt_one_minus_alpha_bar_start_t, is_warm_start_model=False):
+    super().__init__()
+    self.base_sampler = base_sampler
+    self.fast_model = fast_model
+    self.is_warm_start_model = is_warm_start_model
+    self.register_buffer('sqrt_alpha_bar', torch.tensor(sqrt_alpha_bar_start_t).float())
+    self.register_buffer('sqrt_one_minus_alpha_bar', torch.tensor(sqrt_one_minus_alpha_bar_start_t).float())
+
+  @torch.no_grad()
+  def forward(self, x_T_ignored, condition, mu=None, sigma=None):
+    """
+    Sample using LSDR pipeline.
+
+    Args:
+      x_T_ignored: Ignored. LSDR generates its own noisy input from the fast model.
+      condition: Conditioning tensor [B, C, H, W]
+      mu: Unused (API compatibility with evaluator warm_start branch)
+      sigma: Unused (API compatibility with evaluator warm_start branch)
+
+    Returns:
+      Denoised sample [B, 1, H, W]
+    """
+    # Step 1: Get x_hat_0 from fast model
+    if self.is_warm_start_model:
+      x_hat_0, _ = self.fast_model(condition)
+    else:
+      x_hat_0 = self.fast_model(condition)
+
+    # Step 2: Forward diffusion to start_t
+    # x_t = sqrt(alpha_bar_t) * x_hat_0 + sqrt(1 - alpha_bar_t) * eps
+    eps = torch.randn_like(x_hat_0)
+    x_start_t = self.sqrt_alpha_bar * x_hat_0 + self.sqrt_one_minus_alpha_bar * eps
+
+    # Step 3: Run base sampler from start_t to 0
+    return self.base_sampler(x_start_t, condition)

@@ -103,6 +103,27 @@ class Sampler:
       self.warm_start_model.load_state_dict(ws_checkpoint['ema_model_state_dict'])
       self.warm_start_model.eval()
 
+    # Load fast model for LSDR sampling
+    self.fast_model = None
+    if 'lsdr' in self.sampling_config:
+      fast_model_name = self.sampling_config['lsdr']['fast_model']
+      fast_model_config = read_model_config(fast_model_name)
+
+      if 'warm_start_model' in fast_model_config:
+        self.fast_model = build_warm_start_model(
+          fast_model_config,
+          self.conditioning_selector
+        ).to(self.device)
+      else:
+        self.fast_model = build_model(
+          fast_model_config,
+          self.conditioning_selector
+        ).to(self.device)
+
+      fast_checkpoint = load_last_checkpoint(fast_model_name)
+      self.fast_model.load_state_dict(fast_checkpoint['ema_model_state_dict'])
+      self.fast_model.eval()
+
     self.evaluator = Evaluator(
       self.dataloader,
       self.model_config,
@@ -111,6 +132,7 @@ class Sampler:
       rank=self.rank,
       world_size=self.world_size,
       warm_start_model=self.warm_start_model,
+      fast_model=self.fast_model,
     )
 
   def sample(self):
