@@ -6,7 +6,6 @@ from data import (
   GDPHMM_OAR_SDM_MIN, GDPHMM_OAR_SDM_MAX,
   GDPHMM_DOSE_MAX
 )
-from warm_start import denormalize_ptv_sdm, denormalize_oar_sdm
 
 
 def denormalize_ptv_sdm(ptv_sdm_normalized):
@@ -236,7 +235,7 @@ class AnalyticalDoseModel(nn.Module):
     base_factor = 0.05
     length_scale = 50.0
     epistemic = base_factor * dose * (1 + min_abs_sdm / length_scale)
-    epistemic = epistemic.clamp(0, 0.3 * dose)
+    epistemic = torch.clamp(epistemic, min=torch.zeros_like(epistemic), max=0.3 * dose)
 
     # 3. Combine uncertainties
     uncertainty = torch.sqrt(aleatoric_std ** 2 + epistemic ** 2)
