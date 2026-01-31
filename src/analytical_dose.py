@@ -162,21 +162,25 @@ class AnalyticalDoseModel(nn.Module):
     dose = torch.zeros(B, 1, H, W, device=condition.device, dtype=condition.dtype)
 
     for i in range(3):
-      ptv_dose = prescribed_doses_gy[:, i:i+1]  # [B, 1, H, W]
+      ptv_dose_map = prescribed_doses_gy[:, i:i+1]  # [B, 1, H, W]
       sdm_mm = ptv_sdm_mm[:, i:i+1]  # [B, 1, H, W]
 
-      if ptv_dose.max() == 0:
+      # Extract prescribed dose as a scalar per batch element
+      # (ptv_dose_map is 0 outside the PTV contour, so we need the max value)
+      prescribed_value = ptv_dose_map.amax(dim=(-2, -1), keepdim=True)  # [B, 1, 1, 1]
+
+      if prescribed_value.max() == 0:
         continue
 
       inside_mask = sdm_mm > 0
-      dose_contribution = torch.where(inside_mask, ptv_dose, torch.zeros_like(ptv_dose))
+      dose_contribution = torch.where(inside_mask, prescribed_value, torch.zeros_like(sdm_mm))
 
       outside_mask = sdm_mm < 0
       distance_outside = -sdm_mm
       falloff = torch.exp(-distance_outside / falloff_constant)
       dose_contribution = torch.where(
         outside_mask,
-        ptv_dose * falloff,
+        prescribed_value * falloff,
         dose_contribution
       )
 
