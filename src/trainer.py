@@ -23,7 +23,13 @@ from warm_start import WarmStartCachedDataset, WarmStartDiffusionTrainerModule, 
 
 
 class DiffusionModelTrainerModule(nn.Module):
-  def __init__(self, denoising_model, beta_1, beta_T, T):
+  def __init__(
+    self,
+    denoising_model,
+    beta_1,
+    beta_T,
+    T,
+  ):
     super().__init__()
 
     self.model = denoising_model
@@ -165,7 +171,7 @@ class InDITrainerModule(nn.Module):
     linear_bias=0.5,
     noise_schedule='constant',
     epsilon=0.01,
-    loss_type='l1',
+    loss_type='l2',
     time_scale=1000.0
   ):
     super().__init__()
@@ -325,15 +331,21 @@ class RectifiedFlowTrainerModule(nn.Module):
 
 
 class UnetTrainerModule(nn.Module):
-  def __init__(self, model):
+  def __init__(self, model, loss_type):
     super().__init__()
 
     self.model = model
+    self.loss_type = loss_type
 
   def forward(self, x, condition):
     output = self.model(condition)
     output = F.relu(output)
-    return F.l1_loss(output, x, reduction='mean')
+
+    if self.loss_type == 'l1':
+      loss = F.l1_loss(output, x, reduction='mean')
+    else:  # l2
+      loss = F.mse_loss(output, x, reduction='mean')
+    return loss
 
 
 class C3DTrainerModule(nn.Module):
@@ -477,14 +489,15 @@ class Trainer:
           linear_bias=indi_config.get('linear_bias', 0.5),
           noise_schedule=indi_config.get('noise_schedule', 'constant'),
           epsilon=indi_config.get('epsilon', 0.01),
-          loss_type=indi_config.get('loss_type', 'l1'),
+          loss_type=indi_config.get('loss_type', 'l2'),
           time_scale=indi_config.get('time_scale', 1000.0)
         ).to(self.device)
       elif 'c3d' in self.config:
         alpha = self.config['c3d'].get('alpha', 0.5)
         self.model = C3DTrainerModule(self.net_model, alpha=alpha).to(self.device)
       else:
-        self.model = UnetTrainerModule(self.net_model).to(self.device)
+        loss_type = self.config.get('loss_type', 'l1')
+        self.model = UnetTrainerModule(self.net_model, loss_type=loss_type).to(self.device)
 
     # Phase 2: Wrap dataset and trainer for warm-start diffusion or flow matching
     if 'warm_start' in self.config:
