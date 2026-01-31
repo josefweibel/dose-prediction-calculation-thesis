@@ -1,9 +1,9 @@
 sampler: ddim
-T: 5
+T: 1000
 schedule: linear
 eta: 0
 
-start_t: 4
+start_t: 5
 lsdr:
   fast_model: 107-deeplabv3plus
 
