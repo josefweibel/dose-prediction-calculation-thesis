@@ -99,8 +99,10 @@ class Sampler:
         self.conditioning_selector
       ).to(self.device)
 
-      ws_checkpoint = load_last_checkpoint(ws_model_name)
-      self.warm_start_model.load_state_dict(ws_checkpoint['ema_model_state_dict'])
+      if 'analytical_dose' not in self.model_config:
+        ws_checkpoint = load_last_checkpoint(ws_model_name)
+        self.warm_start_model.load_state_dict(ws_checkpoint['ema_model_state_dict'])
+
       self.warm_start_model.eval()
 
     # Load fast model for LSDR sampling
