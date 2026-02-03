@@ -1,5 +1,5 @@
 sampler: ddim
-T: 1000
+T: 10
 schedule: linear
 eta: 0
 

@@ -160,7 +160,7 @@ def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train, star
       sampling_indices (torch.LongTensor)
       alphas_bar to use for sampling (torch.Tensor)
   """
-  max_t = start_t if start_t is not None else train_T - 1
+  max_t = start_t - 1 if start_t is not None else train_T - 1
 
   if schedule == "linear":
     # Uniform in t
@@ -187,7 +187,7 @@ def make_sampling_schedule(train_T, sampling_T, schedule, alphas_bar_train, star
     rho_val = 7.0
 
     if start_t is not None:
-      alpha_bar_start = alphas_bar_train[start_t]
+      alpha_bar_start = alphas_bar_train[max_t]
       sigma_max = ((1 - alpha_bar_start) / alpha_bar_start) ** 0.5
     else:
       sigma_max = 80.0
