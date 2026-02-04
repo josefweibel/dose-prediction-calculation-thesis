@@ -18,6 +18,9 @@ if __name__ == '__main__':
   parser.add_argument('--sampling', type=str, required=True, help='Name of the sampling configuration file (without .yaml extension)')
   parser.add_argument('--data-split', type=str, choices=['train', 'valid', 'test'], default='test', help='Data split to use for sampling.')
   parser.add_argument('--epoch', type=int, default=None, help='Use checkpoint from this epoch.')
+  parser.add_argument('--metrics', type=str, nargs='+', default=None, help='Metric name patterns to recalculate (fnmatch-style, e.g. "mse" "dvh*" "*/PTV"). If not set, all metrics are recalculated.')
+  parser.add_argument('--skip-slice-metrics', action='store_true', help='Skip recalculation of 2D slice metrics.')
+  parser.add_argument('--skip-volume-metrics', action='store_true', help='Skip recalculation of 3D volume metrics.')
   parser.add_argument('--distributed', action='store_true', help='Set to True to use distributed computation across multiple GPUs.')
   args = parser.parse_args()
 
@@ -65,6 +68,9 @@ if __name__ == '__main__':
         rank=rank,
         world_size=world_size,
         local_rank=local_rank,
+        metric_names=args.metrics,
+        skip_slice_metrics=args.skip_slice_metrics,
+        skip_volume_metrics=args.skip_volume_metrics,
       )
 
       def cleanup():
@@ -96,6 +102,9 @@ if __name__ == '__main__':
       sampling_name=args.sampling,
       data_split=args.data_split,
       epoch=args.epoch,
+      metric_names=args.metrics,
+      skip_slice_metrics=args.skip_slice_metrics,
+      skip_volume_metrics=args.skip_volume_metrics,
     )
 
     def cleanup():

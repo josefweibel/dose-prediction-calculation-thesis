@@ -1634,6 +1634,20 @@ class ConstraintLibrary:
     ))
 
     # ============================================================================
+    # ORAL CAVITY
+    # ============================================================================
+    self.add_constraint(Constraint(
+      organ='OralCavity',
+      constraint_type=ConstraintType.V_DOSE,
+      threshold_value=30,
+      limit_value=73,
+      comparison='<',
+      evidence_level=EvidenceLevel.B,
+      fractionation=FractionationType.CONVENTIONAL,
+      notes='Limit D_MEAN to uninvolved oral cavity'
+    ))
+
+    # ============================================================================
     # PAROTID GLAND
     # ============================================================================
     self.add_constraint(Constraint(

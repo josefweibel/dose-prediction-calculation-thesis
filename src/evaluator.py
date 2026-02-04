@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import contextlib
 import numpy as np
+from fnmatch import fnmatch
 
 from metrics import (
 	DVHScore,
@@ -33,7 +34,10 @@ from metrics import (
 from model_sampler import build_sampler
 from data import GDPHMM_OAR_V3
 from constraints import FractionationType, ConstraintGrade
-from warm_start import WarmStartCachedDataset
+
+
+GDPHMM_UNIQUE_OAR = set(GDPHMM_OAR_V3) - {'Parotids-PTV', 'Submand-PTV'}
+
 
 def compute_metrics(metrics, preds, target, structure, dataset):
   """
@@ -104,7 +108,7 @@ def compute_metrics(metrics, preds, target, structure, dataset):
   return results
 
 
-def build_slice_metrics(dataset, device, include_region_metrics=True):
+def build_slice_metrics(dataset, device, include_region_metrics=True, metric_names=None):
   """Build 2D metrics for slice-by-slice evaluation."""
   dose_range = dataset.dose_range[1] - dataset.dose_range[0]
   dose_min_max = dataset.dose_range  # (min, max) tuple
@@ -178,36 +182,36 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
 
   # Add constraint-based metrics
   metrics['csr_all'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_mandatory'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.MANDATORY,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_recommended'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.RECOMMENDED,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_optimal'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.OPTIMAL,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['csr_acceptable'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.ACCEPTABLE,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['agreement'] = ConstraintAgreementScore(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
@@ -225,7 +229,10 @@ def build_slice_metrics(dataset, device, include_region_metrics=True):
       )
       metrics[f'compliance/{region_name}'] = region_compliance
 
-  return {k: v.to(device) for k, v in metrics.items()}
+  metrics = {k: v.to(device) for k, v in metrics.items()}
+  if metric_names is not None:
+    metrics = filter_metrics(metrics, metric_names)
+  return metrics
 
 
 def build_volume_metrics(dataset, device, include_region_metrics=True):
@@ -294,36 +301,36 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
 
   # Add constraint-based metrics
   metrics['vol_csr_all'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['vol_csr_mandatory'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.MANDATORY,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['vol_csr_recommended'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.RECOMMENDED,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['vol_csr_optimal'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.OPTIMAL,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['vol_csr_acceptable'] = ConstraintSatisfactionRate(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     grade_filter=ConstraintGrade.ACCEPTABLE,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
   metrics['vol_agreement'] = ConstraintAgreementScore(
-    organ_names=GDPHMM_OAR_V3,
+    organ_names=GDPHMM_UNIQUE_OAR,
     fractionation=FractionationType.CONVENTIONAL,
     sync_on_compute=False
   )
@@ -343,7 +350,26 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
   return {k: v.to(device) for k, v in metrics.items()}
 
 
-def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1):
+def filter_metrics(metrics, metric_names):
+  """Filter a metrics dict to only include those matching the given name patterns.
+
+  Args:
+    metrics: Dictionary of metric name to metric instance.
+    metric_names: List of metric name patterns (fnmatch-style, e.g. 'mse', 'dvh*', '*/PTV').
+
+  Returns:
+    Filtered dictionary containing only matching metrics.
+  """
+  filtered = {}
+  for key, value in metrics.items():
+    for pattern in metric_names:
+      if fnmatch(key, pattern):
+        filtered[key] = value
+        break
+  return filtered
+
+
+def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1, metric_names=None):
   """
   Compute volume metrics for all combined volume files in a samples directory.
 
@@ -353,6 +379,8 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1):
     device: Device to run computations on
     rank: Process rank for distributed computing
     world_size: Total number of processes for distributed computing
+    metric_names: Optional list of metric name patterns (fnmatch) to include.
+                  If None, all metrics are computed.
 
   Returns:
     DataFrame with volume metrics for each sample
@@ -376,6 +404,8 @@ def compute_volume_metrics(samples_path, dataset, device, rank=0, world_size=1):
   print(f'Rank {rank} processing {len(rank_volume_files)} volumes')
 
   metrics = build_volume_metrics(dataset, device)
+  if metric_names is not None:
+    metrics = filter_metrics(metrics, metric_names)
   volume_metrics = []
 
   for volume_file in tqdm(rank_volume_files, desc=f'Computing volume metrics (Rank {rank})', disable=rank != 0):

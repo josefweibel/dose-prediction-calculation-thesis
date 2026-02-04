@@ -21,6 +21,9 @@ class MetricsRecalculator:
     rank=None,
     world_size=None,
     local_rank=None,
+    metric_names=None,
+    skip_slice_metrics=False,
+    skip_volume_metrics=False,
   ):
     self.model_config = read_model_config(model_name)
     self.sampling_config = read_sampling_config(sampling_name)
@@ -30,17 +33,42 @@ class MetricsRecalculator:
     self.world_size = world_size if world_size is not None else 1
     self.is_distributed = rank is not None and world_size is not None
     self.is_main_process = not self.is_distributed or rank == 0
+    self.metric_names = metric_names
+    self.skip_slice_metrics = skip_slice_metrics
+    self.skip_volume_metrics = skip_volume_metrics
 
     self.dataset = create_gdphmm_dataset(self.model_config, data_split)
 
     self.device = detect_device()
-    self.metrics = build_slice_metrics(self.dataset, self.device)
+
+    if not skip_slice_metrics:
+      self.metrics = build_slice_metrics(self.dataset, self.device, metric_names=metric_names)
 
     self.samples_path = SAMPLES_PATH / model_name / sampling_name / f'{data_split}_{epoch}'
     self.old_scores = pd.read_csv(self.samples_path / f'_sample_metrics.csv')
 
+  def _merge_metrics(self, old_df, new_df, key_cols):
+    """Merge new metric columns into old DataFrame, keeping non-recomputed columns."""
+    metric_cols = [c for c in new_df.columns if c not in key_cols]
+    merged = old_df.set_index(key_cols).copy()
+    new_indexed = new_df.set_index(key_cols)
+
+    for col in metric_cols:
+      merged[col] = new_indexed[col]
+
+    return merged.reset_index()
+
   def calculate(self):
-    # Recalculate 2D slice metrics
+    if not self.skip_slice_metrics:
+      self._calculate_slice_metrics()
+
+    if self.is_distributed:
+      dist.barrier()
+
+    if not self.skip_volume_metrics:
+      self._calculate_volume_metrics()
+
+  def _calculate_slice_metrics(self):
     if self.is_main_process:
       print('\nRecalculating 2D slice metrics...')
 
@@ -104,7 +132,13 @@ class MetricsRecalculator:
       (self.samples_path / '_sample_metrics.csv').rename(self.samples_path / '_sample_metrics_old.csv')
       (self.samples_path / '_overall_metrics.csv').rename(self.samples_path / '_overall_metrics_old.csv')
 
-      sample_metrics = pd.DataFrame(sample_metrics).drop_duplicates(['file_name', 'slice_index'])
+      new_df = pd.DataFrame(sample_metrics).drop_duplicates(['file_name', 'slice_index'])
+
+      if self.metric_names is not None:
+        sample_metrics = self._merge_metrics(self.old_scores, new_df, ['file_name', 'slice_index'])
+      else:
+        sample_metrics = new_df
+
       overall_metrics = sample_metrics.mean(numeric_only=True)
 
       sample_metrics.to_csv(self.samples_path / '_sample_metrics.csv', index=False)
@@ -113,14 +147,15 @@ class MetricsRecalculator:
     if self.is_distributed:
       dist.barrier()
 
-    # Recalculate volume metrics
+  def _calculate_volume_metrics(self):
     print(f'\nRank {self.rank}: Recalculating volume metrics...')
     volume_metrics = compute_volume_metrics(
       self.samples_path,
       self.dataset,
       self.device,
       rank=self.rank,
-      world_size=self.world_size
+      world_size=self.world_size,
+      metric_names=self.metric_names,
     )
 
     if self.is_distributed:
@@ -128,14 +163,20 @@ class MetricsRecalculator:
 
     if self.is_main_process:
       if len(volume_metrics) > 0:
-        # Compute overall volume metrics
+        old_volume_path = self.samples_path / '_volume_metrics.csv'
+        old_overall_volume_path = self.samples_path / '_overall_volume_metrics.csv'
+
+        if self.metric_names is not None and old_volume_path.exists():
+          old_volume_df = pd.read_csv(old_volume_path)
+          volume_metrics = self._merge_metrics(old_volume_df, volume_metrics, ['file_name'])
+
         overall_volume_metrics = volume_metrics.mean(numeric_only=True)
 
         # Backup old volume metrics if they exist
-        if (self.samples_path / '_volume_metrics.csv').exists():
-          (self.samples_path / '_volume_metrics.csv').rename(self.samples_path / '_volume_metrics_old.csv')
-        if (self.samples_path / '_overall_volume_metrics.csv').exists():
-          (self.samples_path / '_overall_volume_metrics.csv').rename(self.samples_path / '_overall_volume_metrics_old.csv')
+        if old_volume_path.exists():
+          old_volume_path.rename(self.samples_path / '_volume_metrics_old.csv')
+        if old_overall_volume_path.exists():
+          old_overall_volume_path.rename(self.samples_path / '_overall_volume_metrics_old.csv')
 
         # Save volume metrics
         volume_metrics.to_csv(self.samples_path / '_volume_metrics.csv', index=False)
@@ -154,5 +195,3 @@ class MetricsRecalculator:
     self.dataset.finish()
 
     torch.cuda.empty_cache()
-
-
