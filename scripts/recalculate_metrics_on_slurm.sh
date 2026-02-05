@@ -12,6 +12,8 @@ MODEL_NAME=$1
 SAMPLING_NAME=$2
 DATA_SPLIT=$3
 EPOCH=$4
+shift 4
+EXTRA_ARGS="$*"
 
 if [ -z "$MODEL_NAME" ]; then
   echo "no model name provided" 1>&2
@@ -22,6 +24,8 @@ if [ -z "$SAMPLING_NAME" ]; then
   echo "no sampling name provided" 1>&2
   exit 1
 fi
+
+echo "Extra arguments: ${EXTRA_ARGS}"
 
 mkdir -p "${HOME_PATH}/images"
 if [ ! -f "${HOME_PATH}/images/dose-prediction-thesis.sif" ]; then
@@ -115,7 +119,7 @@ srun \
     --bind /dev/infiniband:/dev/infiniband \
     --pwd /work \
     ${HOME_PATH}/images/dose-prediction-thesis.sif \
-    bash -c "PYTHONPATH=/work/src python scripts/recalculate_metrics.py --model ${MODEL_NAME} --sampling ${SAMPLING_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH} --distributed"
+    bash -c "PYTHONPATH=/work/src python scripts/recalculate_metrics.py --model ${MODEL_NAME} --sampling ${SAMPLING_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH} --distributed ${EXTRA_ARGS}"
 '
 
 echo "job ${MODEL_NAME} ${SAMPLING_NAME} completed"
