@@ -28,7 +28,7 @@ conditioning:
     - ptv_sdm
     - oar_v3_sdm
 
-mixed_precision: false
+mixed_precision: true
 num_workers: 4
 prefetch_factor: 12
 prefetch_on_gpu: true

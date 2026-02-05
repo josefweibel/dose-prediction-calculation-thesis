@@ -31,7 +31,7 @@ warm_start:
   model: 132-warmstart-deeplabv3plus
   warmth_range: [0.0, 1.0]            # Training: sample w ~ U[range]
   warmth: 1.0                         # Inference: fixed w value (1.0 = full warm-start)
-  cache_valid_volumes: true 
+  cache_valid_volumes: true
 
 conditioning:
   types:
@@ -41,7 +41,7 @@ conditioning:
     - ptv_sdm
     - oar_v3_sdm
 
-mixed_precision: false
+mixed_precision: true
 num_workers: 4
 prefetch_factor: 12
 prefetch_on_gpu: true
