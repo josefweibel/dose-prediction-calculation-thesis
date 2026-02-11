@@ -6,6 +6,7 @@ data:
   valid_limit: 512
 
 batch_size: 128
+epochs: 1
 
 warm_start_model:
   min_sigma: 0.01
