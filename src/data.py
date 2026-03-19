@@ -44,6 +44,11 @@ GDPHMM_OAR_V3 = [
 ]
 
 
+# Volume Axes (for reference):
+# - x: Axial (top to bottom)
+# - y: Coronal (front to back)
+# - z: Sagittal (left to right)
+
 
 class StructureSelector:
   """

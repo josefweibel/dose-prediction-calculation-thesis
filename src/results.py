@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import List, Dict, Optional
 from itertools import cycle
+from scipy.stats import rankdata
+from matplotlib.colors import to_rgba, BoundaryNorm
+from matplotlib.patches import Patch
+import matplotlib.gridspec as gridspec
 from pathlib import Path
 
 from data import GDPHMM_OAR, GDPHMM_DOSE_MAX, GDPHMM_OAR_V3
@@ -20,11 +24,11 @@ SAMPLES_PATH = Path(__file__).parents[1] / 'samples'
 
 METRIC_LABELS = {
   'mse': 'Mean Squared Error (MSE)',
-  'rmse': 'Root Mean Squared Error (RMSE)',
+  'rmse': 'Root Mean Squared Error',
   'psnr': 'Peak Signal-to-Noise Ratio (PSNR)',
   'ssim': 'Structural Similarity Index Measure (SSIM)',
   'ms_ssim': 'Multi-Scale Structural Similarity Index Measure (MS-SSIM)',
-  'dvh': 'Dose-Volume Histogram Score (DVH Score)',
+  'dvh': 'DVH Score',
   'dose_score': 'Dose Score (MAE)',
   'homogeneity_index': 'Homogeneity Index',
   'mse_body': 'Mean Squared Error (MSE) Body',
@@ -33,16 +37,19 @@ METRIC_LABELS = {
   'dose_score_body': 'Dose Score (MAE) Body',
   'var_laplacian_diff': 'Sharpness Metric (Variance of Laplacian Difference)',
   'mae_challenge': 'Mean Absolute Error (MAE) Challenge',
-  'agreement/agreement_all': 'Criteria Agreement',
+  'agreement/agreement_all': 'OAR Constraint Agreement',
+  'disagreement/disagreement_all': 'OAR Constraint Disagreement',
+  'agreement/agreement_all_percentage': 'OAR Constraint Agreement',
+  'disagreement/disagreement_all_percentage': 'OAR Constraint Disagreement',
   'gamma_3_3/pass_rate': 'Gamma Index 3%/3mm Pass Rate',
   'gamma_2_2/pass_rate': 'Gamma Index 2%/2mm Pass Rate',
   'gamma_3_3/pass_rate': 'Gamma Index 3%/3mm Pass Rate',
   'gamma_5_5/pass_rate': 'Gamma Index 5%/5mm Pass Rate',
-  'dvh_auc/OAR/diff': 'DVH Area Between Curves for all OARs',
-  'mean_dose/high/abs_diff': 'Mean Dose Diff. (High Dose PTV)',
-  'homogeneity_index/high/abs_diff': 'Homogeneity Index Diff. (High Dose PTV)',
-  'paddick_conformity_index/high/abs_diff': 'Paddick Conformity Index Diff. (High Dose PTV)',
-  'gradient_index/high/abs_diff': 'Paddick Gradient Index Diff. (High Dose PTV)',
+  'dvh_auc/OAR/diff': 'OAR DVH Area Between Curves',
+  'mean_dose/high/abs_diff': 'PTV Dose Distance',
+  'homogeneity_index/high/abs_diff': 'Homogeneity Index Distance',
+  'paddick_conformity_index/high/abs_diff': 'Paddick Conformity Index Distance',
+  'gradient_index/high/abs_diff': 'Paddick Gradient Index Distance',
 }
 
 METRIC_ABBRS = {
@@ -51,7 +58,7 @@ METRIC_ABBRS = {
   'psnr': 'PSNR',
   'ssim': 'SSIM',
   'ms_ssim': 'MS-SSIM',
-  'dvh': 'DVH',
+  'dvh': 'DVH Score',
   'dose_score': 'Dose Score (MAE)',
   'homogeneity_index': 'HI',
   'mse_body': 'MSE Body',
@@ -61,15 +68,48 @@ METRIC_ABBRS = {
   'var_laplacian_diff': 'Sharpness',
   'mae_challenge': 'MAE Challenge',
   'agreement/agreement_all': 'Agreement',
+  'disagreement/disagreement_all': 'Disagreement',
+  'agreement/agreement_all_percentage': 'Agreement',
+  'disagreement/disagreement_all_percentage': 'Disagreement',
   'gamma_5_5/pass_rate': 'Gamma 5%/5mm',
   'gamma_3_3/pass_rate': 'Gamma 3%/3mm',
   'gamma_2_2/pass_rate': 'Gamma 2%/2mm',
   'gamma_1_1/pass_rate': 'Gamma 1%/1mm',
-  'dvh_auc/OAR/diff': 'DVH ABC (OAR)',
-  'mean_dose/high/abs_diff': 'Mean Dose Diff (PTV)',
-  'homogeneity_index/high/abs_diff': 'HI Diff (PTV)',
-  'paddick_conformity_index/high/abs_diff': 'PCI Diff (PTV)',
-  'gradient_index/high/abs_diff': 'PGI Diff (PTV)',
+  'dvh_auc/OAR/diff': 'OAR DVH\nABC',
+  'mean_dose/high/abs_diff': 'PTV Dose\nDistance',
+  'homogeneity_index/high/abs_diff': 'HI\nDistance',
+  'paddick_conformity_index/high/abs_diff': 'Paddick CI\nDistance',
+  'gradient_index/high/abs_diff': 'Paddick GI\nDistance',
+}
+
+METRIC_UNITS = {
+  'mse': None,
+  'rmse': 'Gy',
+  'psnr': None,
+  'ssim': None,
+  'ms_ssim': None,
+  'dvh': 'Gy',
+  'dose_score': 'Gy',
+  'homogeneity_index': None,
+  'mse_body': None,
+  'rmse_body': 'Gy',
+  'psnr_body': None,
+  'dose_score_body': 'Gy',
+  'var_laplacian_diff': None,
+  'mae_challenge': None,
+  'agreement/agreement_all': None,
+  'disagreement/disagreement_all': None,
+  'agreement/agreement_all_percentage': '%',
+  'disagreement/disagreement_all_percentage': '%',
+  'gamma_5_5/pass_rate': '%',
+  'gamma_3_3/pass_rate': '%',
+  'gamma_2_2/pass_rate': '%',
+  'gamma_1_1/pass_rate': '%',
+  'dvh_auc/OAR/diff': 'Gy',
+  'mean_dose/high/abs_diff': 'Gy',
+  'homogeneity_index/high/abs_diff': None,
+  'paddick_conformity_index/high/abs_diff': None,
+  'gradient_index/high/abs_diff': None,
 }
 
 METRICS_DEFAULT = [
@@ -79,12 +119,12 @@ METRICS_DEFAULT = [
 ]
 
 METRICS_PRED = [
-  'vol_agreement/agreement_all', 'vol_dvh_auc/OAR/diff', 'vol_dvh',
+  'vol_disagreement/disagreement_all_percentage', 'vol_dvh_auc/OAR/diff', 'vol_dvh',
   'vol_mean_dose/high/abs_diff', 'vol_paddick_conformity_index/high/abs_diff', 'vol_gradient_index/high/abs_diff'
 ]
 
 METRICS_PLAN = [
-  'vol_rmse', 'vol_gamma_3_3/pass_rate', 'vol_agreement/agreement_all', 'vol_dvh_auc/OAR/diff',
+  'vol_rmse', 'vol_gamma_3_3/pass_rate', 'vol_disagreement/disagreement_all_percentage', 'vol_dvh_auc/OAR/diff',
 ]
 
 METRICS_PLAN_EXTENDED = METRICS_PLAN + [
@@ -98,7 +138,7 @@ HIGHER_IS_BETTER = ['psnr', 'ssim', 'ms_ssim', 'psnr_body', 'var_laplacian_diff'
 
 # Patterns for volume metrics where higher values are better
 HIGHER_IS_BETTER_PATTERNS = [
-  'agreement',
+  'agreement/agreement_all',
   'conformity_index',
   'csr_pred',
   'csr_target',
@@ -147,13 +187,15 @@ def get_metric_label(metric_name: str) -> str:
 
   return metric_name
 
-def get_metric_abbr(metric_name: str) -> str:
+def get_metric_abbr(metric_name: str, with_lb=False, with_unit=True) -> str:
   """
   Get a human-readable abbreviation for a given metric name.
 
   Args:
     metric_name: Name of the metric (can be simple like 'rmse' or
                   compound like 'vol_agreement/agreement_all')
+    with_lb: If True, use line breaks between name and unit.
+    with_unit: If True, append the unit (e.g. [Gy]) to the abbreviation.
 
   Returns:
     A human-readable abbreviation for the metric.
@@ -161,14 +203,56 @@ def get_metric_abbr(metric_name: str) -> str:
   if metric_name.startswith('vol_'):
     metric_name = metric_name[4:]  # Remove 'vol_' prefix
 
+  matched_key = None
   if metric_name in METRIC_ABBRS:
-    return METRIC_ABBRS[metric_name]
+    matched_key = metric_name
+  else:
+    for key in METRIC_ABBRS.keys():
+      if key.startswith(metric_name):
+        matched_key = key
+        break
 
-  for key in METRIC_ABBRS.keys():
+  if matched_key is not None:
+    abbr = METRIC_ABBRS[matched_key]
+    unit = METRIC_UNITS.get(matched_key) if with_unit else None
+  else:
+    abbr = metric_name
+    unit = None
+
+  if unit:
+    if with_lb and '\n' in abbr:
+      abbr = f'{abbr} [{unit}]'
+    else:
+      sep = '\n' if with_lb else ' '
+      abbr = f'{abbr}{sep}[{unit}]'
+
+  if not with_lb:
+    abbr = abbr.replace('\n', ' ')
+
+  return abbr
+
+def get_metric_unit(metric_name: str) -> str | None:
+  """
+  Get the unit for a given metric name.
+
+  Args:
+    metric_name: Name of the metric (can be simple like 'rmse' or
+                  compound like 'vol_agreement/agreement_all')
+
+  Returns:
+    The unit string (e.g. 'Gy', '%') or None if the metric has no unit.
+  """
+  if metric_name.startswith('vol_'):
+    metric_name = metric_name[4:]
+
+  if metric_name in METRIC_UNITS:
+    return METRIC_UNITS[metric_name]
+
+  for key in METRIC_UNITS.keys():
     if key.startswith(metric_name):
-      return METRIC_ABBRS[key]
+      return METRIC_UNITS[key]
 
-  return metric_name
+  return None
 
 def is_higher_better(metric_name: str) -> bool:
   """
@@ -346,7 +430,7 @@ def iqr_limits_from_df(
   margin_value = margin * (vmax - vmin)
   return vmin, vmax, min(whisker_mins) - margin_value, vmax + margin_value
 
-def setup_fig_axes(metrics):
+def setup_fig_axes(metrics, sharey=False):
   if len(metrics) % 4 == 0:
     n_cols = 4
     n_rows = len(metrics) // 4
@@ -355,7 +439,7 @@ def setup_fig_axes(metrics):
     n_cols = min(3, n_metrics)
     n_rows = (n_metrics + n_cols - 1) // n_cols
 
-  fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+  fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows), squeeze=False, sharey=sharey)
   axes = axes.flatten()
   return fig, axes
 
@@ -623,6 +707,9 @@ class ModelResults(BaseResults):
     self.volume_metrics['vol_dose_score/OAR'] = self.volume_metrics[[f'vol_dose_score/{organ}' for organ in GDPHMM_OAR_V3]].mean(axis=1)
     self.volume_metrics['vol_dvh/OAR'] = self.volume_metrics[[f'vol_dvh/{organ}' for organ in GDPHMM_OAR_V3]].mean(axis=1)
     self.volume_metrics['vol_dvh_auc/OAR/diff'] = self.volume_metrics[[f'vol_dvh_auc/{organ}/diff' for organ in GDPHMM_OAR_V3]].mean(axis=1)
+    self.volume_metrics['vol_disagreement/disagreement_all'] = 1 - self.volume_metrics['vol_agreement/agreement_all']
+    self.volume_metrics['vol_agreement/agreement_all_percentage'] = self.volume_metrics['vol_agreement/agreement_all'] * 100
+    self.volume_metrics['vol_disagreement/disagreement_all_percentage'] = self.volume_metrics['vol_disagreement/disagreement_all'] * 100
 
     # For uniform interface with ModelComparison
     self.results_list = [self]
@@ -981,7 +1068,7 @@ class ModelComparison(BaseResults):
       'or access individual results via results_list[i].for_sample(sample)'
     )
 
-  def plot_metric_distribution(self, metric, ax=None, sort=False, outliers=True):
+  def plot_metric_distribution(self, metric, ax=None, sort=False, outliers=True, skip_colors=0):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
@@ -997,6 +1084,12 @@ class ModelComparison(BaseResults):
       groups.extend([group] * len(result.volume_metrics[metric]))
 
     df = pd.DataFrame({'model': labels, 'value': data, 'group': groups})
+
+    palette = None
+    if skip_colors > 0:
+      prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+      unique_groups = df['group'].unique()
+      palette = {g: prop_cycle[(i + skip_colors) % len(prop_cycle)] for i, g in enumerate(unique_groups)}
 
     # Sort by median, then IQR, then range if requested
     if sort:
@@ -1014,39 +1107,46 @@ class ModelComparison(BaseResults):
 
     medianprops = {'color': 'black', 'linewidth': 2}
     if outliers:
-      sns.boxplot(x='model', y='value', data=df, ax=ax, order=order, hue='group', dodge=False, medianprops=medianprops)
+      sns.boxplot(x='value', y='model', data=df, ax=ax, order=order, hue='group', dodge=False, medianprops=medianprops, palette=palette)
     else:
-      sns.boxplot(x='model', y='value', data=df, ax=ax, order=order, hue='group', dodge=False, whis=1.5, medianprops=medianprops)
-      vmin, vmax, ymin, ymax = iqr_limits_from_df(df, 'model', 'value', whis=1.5)
-      ax.set_ylim(ymin, ymax)
+      sns.boxplot(x='value', y='model', data=df, ax=ax, order=order, hue='group', dodge=False, whis=1.5, medianprops=medianprops, palette=palette)
+      vmin, vmax, lim_min, lim_max = iqr_limits_from_df(df, 'model', 'value', whis=1.5)
+      ax.set_xlim(lim_min, lim_max)
 
       model_order = order if order is not None else df['model'].unique().tolist()
-      model_to_x = {model: i for i, model in enumerate(model_order)}
+      model_to_y = {model: i for i, model in enumerate(model_order)}
 
       above_mask = df['value'] > vmax
       below_mask = df['value'] < vmin
-      above_x = df.loc[above_mask, 'model'].map(model_to_x)
-      below_x = df.loc[below_mask, 'model'].map(model_to_x)
-      ax.plot(above_x, np.full(len(above_x), vmax), marker="^", linestyle="none", color="black")
-      ax.plot(below_x, np.full(len(below_x), vmin), marker="v", linestyle="none", color="black")
+      above_y = df.loc[above_mask, 'model'].map(model_to_y)
+      below_y = df.loc[below_mask, 'model'].map(model_to_y)
+      ylim = ax.get_ylim()
+      ax.plot(np.full(len(above_y), vmax), above_y, marker=">", linestyle="none", color="black")
+      ax.plot(np.full(len(below_y), vmin), below_y, marker="<", linestyle="none", color="black")
+      ax.set_ylim(ylim)
 
-    ax.tick_params(axis='x', rotation=90)
-
-    dir_symbol = '↑' if is_higher_better(metric) else '↓'
-    ax.set_title(f'{get_metric_label(metric)}\n{dir_symbol} is better')
-    ax.set_ylabel(get_metric_abbr(metric))
-    ax.set_xlabel('')
+    dir_symbol = '→' if is_higher_better(metric) else '←'
+    ax.set_title(get_metric_label(metric))
+    ax.set_xlabel(get_metric_abbr(metric))
+    ax.set_ylabel('')
+    ax.text(0.01, -0.035, f'{dir_symbol} is better  ', transform=ax.transAxes,
+            ha='right', va='top', fontsize='medium', color='gray')
 
     if self.has_groups:
       ax.legend(title='')
 
     return ax
 
-  def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True):
-    fig, axes = setup_fig_axes(metrics)
+  def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True, skip_colors=0):
+    if outliers == True:
+      outliers = metrics
+    elif outliers == False:
+      outliers = []
+
+    fig, axes = setup_fig_axes(metrics, sharey=False)
 
     for i, metric in enumerate(metrics):
-      self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=outliers)
+      self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=metric in outliers, skip_colors=skip_colors)
 
     fig.suptitle('Metric Distributions Across Models', fontsize=16)
     fig.tight_layout()
@@ -1060,7 +1160,7 @@ class ModelComparison(BaseResults):
 
     return fig, axes
 
-  def plot_inference_times(self, entity='volume', unit='minutes', ax=None):
+  def plot_inference_times(self, entity='volume', unit='minutes', sort=True, ax=None):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(6, 4))
 
@@ -1081,17 +1181,19 @@ class ModelComparison(BaseResults):
 
     df = pd.DataFrame({'model': labels, 'inference_time': data, 'group': groups})
     if unit == 'seconds':
+      short_unit = 's'
       pass  # already in seconds
     elif unit == 'minutes':
+      short_unit = 'min'
       df['inference_time'] = df['inference_time'] / 60.0
     else:
       raise ValueError(f"Unknown unit: {unit}")
 
-    sns.boxplot(x='model', y='inference_time', data=df, ax=ax, hue='group', dodge=False)
-    ax.tick_params(axis='x', rotation=90)
+    order = df.groupby('model')['inference_time'].median().sort_values().index.tolist() if sort else None
+    sns.boxplot(x='inference_time', y='model', data=df, ax=ax, hue='group', dodge=False, order=order)
     ax.set_title('Inference Time Distribution per ' + ('Volume' if entity == 'volume' else 'Slice'))
-    ax.set_ylabel(f'Inference Time ({unit})')
-    ax.set_xlabel('')
+    ax.set_xlabel(f'Inference Time [{short_unit}]')
+    ax.set_ylabel('')
 
     if self.has_groups:
       ax.legend(title='')
@@ -1211,24 +1313,251 @@ class ModelComparison(BaseResults):
 
     return ax
 
-  def plot_quality_over_T(self, metrics, agg='mean', xscale='log', baseline=None):
+  def plot_quality_over_T(
+      self,
+      metrics,
+      agg='mean',
+      xscale='log',
+      baseline=None,
+      skip_colors=0,
+      show_uncertainty=True,
+  ):
     fig, axes = setup_fig_axes(metrics)
 
     for metric, ax in zip(metrics, axes):
-      self.plot_quality_over_T_single(metric, agg=agg, xscale=xscale, baseline=baseline, ax=ax)
+      self.plot_quality_over_T_single(
+        metric,
+        agg=agg,
+        xscale=xscale,
+        baseline=baseline,
+        ax=ax,
+        skip_colors=skip_colors,
+        show_uncertainty=show_uncertainty,
+      )
       ax.get_legend().remove()
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper right', title='', ncol=8)
-    fig.suptitle(f'{agg.capitalize()} (±{ "std" if agg == "mean" else "IQR" }) Metrics vs Sampling T Across Models', fontsize=16)
+    fig.suptitle('Metrics vs Sampling T Across Models', fontsize=16)
     fig.tight_layout()
 
     return fig, axes
 
 
-  def plot_quality_over_T_single(self, metric, agg='mean', xscale='log', baseline=None, ax=None):
+  def _collect_quality_over_T_data(self, metric, agg='mean'):
+    """Collect aggregated data points for each model label."""
+    data = {}
+    for result, result_label in zip(self.results_list, self.result_labels):
+      df = result.volume_metrics
+      T = int(result.sampling_name.split('-')[-1])
+      if agg == 'mean':
+        y = df[metric].mean()
+        y_lo = y - df[metric].std()
+        y_hi = y + df[metric].std()
+      elif agg == 'median':
+        y = df[metric].median()
+        y_lo = df[metric].quantile(0.25)
+        y_hi = df[metric].quantile(0.75)
+      label = result_label.replace(f' T=S={T}', '').replace(f' S={T}', '')
+      data[label] = data.get(label, []) + [(T, y, y_lo, y_hi)]
+
+    for label in data:
+      data[label].sort(key=lambda p: p[0])
+    return data
+
+
+  def plot_quality_over_T_paired(
+      self,
+      metrics,
+      agg='mean',
+      xscale='log',
+      baseline=None,
+      skip_colors=0,
+      ratio=True,
+      colors=None,
+      diff_color='black',
+      show_uncertainty=True,
+      background=None,
+      bg_colors=None,
+      bg_alpha=0.3,
+      n_col_legend=None,
+  ):
+    """Plot each metric as a pair of panels: absolute values on top, ratio (or difference) below.
+
+    Metrics are arranged in a grid with n_cols columns. Each metric occupies two rows
+    (absolute values + ratio/difference), so the total grid has 2*n_metric_rows physical rows.
+    """
+
+    n_metrics = len(metrics)
+    n_cols = min(3, n_metrics)
+    n_metric_rows = (n_metrics + n_cols - 1) // n_cols
+
+    fig = plt.figure(figsize=(4.5 * n_cols, 4 * n_metric_rows))
+    outer_gs = gridspec.GridSpec(n_metric_rows, n_cols, figure=fig, hspace=0.3, wspace=0.17, top=0.92)
+
+    prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    all_axes = []
+
+    for idx, metric in enumerate(metrics):
+      row = idx // n_cols
+      col = idx % n_cols
+      inner_gs = outer_gs[row, col].subgridspec(2, 1, height_ratios=[2, 1], hspace=0.05)
+      ax_top = fig.add_subplot(inner_gs[0])
+      ax_bot = fig.add_subplot(inner_gs[1], sharex=ax_top)
+      all_axes.append((ax_top, ax_bot))
+
+      data = self._collect_quality_over_T_data(metric, agg=agg)
+      labels = list(data.keys())
+
+      # resolve colors per label
+      label_colors = {}
+      for i, label in enumerate(labels):
+        if colors is not None and isinstance(colors, dict):
+          label_colors[label] = colors.get(label, prop_cycle[(i + skip_colors) % len(prop_cycle)])
+        elif colors is not None:
+          label_colors[label] = colors[i % len(colors)]
+        else:
+          label_colors[label] = prop_cycle[(i + skip_colors) % len(prop_cycle)]
+
+      # top panel: absolute values (plot first to establish autoscale limits)
+      for label, points in data.items():
+        c = label_colors[label]
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        lo = [p[2] for p in points]
+        hi = [p[3] for p in points]
+        ax_top.plot(xs, ys, marker='o', label=label, color=c)
+        if show_uncertainty:
+          ax_top.fill_between(xs, lo, hi, alpha=0.2, color=c)
+
+      if baseline is not None:
+        y_baseline = baseline.volume_metrics[metric].mean() if agg == 'mean' else baseline.volume_metrics[metric].median()
+        ax_top.axhline(y_baseline, color='black', linestyle='--', label='Baseline')
+
+      ax_top.set_xscale(xscale)
+
+      # background lines (added after foreground so they don't affect limits)
+      if background is not None:
+        xlim = ax_top.get_xlim()
+        ylim_top = ax_top.get_ylim()
+        ax_top.set_autoscale_on(False)
+        bg_list = background if isinstance(background, list) else [background]
+        bg_colors_dict = bg_colors or {}
+        for bg_comp in bg_list:
+          bg_data = bg_comp._collect_quality_over_T_data(metric, agg=agg)
+          for bg_label, bg_points in bg_data.items():
+            bg_c = bg_colors_dict.get(bg_label, 'gray')
+            bg_xs = [p[0] for p in bg_points]
+            bg_ys = [p[1] for p in bg_points]
+            ax_top.plot(bg_xs, bg_ys, marker='o', color=bg_c, alpha=bg_alpha, label=bg_label, zorder=1)
+        ax_top.set_xlim(xlim)
+        ax_top.set_ylim(ylim_top)
+
+      ax_top.set_title(get_metric_label(metric))
+      ticks = sorted({p[0] for points in data.values() for p in points})
+      ax_top.tick_params(labelbottom=False)
+      ax_top.set_ylabel(f'{agg.capitalize()}/{"std" if agg == "mean" else "IQR"}')
+
+      dir_symbol = '↑' if is_higher_better(metric) else '↓'
+      ax_top.text(0.95, 0.92, f'{dir_symbol} is better', transform=ax_top.transAxes,
+                  ha='right', va='top', fontsize='medium', color='0.2')
+
+      # bottom panel: ratio or difference
+      if len(labels) == 2:
+        label_a, label_b = labels
+        pts_a = {p[0]: p for p in data[label_a]}
+        pts_b = {p[0]: p for p in data[label_b]}
+        common_xs = sorted(set(pts_a.keys()) & set(pts_b.keys()))
+
+        higher_better = is_higher_better(metric)
+
+        if ratio:
+          vals = [pts_b[x][1] / pts_a[x][1] if pts_a[x][1] != 0 else float('nan') for x in common_xs]
+          ax_bot.plot(common_xs, vals, marker='o', color=diff_color)
+          ax_bot.axhline(1.0, color='gray', linestyle='--', linewidth=0.8)
+          ax_bot.set_ylabel('Ratio')
+
+          # shade regions and add corner labels
+          # ratio = b/a: for lower-is-better, <1 means b better; for higher-is-better, >1 means b better
+          ylim = ax_bot.get_ylim()
+          margin = (ylim[1] - ylim[0]) * 0.3
+          ylim = (ylim[0] - margin, ylim[1] + margin)
+          better_below = label_b if not higher_better else label_a
+          better_above = label_a if not higher_better else label_b
+          ax_bot.axhspan(1.0, ylim[1], color=label_colors[better_above], alpha=0.08)
+          ax_bot.axhspan(ylim[0], 1.0, color=label_colors[better_below], alpha=0.08)
+          ax_bot.set_ylim(ylim)
+          ax_bot.text(0.02, 0.02, f'{better_below} better', transform=ax_bot.transAxes,
+                      ha='left', va='bottom', fontsize='x-small', color='0.2')
+          ax_bot.text(0.02, 0.96, f'{better_above} better', transform=ax_bot.transAxes,
+                      ha='left', va='top', fontsize='x-small', color='0.2')
+        else:
+          vals = [pts_b[x][1] - pts_a[x][1] for x in common_xs]
+          ax_bot.plot(common_xs, vals, marker='o', color=diff_color)
+          ax_bot.axhline(0.0, color='gray', linestyle='--', linewidth=0.8)
+
+          ax_bot.set_ylabel(f'Difference ({label_b} − {label_a})')
+
+          ylim = ax_bot.get_ylim()
+          margin = (ylim[1] - ylim[0]) * 0.3
+          ylim = (ylim[0] - margin, ylim[1] + margin)
+          better_below = label_b if not higher_better else label_a
+          better_above = label_a if not higher_better else label_b
+          ax_bot.axhspan(0.0, ylim[1], color=label_colors[better_above], alpha=0.08)
+          ax_bot.axhspan(ylim[0], 0.0, color=label_colors[better_below], alpha=0.08)
+          ax_bot.set_ylim(ylim)
+          ax_bot.text(0.02, 0.02, f'{better_below} better', transform=ax_bot.transAxes,
+                      ha='left', va='bottom', fontsize='x-small', color='0.2')
+          ax_bot.text(0.02, 0.96, f'{better_above} better', transform=ax_bot.transAxes,
+                      ha='left', va='top', fontsize='x-small', color='0.2')
+      else:
+        # fallback for >2 models: show all pairwise ratios vs first model
+        ref_label = labels[0]
+        pts_ref = {p[0]: p for p in data[ref_label]}
+        for i, label in enumerate(labels[1:], 1):
+          pts = {p[0]: p for p in data[label]}
+          common_xs = sorted(set(pts_ref.keys()) & set(pts.keys()))
+          if ratio:
+            vals = [pts[x][1] / pts_ref[x][1] if pts_ref[x][1] != 0 else float('nan') for x in common_xs]
+          else:
+            vals = [pts[x][1] - pts_ref[x][1] for x in common_xs]
+          ax_bot.plot(common_xs, vals, marker='o', label=f'{label} / {ref_label}' if ratio else f'{label} − {ref_label}', color=colors[i % len(colors)])
+        ax_bot.axhline(1.0 if ratio else 0.0, color='gray', linestyle='--', linewidth=0.8)
+        ax_bot.set_ylabel(f'Ratio vs {ref_label}' if ratio else f'Diff vs {ref_label}')
+        ax_bot.legend(fontsize='small')
+
+      ax_bot.set_xticks(ticks)
+      ax_bot.xaxis.set_major_locator(plt.FixedLocator(ticks))
+      ax_bot.xaxis.set_major_formatter(plt.ScalarFormatter())
+      ax_bot.set_xlabel('# sampling steps $S$')
+
+      if col > 0:
+        ax_top.set_ylabel('')
+        ax_bot.set_ylabel('')
+
+    handles, labels_leg = all_axes[0][0].get_legend_handles_labels()
+    n_col_legend = len(labels) if n_col_legend is None else n_col_legend
+    fig.legend(handles, labels_leg, loc='upper right', bbox_to_anchor=(0.91, 1), ncol=n_col_legend)
+
+    return fig, all_axes
+
+
+  def plot_quality_over_T_single(
+      self,
+      metric,
+      agg='mean',
+      xscale='log',
+      baseline=None,
+      ax=None,
+      skip_colors=0,
+      show_uncertainty=True,
+  ):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+    if skip_colors > 0:
+      prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+      ax.set_prop_cycle(color=prop_cycle[skip_colors:])
 
     data = {}
     for result, result_label in zip(self.results_list, self.result_labels):
@@ -1237,12 +1566,14 @@ class ModelComparison(BaseResults):
       x = T
       if agg == 'mean':
         y = df[metric].mean()
-        y_std = df[metric].std()
+        y_lo = y - df[metric].std()
+        y_hi = y + df[metric].std()
       elif agg == 'median':
         y = df[metric].median()
-        y_std = (df[metric].quantile(0.75) - df[metric].quantile(0.25)) / 2  # interquartile range as a robust std estimate
-      label = result_label.replace(f' T={T}', '')
-      data[label] = data.get(label, []) + [(x, y, y_std)]
+        y_lo = df[metric].quantile(0.25)
+        y_hi = df[metric].quantile(0.75)
+      label = result_label.replace(f' T=S={T}', '').replace(f' S={T}', '')
+      data[label] = data.get(label, []) + [(x, y, y_lo, y_hi)]
 
     for label, points in data.items():
       points.sort(key=lambda p: p[0])
@@ -1252,26 +1583,29 @@ class ModelComparison(BaseResults):
         marker='o',
         label=label,
       )
-      ax.fill_between(
-        [p[0] for p in points],
-        [p[1] - p[2] for p in points],
-        [p[1] + p[2] for p in points],
-        alpha=0.2,
-      )
+      if show_uncertainty:
+        ax.fill_between(
+          [p[0] for p in points],
+          [p[2] for p in points],
+          [p[3] for p in points],
+          alpha=0.2,
+        )
 
     if baseline is not None:
       y_baseline = baseline.volume_metrics[metric].mean() if agg == 'mean' else baseline.volume_metrics[metric].median()
       ax.axhline(y_baseline, color='black', linestyle='--', label='Baseline')
 
     dir_symbol = '↑' if is_higher_better(metric) else '↓'
-    ax.set_title(f'{get_metric_label(metric)} \n{dir_symbol} is better')
-    ax.set_xlabel('Sampling T')
+    ax.set_title(get_metric_label(metric))
+    ax.text(0.1, -0.17, f'{dir_symbol} is better  ', transform=ax.transAxes,
+            ha='right', va='bottom', fontsize='medium', color='gray')
+    ax.set_xlabel('Sampling $S$')
     ax.set_xscale(xscale)
     ticks = sorted({p[0] for points in data.values() for p in points})
     ax.set_xticks(ticks)
     ax.xaxis.set_major_locator(plt.FixedLocator(ticks))
     ax.xaxis.set_major_formatter(plt.ScalarFormatter())
-    ax.set_ylabel(get_metric_abbr(metric))
+    ax.set_ylabel(f'{agg.capitalize()}/{ "std" if agg == "mean" else "IQR" } ' + get_metric_abbr(metric))
     ax.legend()
 
     return ax
@@ -1415,7 +1749,20 @@ class ModelComparison(BaseResults):
 
     return fig, axes
 
-  def visualise_slice_comparison_with_ct(self, sample, slice_index, axis='sagittal', dose_cmap='jet', dose_alpha=0.5, show_oar=True):
+  def visualise_slice_comparison_with_ct(
+      self,
+      sample,
+      slice_index,
+      axis='sagittal',
+      dose_cmap='jet',
+      dose_alpha=0.5,
+      show_oar=True,
+      crop_to_body=False,
+      crop_padding=2,
+      max_error=None,
+      dose_range=None,
+      n_error_levels=11,
+  ):
     """
     Visualize slice comparison with CT underneath transparent dose distributions.
 
@@ -1426,11 +1773,17 @@ class ModelComparison(BaseResults):
         dose_cmap: Colormap for dose overlay (default: 'jet')
         dose_alpha: Transparency of dose overlay (default: 0.5)
         show_oar: Whether to show OAR contours (default: True)
+        crop_to_body: Whether to crop the view to the body region (default: False)
+        crop_padding: Padding in pixels around the body bounding box (default: 5)
+        max_error: Maximum error for error colorbar (default: None)
+        dose_range: Range for dose colorbar (default: None)
+        n_error_levels: Number of discrete levels for error colorbar (default: 11)
 
     Returns:
         Tuple of (figure, axes)
     """
-    fig, axes = plt.subplots(2, len(self.results_list) + 1, figsize=(5 * (len(self.results_list) + 1), 10))
+    col_width = 3 if crop_to_body else 4
+    fig, axes = plt.subplots(2, len(self.results_list) + 1, figsize=(col_width * (len(self.results_list) + 1), 6.4), constrained_layout=True)
 
     first_result = self.results_list[0]
     sample_results = first_result.for_sample(sample)
@@ -1459,18 +1812,37 @@ class ModelComparison(BaseResults):
     if show_oar:
       oar_masks = first_result.dataset.selector.get_component(structure, 'oar_v3')
 
-    dose_max = original_dose.max()
+    if dose_range is not None:
+      dose_min, dose_max = dose_range
+    else:
+      dose_min, dose_max = 0, original_dose.max()
+
+    # Pre-compute global error_max across all models for consistent error colorbar
+    if max_error is not None:
+      global_error_max = max_error
+    else:
+      global_error_max = 0
+      for result in self.results_list:
+        sr = result.for_sample(sample)
+        pred_vol = sr.load_pred_volume()
+        if axis == "sagittal":
+          pred = np.flip(pred_vol[:, :, slice_index])
+        elif axis == "axial":
+          pred = pred_vol[slice_index, :, :]
+        else:
+          pred = np.flip(pred_vol[:, slice_index, :], 0)
+        global_error_max = max(global_error_max, np.max(np.abs(original_dose - pred)))
 
     # Row 0, Col 0: CT with original dose overlay
     axes[0, 0].imshow(ct_slice, cmap='gray')
     dose_masked = np.ma.masked_where(original_dose < 0.01 * dose_max, original_dose)
-    im1 = axes[0, 0].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
+    im_dose = axes[0, 0].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=dose_min, vmax=dose_max)
     draw_ptv_contours(axes[0, 0], ptv_doses)
     if show_oar and oar_masks is not None:
       draw_oar_contours(axes[0, 0], oar_masks)
-    axes[0, 0].set_title('Original Dose on CT')
+    axes[0, 0].set_title('Ground Truth')
+    axes[0, 0].text(-0.05, 0.5, 'Dose', transform=axes[0, 0].transAxes, fontsize=16, rotation=90, va='center', ha='right')
     axes[0, 0].axis('off')
-    plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04, label='Dose (Gy)')
 
     # Row 1, Col 0: CT with PTV only (reference)
     axes[1, 0].imshow(ct_slice, cmap='gray')
@@ -1478,8 +1850,13 @@ class ModelComparison(BaseResults):
     draw_ptv_contours(axes[1, 0], ptv_doses)
     if show_oar and oar_masks is not None:
       draw_oar_contours(axes[1, 0], oar_masks)
-    axes[1, 0].set_title('CT with PTV' + (' & OAR' if show_oar else ''))
+    axes[1, 0].set_title('')
+    axes[1, 0].text(-0.05, 0.5, 'Structures', transform=axes[1, 0].transAxes, fontsize=16, rotation=90, va='center', ha='right')
     axes[1, 0].axis('off')
+
+    # Discretize error colorbar
+    error_boundaries = np.linspace(-global_error_max, global_error_max, n_error_levels + 1)
+    error_norm = BoundaryNorm(error_boundaries, plt.get_cmap('bwr').N)
 
     for i, result in enumerate(self.results_list):
       sample_results = result.for_sample(sample)
@@ -1495,31 +1872,544 @@ class ModelComparison(BaseResults):
       # Row 0: CT with predicted dose overlay
       axes[0, i + 1].imshow(ct_slice, cmap='gray')
       pred_masked = np.ma.masked_where(pred_dose < 0.01 * dose_max, pred_dose)
-      im = axes[0, i + 1].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=0, vmax=dose_max)
+      axes[0, i + 1].imshow(pred_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=dose_min, vmax=dose_max)
       draw_ptv_contours(axes[0, i + 1], ptv_doses)
       if show_oar and oar_masks is not None:
         draw_oar_contours(axes[0, i + 1], oar_masks)
-      axes[0, i + 1].set_title(f'{self.result_labels[i]} - Predicted')
+      axes[0, i + 1].set_title(self.result_labels[i])
       axes[0, i + 1].axis('off')
-      plt.colorbar(im, ax=axes[0, i + 1], fraction=0.046, pad=0.04, label='Dose (Gy)')
 
       # Row 1: CT with error overlay
       error = original_dose - pred_dose
-      error_max = np.max(np.abs(error))
       axes[1, i + 1].imshow(ct_slice, cmap='gray')
-      error_masked = np.ma.masked_where(np.abs(error) < 0.01 * error_max, error)
-      im_err = axes[1, i + 1].imshow(error_masked, cmap='bwr', alpha=dose_alpha, vmin=-error_max, vmax=error_max)
+      error_masked = np.ma.masked_where(np.abs(error) < 0.01 * global_error_max, error)
+      im_err = axes[1, i + 1].imshow(error_masked, cmap='bwr', alpha=dose_alpha, norm=error_norm)
       draw_ptv_contours(axes[1, i + 1], ptv_doses)
       if show_oar and oar_masks is not None:
         draw_oar_contours(axes[1, i + 1], oar_masks)
-      axes[1, i + 1].set_title(f'{self.result_labels[i]} - Error')
       axes[1, i + 1].axis('off')
-      plt.colorbar(im_err, ax=axes[1, i + 1], fraction=0.046, pad=0.04, label='Error (Gy)')
 
-    if fig is not None:
-      fig.tight_layout()
+    # Row labels on the left side of the generated columns
+    axes[0, 1].text(-0.03, 0.5, 'Generated', transform=axes[0, 1].transAxes, fontsize=16, rotation=90, va='center', ha='right')
+    axes[1, 1].text(-0.03, 0.5, 'Error', transform=axes[1, 1].transAxes, fontsize=16, rotation=90, va='center', ha='right')
+
+    # Shared colorbars: one for dose (row 0), one for error (row 1)
+    fig.colorbar(im_dose, ax=axes[0, :].tolist(), fraction=0.02, pad=0.005, shrink=0.8, label='Dose (Gy)')
+    fig.colorbar(im_err, ax=axes[1, :].tolist(), fraction=0.02, pad=0.005, shrink=0.8, label='Error (Gy)')
+
+    # Crop to body bounding box if requested
+    if crop_to_body:
+      body_mask = ct_slice > ct_slice.min()
+      rows = np.any(body_mask, axis=1)
+      cols = np.any(body_mask, axis=0)
+      rmin, rmax = np.where(rows)[0][[0, -1]]
+      cmin, cmax = np.where(cols)[0][[0, -1]]
+      # Apply padding
+      rmin = max(0, rmin - crop_padding)
+      rmax = min(ct_slice.shape[0] - 1, rmax + crop_padding)
+      cmin = max(0, cmin - crop_padding)
+      cmax = min(ct_slice.shape[1] - 1, cmax + crop_padding)
+      for ax_row in axes:
+        for ax in ax_row:
+          ax.set_xlim(cmin, cmax)
+          ax.set_ylim(rmax, rmin)
 
     return fig, axes
+
+  def visualise_uncertainty_with_ct(
+      self,
+      slices,
+      axis='sagittal',
+      dose_cmap='jet',
+      dose_alpha=0.5,
+      show_oar=True,
+      crop_to_body=False,
+      crop_padding=2,
+      dose_range=None,
+      max_error=None,
+      n_error_levels=11,
+      error_cmap='hot',
+  ):
+    """
+    Visualize uncertainty with CT underneath.
+    Shows per row: structures, ground truth, best prediction, worst prediction, stddev, RMSE.
+
+    Args:
+        slices: List of (sample, slice_index) tuples, one row per entry.
+        axis: 'sagittal', 'axial', or 'coronal'
+        dose_cmap: Colormap for dose overlay (default: 'jet')
+        dose_alpha: Transparency of dose overlay (default: 0.5)
+        show_oar: Whether to show OAR contours (default: True)
+        crop_to_body: Whether to crop the view to the body region (default: False)
+        crop_padding: Padding in pixels around the body bounding box (default: 2)
+        dose_range: Range for dose colorbar (default: None)
+        max_error: Maximum error for stddev/MAE colorbar (default: None, auto)
+        n_error_levels: Number of discrete levels for stddev/MAE colorbar (default: 11)
+        error_cmap: Colormap for stddev and MAE overlays (default: 'hot')
+
+    Returns:
+        Tuple of (figure, axes)
+    """
+    n_preds = len(self.results_list)
+    n_rows = len(slices)
+    row_height = 2.4
+    cbar_height_ratios = [1] * n_rows + [0.04]
+
+    fig, all_axes = plt.subplots(
+      n_rows + 1, 6,
+      figsize=(12, row_height * n_rows + 0.6),
+      gridspec_kw={'height_ratios': cbar_height_ratios},
+      constrained_layout=True,
+      squeeze=False,
+    )
+    axes = all_axes[:n_rows]
+    cbar_axes = all_axes[n_rows]
+    # Hide the structure column's colorbar cell
+    cbar_axes[0].axis('off')
+
+    first_result = self.results_list[0]
+
+    # Pre-compute all row data to determine global ranges
+    row_data = []
+    for sample, slice_index in slices:
+      sample_results = first_result.for_sample(sample)
+      structure_vol, original_dose_vol = sample_results.load_orig_volume()
+
+      if axis == "sagittal":
+        structure = structure_vol[:, :, :, slice_index]
+        original_dose = original_dose_vol[:, :, slice_index]
+        structure = np.flip(structure, [1, 2])
+        original_dose = np.flip(original_dose)
+      elif axis == "axial":
+        structure = structure_vol[:, slice_index, :, :]
+        original_dose = original_dose_vol[slice_index, :, :]
+      elif axis == "coronal":
+        structure = np.flip(structure_vol[:, :, slice_index, :], 1)
+        original_dose = np.flip(original_dose_vol[:, slice_index, :], 0)
+      else:
+        raise ValueError(f'Invalid axis: {axis}. Choose from "axial", "sagittal", or "coronal".')
+
+      ct_slice = first_result.dataset.selector.get_ct(structure)[0]
+      ptv_doses = first_result.dataset.selector.get_component(structure, 'ptv_doses')
+      oar_masks = None
+      if show_oar:
+        oar_masks = first_result.dataset.selector.get_component(structure, 'oar_v3')
+
+      preds = []
+      for result in self.results_list:
+        sr = result.for_sample(sample)
+        pred_vol = sr.load_pred_volume()
+        if axis == "sagittal":
+          pred = np.flip(pred_vol[:, :, slice_index])
+        elif axis == "axial":
+          pred = pred_vol[slice_index, :, :]
+        else:
+          pred = np.flip(pred_vol[:, slice_index, :], 0)
+        preds.append(pred)
+
+      std_pred = np.std(preds, axis=0)
+      per_pred_rmse = [np.sqrt(np.mean((original_dose - pred) ** 2)) for pred in preds]
+      best_idx = int(np.argmin(per_pred_rmse))
+      worst_idx = int(np.argmax(per_pred_rmse))
+      rmse = np.sqrt(np.mean([(original_dose - pred) ** 2 for pred in preds], axis=0))
+
+      row_data.append({
+        'sample': sample,
+        'slice_index': slice_index,
+        'ct_slice': ct_slice,
+        'ptv_doses': ptv_doses,
+        'oar_masks': oar_masks,
+        'original_dose': original_dose,
+        'best_pred': preds[best_idx],
+        'best_label': self.result_labels[best_idx],
+        'worst_pred': preds[worst_idx],
+        'worst_label': self.result_labels[worst_idx],
+        'std_pred': std_pred,
+        'rmse': rmse,
+      })
+
+    # Compute global dose range
+    if dose_range is not None:
+      dose_min, dose_max = dose_range
+    else:
+      dose_min = 0
+      dose_max = max(d['original_dose'].max() for d in row_data)
+
+    # Compute global error max for stddev/MAE colorbar
+    if max_error is not None:
+      global_error_max = max_error
+    else:
+      global_error_max = max(
+        max(np.max(d['std_pred']) for d in row_data),
+        max(np.max(d['rmse']) for d in row_data),
+      )
+
+    error_boundaries = np.linspace(0, global_error_max, n_error_levels + 1)
+    error_norm = BoundaryNorm(error_boundaries, plt.get_cmap(error_cmap).N)
+
+    im_dose = None
+    im_err = None
+
+    for row_idx, d in enumerate(row_data):
+      ax_row = axes[row_idx]
+      ct_slice = d['ct_slice']
+      ptv_doses = d['ptv_doses']
+      oar_masks = d['oar_masks']
+
+      def _draw_contours(ax, _ptv=ptv_doses, _oar=oar_masks):
+        draw_ptv_contours(ax, _ptv)
+        if show_oar and _oar is not None:
+          draw_oar_contours(ax, _oar)
+
+      # Col 0: Structures
+      ax_row[0].imshow(ct_slice, cmap='gray')
+      draw_ptv_overlay(ax_row[0], ptv_doses)
+      _draw_contours(ax_row[0])
+      ax_row[0].axis('off')
+
+      # Col 1: Ground truth
+      ax_row[1].imshow(ct_slice, cmap='gray')
+      dose_masked = np.ma.masked_where(d['original_dose'] < 0.01 * dose_max, d['original_dose'])
+      im_dose = ax_row[1].imshow(dose_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=dose_min, vmax=dose_max)
+      _draw_contours(ax_row[1])
+      ax_row[1].axis('off')
+
+      # Col 2: Best prediction
+      ax_row[2].imshow(ct_slice, cmap='gray')
+      best_masked = np.ma.masked_where(d['best_pred'] < 0.01 * dose_max, d['best_pred'])
+      ax_row[2].imshow(best_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=dose_min, vmax=dose_max)
+      _draw_contours(ax_row[2])
+      ax_row[2].axis('off')
+
+      # Col 3: Worst prediction
+      ax_row[3].imshow(ct_slice, cmap='gray')
+      worst_masked = np.ma.masked_where(d['worst_pred'] < 0.01 * dose_max, d['worst_pred'])
+      ax_row[3].imshow(worst_masked, cmap=dose_cmap, alpha=dose_alpha, vmin=dose_min, vmax=dose_max)
+      _draw_contours(ax_row[3])
+      ax_row[3].axis('off')
+
+      # Col 4: Stddev
+      ax_row[4].imshow(ct_slice, cmap='gray')
+      std_masked = np.ma.masked_where(d['std_pred'] < 0.01 * global_error_max, d['std_pred'])
+      im_err = ax_row[4].imshow(std_masked, cmap=error_cmap, alpha=dose_alpha, norm=error_norm)
+      _draw_contours(ax_row[4])
+      ax_row[4].axis('off')
+
+      # Col 5: RMSE
+      ax_row[5].imshow(ct_slice, cmap='gray')
+      rmse_masked = np.ma.masked_where(d['rmse'] < 0.01 * global_error_max, d['rmse'])
+      ax_row[5].imshow(rmse_masked, cmap=error_cmap, alpha=dose_alpha, norm=error_norm)
+      _draw_contours(ax_row[5])
+      ax_row[5].axis('off')
+
+      # Row label
+      ax_row[0].set_ylabel(f"{d['sample']}:{d['slice_index']}", fontsize=10)
+
+      # Crop to body bounding box if requested
+      if crop_to_body:
+        body_mask = ct_slice > ct_slice.min()
+        rows = np.any(body_mask, axis=1)
+        cols = np.any(body_mask, axis=0)
+        rmin, rmax = np.where(rows)[0][[0, -1]]
+        cmin, cmax = np.where(cols)[0][[0, -1]]
+        rmin = max(0, rmin - crop_padding)
+        rmax = min(ct_slice.shape[0] - 1, rmax + crop_padding)
+        cmin = max(0, cmin - crop_padding)
+        cmax = min(ct_slice.shape[1] - 1, cmax + crop_padding)
+        for ax in ax_row:
+          ax.set_xlim(cmin, cmax)
+          ax.set_ylim(rmax, rmin)
+
+    # Column titles (top row only)
+    axes[0, 0].set_title('Structures')
+    axes[0, 1].set_title('Ground Truth')
+    axes[0, 2].set_title('Best Prediction')
+    axes[0, 3].set_title('Worst Prediction')
+    axes[0, 4].set_title(f'Std Dev (n={n_preds})')
+    axes[0, 5].set_title(f'RMSE (n={n_preds})')
+
+    fig.suptitle('Uncertainty Visualization with CT')
+
+    # Colorbars (horizontal, in dedicated bottom row)
+    # Merge cells 1–3 for dose colorbar
+    gs = all_axes[0, 0].get_gridspec()
+    for ax in cbar_axes[1:4]:
+      ax.remove()
+    cax_dose = fig.add_subplot(gs[n_rows, 1:4])
+    fig.colorbar(im_dose, cax=cax_dose, orientation='horizontal', label='Dose [Gy]')
+
+    # Merge cells 4–5 for error colorbar
+    for ax in cbar_axes[4:6]:
+      ax.remove()
+    cax_err = fig.add_subplot(gs[n_rows, 4:6])
+    fig.colorbar(im_err, cax=cax_err, orientation='horizontal', label='Dose Difference [Gy]')
+
+    return fig, axes
+
+  def plot_rank_frequencies(self, metrics, ax=None):
+    n_models = len(self.results_list)
+    ranks = np.arange(1, n_models + 1)
+
+    # Collect metric values per model per sample
+    # Shape: (n_metrics, n_samples, n_models)
+    all_ranks = []
+    for metric in metrics:
+      higher_better = is_higher_better(metric)
+      values = []
+      for result in self.results_list:
+        values.append(result.volume_metrics[metric].values)
+      # values: (n_models, n_samples)
+      values = np.array(values)
+      n_samples = values.shape[1]
+
+      # Rank per sample (axis=0 ranks across models)
+      # rankdata gives rank 1=smallest, so for higher_better we negate
+      sample_ranks = np.zeros_like(values, dtype=int)
+      for s in range(n_samples):
+        col = values[:, s]
+        if higher_better:
+          col = -col
+        sample_ranks[:, s] = rankdata(col, method='min').astype(int)
+      all_ranks.append(sample_ranks)
+
+    # Average ranks across all metrics and samples per model
+    # all_ranks: list of (n_models, n_samples) arrays
+    combined_ranks = np.concatenate(all_ranks, axis=1)  # (n_models, n_metrics * n_samples)
+
+    # Build frequency matrix: (n_models, n_ranks)
+    freq_matrix = np.zeros((n_models, n_models), dtype=int)
+    for m in range(n_models):
+      for rank in ranks:
+        freq_matrix[m, rank - 1] = np.sum(combined_ranks[m] == rank)
+
+    # Sort models by 1st rank frequency (desc), then 2nd rank, etc.
+    sort_keys = [-freq_matrix[:, r] for r in range(n_models)]
+    sort_order = np.lexsort(sort_keys[::-1])
+    freq_matrix = freq_matrix[sort_order]
+    sorted_labels = [self.result_labels[i] for i in sort_order]
+    sorted_groups = [self.result_groups[i] for i in sort_order]
+
+    if ax is None:
+      fig, ax = plt.subplots(1, 1, figsize=(max(6, n_models * 0.8), max(4, n_models * 0.5)))
+
+    # Create color-coded heatmap using groups
+    if self.has_groups:
+      unique_groups = list(dict.fromkeys(self.result_groups))  # preserve order
+      prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+      group_to_color = {g: prop_cycle[i % len(prop_cycle)] for i, g in enumerate(unique_groups)}
+
+      # Create an RGBA image where each cell's hue comes from its group
+      # and alpha/intensity from the frequency
+      max_freq = freq_matrix.max()
+      rgba_image = np.ones((n_models, n_models, 4))
+      for m in range(n_models):
+        base_color = to_rgba(group_to_color[sorted_groups[m]])
+        for r in range(n_models):
+          intensity = freq_matrix[m, r] / max_freq if max_freq > 0 else 0
+          # Blend white -> group color based on intensity
+          rgba_image[m, r, :3] = 1 - intensity * (1 - np.array(base_color[:3]))
+          rgba_image[m, r, 3] = 1.0
+
+      ax.imshow(rgba_image, aspect='auto')
+
+      # Add text annotations
+      for m in range(n_models):
+        for r in range(n_models):
+          val = freq_matrix[m, r]
+          text_color = 'white' if val / max_freq > 0.6 else 'black'
+          ax.text(r, m, str(val), ha='center', va='center', fontsize=9, color=text_color)
+
+      # Add legend for groups
+      legend_handles = [Patch(facecolor=group_to_color[g], label=g) for g in unique_groups]
+      ax.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1.02, 1.09), ncol=2, title='')
+    else:
+      sns.heatmap(freq_matrix, ax=ax, annot=True, fmt='d', cmap='Blues',
+                  xticklabels=ranks, yticklabels=sorted_labels, cbar_kws={'label': 'Frequency'})
+
+    ax.set_xticks(np.arange(n_models) + (0.5 if not self.has_groups else 0))
+    ax.set_xticklabels(ranks)
+    ax.set_yticks(np.arange(n_models) + (0.5 if not self.has_groups else 0))
+    ax.set_yticklabels(sorted_labels)
+    ax.set_xlabel('ranks')
+    ax.set_ylabel('')
+    ax.grid(False)
+    ax.set_title(f'Rank Frequencies')
+
+    return ax
+
+  def plot_metric_heatmap(self, metrics, baseline: 'ModelComparison', improved_q=0.75, worsened_q=0.25, sort=True, baseline_label='Baseline', ax=None):
+    """
+    Heatmap with median metric values per model. Annotations show how many subjects
+    improved or worsened compared to subject-specific baseline percentiles.
+
+    Args:
+        metrics: List of metric column names.
+        baseline: A ModelComparison whose runs define the per-subject reference distribution.
+        improved_q: Percentile threshold for improvement (default 0.75).
+        worsened_q: Percentile threshold for worsening (default 0.25).
+        sort: Whether to sort models by average rank across metrics.
+        ax: Optional matplotlib axes.
+    """
+    # Build per-subject baseline thresholds from the baseline ModelComparison
+    baseline_volumes = pd.concat(
+      [r.volume_metrics for r in baseline.results_list], ignore_index=True
+    )
+
+    baseline_thresholds = {}
+    for metric in metrics:
+      grouped = baseline_volumes.groupby('file_name')[metric]
+      baseline_thresholds[metric] = pd.DataFrame({
+        'q_improved': grouped.quantile(improved_q),
+        'q_worsened': grouped.quantile(worsened_q),
+      })
+
+    # Compute median, improved count, and worsened count per model per metric
+    model_labels = []
+    median_matrix = []
+    annot_matrix = []
+
+    for result, label in zip(self.results_list, self.result_labels):
+      model_labels.append(label)
+      medians = []
+      annots = []
+      for metric in metrics:
+        vm = result.volume_metrics.set_index('file_name')
+        thresholds = baseline_thresholds[metric]
+
+        # Only compare subjects present in both
+        common = vm.index.intersection(thresholds.index)
+        values = vm.loc[common, metric]
+        q_imp = thresholds.loc[common, 'q_improved']
+        q_wor = thresholds.loc[common, 'q_worsened']
+
+        higher_better = is_higher_better(metric)
+        if higher_better:
+          n_improved = (values > q_imp).sum()
+          n_worsened = (values < q_wor).sum()
+        else:
+          n_improved = (values < q_wor).sum()
+          n_worsened = (values > q_imp).sum()
+
+        medians.append(result.volume_metrics[metric].median())
+        annots.append(f'\u2191{n_improved} \u2193{n_worsened}')
+
+      median_matrix.append(medians)
+      annot_matrix.append(annots)
+
+    col_labels = [get_metric_abbr(m, True, with_unit=False) for m in metrics]
+    metric_units = [get_metric_unit(m) for m in metrics]
+    median_df = pd.DataFrame(median_matrix, index=model_labels, columns=col_labels)
+    annot_df = pd.DataFrame(annot_matrix, index=model_labels, columns=col_labels)
+
+    # Compute baseline median row
+    baseline_medians = [
+      pd.Series([r.volume_metrics[m].median() for r in baseline.results_list]).median()
+      for m in metrics
+    ]
+
+    # Sort models by average normalised rank across metrics
+    if sort:
+      ranks = pd.DataFrame(index=median_df.index)
+      for i, metric in enumerate(metrics):
+        col = median_df.columns[i]
+        ascending = not is_higher_better(metric)
+        ranks[col] = median_df[col].rank(ascending=ascending)
+      order = ranks.mean(axis=1).sort_values().index
+      median_df = median_df.loc[order]
+      annot_df = annot_df.loc[order]
+
+    # Prepend baseline row, then normalise all medians together for colouring
+    gap_height = 0.15
+    baseline_median_row = pd.DataFrame([baseline_medians], index=[baseline_label], columns=col_labels)
+    combined_median = pd.concat([baseline_median_row, median_df])
+
+    # Normalise so that baseline = 0, better = positive, worse = negative,
+    # then map to [0, 1] with 0.5 = baseline for a diverging colormap.
+    combined_norm = combined_median.copy()
+    for i, metric in enumerate(metrics):
+      col = combined_median.columns[i]
+      baseline_val = baseline_medians[i]
+      diff = combined_median[col] - baseline_val
+      if not is_higher_better(metric):
+        diff = -diff  # flip so positive = better
+      max_abs = diff.abs().max()
+      if max_abs > 0:
+        scaled = np.sign(diff) * np.sqrt(diff.abs() / max_abs)
+        combined_norm[col] = 0.5 + 0.5 * scaled
+      else:
+        combined_norm[col] = 0.5
+
+    if ax is None:
+      fig, ax = plt.subplots(1, 1, figsize=(len(metrics) * 1 + 2, (len(model_labels) + 1) * 0.7 + 0.5))
+
+    # Custom y positions and heights: baseline shorter, then gap, then model rows
+    baseline_height = 0.6
+    row_heights = [baseline_height] + [1] * len(model_labels)
+    y_positions = [0]  # baseline
+    for k in range(len(model_labels)):
+      y_positions.append(baseline_height + gap_height + k)
+    total_height = y_positions[-1] + 1
+
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list('ggplot_diverge', ['#E24A33', 'white', '#348ABD'])
+    ax.set_facecolor('none')
+    ax.get_figure().patch.set_facecolor('white')
+
+    # Draw heatmap cells manually
+    for row_idx in range(len(combined_norm)):
+      y = y_positions[row_idx]
+      h = row_heights[row_idx]
+      for j in range(len(metrics)):
+        norm_val = combined_norm.iloc[row_idx, j]
+        if pd.isna(norm_val):
+          continue
+        color = cmap(norm_val)
+        ax.add_patch(plt.Rectangle((j, y), 1, h, facecolor=color, edgecolor='white', linewidth=0.5))
+
+    ax.set_xlim(0, len(metrics))
+    ax.set_ylim(total_height, 0)
+    ax.set_xticks([j + 0.5 for j in range(len(metrics))])
+    ax.set_xticklabels(col_labels, rotation=0)
+    ax.set_yticks([y + h / 2 for y, h in zip(y_positions, row_heights)])
+    ylabels = list(combined_norm.index)
+    ax.set_yticklabels(ylabels, rotation=0)
+    ax.get_yticklabels()[0].set_fontweight('bold')
+
+    # Draw annotations with adaptive text color
+    def _median_text(val, unit):
+      unit_str = f' {unit}' if unit else ''
+      return f'$\\tilde{{x}}$ = {val:.2f}{unit_str}'
+
+    for row_idx in range(len(combined_norm)):
+      y = y_positions[row_idx]
+      h = row_heights[row_idx]
+      for j in range(len(metrics)):
+        val = combined_median.iloc[row_idx, j]
+        norm_val = combined_norm.iloc[row_idx, j]
+        if pd.isna(val):
+          continue
+        rgba = cmap(norm_val)
+        luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+        text_color = 'white' if luminance < 0.5 else 'black'
+        unit = metric_units[j]
+        if row_idx == 0:  # baseline row: only median, centered
+          ax.text(j + 0.5, y + h / 2, _median_text(val, unit),
+                  ha='center', va='center', fontsize=7, color=text_color, fontweight='bold')
+        else:  # model rows: median + arrow counts
+          ax.text(j + 0.5, y + h * 0.33, _median_text(val, unit),
+                  ha='center', va='center', fontsize=7, color=text_color)
+          ax.text(j + 0.5, y + h * 0.67, annot_df.iloc[row_idx - 1, j],
+                  ha='center', va='center', fontsize=11, color=text_color)
+
+    # Remove default spines
+    for spine in ax.spines.values():
+      spine.set_visible(False)
+    ax.tick_params(left=False, bottom=False)
+
+    ax.set_title(f'Model Improvement or Worsening Compared to Baseline \n(↑ improved count, ↓ worsened count)')
+    ax.set_ylabel('')
+
+    return ax
 
 def combine_model_comparisons(results: List[ModelComparison], prefixes: List[str]=None) -> ModelComparison:
   combined_results = []
