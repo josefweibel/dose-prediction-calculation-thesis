@@ -383,6 +383,11 @@ class DistillationTrainer:
         output_device=0 if device.type == 'cuda' else None,
         find_unused_parameters=False,
       )
+      # Fix DDP stride mismatch warning for 1x1 conv weights whose cuDNN
+      # backward produces non-contiguous gradients.
+      for p in self.model.parameters():
+        if p.ndim == 4 and p.shape[2] == 1 and p.shape[3] == 1:
+          p.register_hook(lambda grad: grad.contiguous())
 
     # Optimizer
     lr = distill_config['round'].get('lr', 0.00005)
