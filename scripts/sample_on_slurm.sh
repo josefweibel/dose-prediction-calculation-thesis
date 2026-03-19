@@ -23,6 +23,13 @@ if [ -z "$CONFIG_NAME" ]; then
   exit 1
 fi
 
+DEPENDENCY=""
+TRAINING_JOB_ID=$(squeue --me --name="${MODEL_NAME}" --states=RUNNING,PENDING --noheader --format="%i" | head -n 1)
+if [ -n "$TRAINING_JOB_ID" ]; then
+  echo "Training job ${TRAINING_JOB_ID} found for model ${MODEL_NAME}, adding dependency"
+  DEPENDENCY="--dependency=afterok:${TRAINING_JOB_ID}"
+fi
+
 mkdir -p "${HOME_PATH}/images"
 if [ ! -f "${HOME_PATH}/images/dose-prediction-thesis.sif" ]; then
   echo "[$(date +"%Y-%m-%dT%H:%M:%S")] pulling image dose-prediction-thesis started"
@@ -30,7 +37,7 @@ if [ ! -f "${HOME_PATH}/images/dose-prediction-thesis.sif" ]; then
   echo "[$(date +"%Y-%m-%dT%H:%M:%S")] image dose-prediction-thesis pulled"
 fi
 
-sbatch <<EOF
+sbatch ${DEPENDENCY} <<EOF
 #!/bin/bash
 #SBATCH -p gpu-invest
 #SBATCH -q job_gpu_caim
