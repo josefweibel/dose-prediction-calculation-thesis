@@ -368,6 +368,7 @@ class NoisePredictor(nn.Module):
     use_mam=True,
     use_afm=True,
     encoder_mode='separate',  # 'separate', 'merged_condition', or 'merged_all'
+    bottleneck_attention=True,  # Use self-attention in the middle/bottleneck block
     out_channels=1,  # Number of output channels (1 for dose, 2 for warm-start)
   ):
     super().__init__()
@@ -489,11 +490,11 @@ class NoisePredictor(nn.Module):
       )
 
     # Middle block
-    self.middle = nn.ModuleList([
-      ResNetBlock(channels[-1], channels[-1], time_embed_dim),
-      MultiHeadSelfAttention(channels[-1], num_heads),
-      ResNetBlock(channels[-1], channels[-1], time_embed_dim)
-    ])
+    middle_layers = [ResNetBlock(channels[-1], channels[-1], time_embed_dim)]
+    if bottleneck_attention:
+      middle_layers.append(MultiHeadSelfAttention(channels[-1], num_heads))
+    middle_layers.append(ResNetBlock(channels[-1], channels[-1], time_embed_dim))
+    self.middle = nn.ModuleList(middle_layers)
 
     # Decoder stages
     self.decoder = nn.ModuleList()
@@ -817,6 +818,7 @@ def build_beamdiff(config, structure_selector, out_channels=1):
     use_mam=config.get('use_mam', True),
     use_afm=config.get('use_afm', True),
     encoder_mode=config.get('encoder_mode', 'separate'),
+    bottleneck_attention=config.get('bottleneck_attention', True),
     out_channels=out_channels,
   )
   return model
