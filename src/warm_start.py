@@ -55,7 +55,7 @@ class WarmStartModel(nn.Module):
       sigma: Standard deviation prediction [B, 1, H, W]
     """
     out = self.base_model(condition)  # [B, 2, H, W]
-    mu = out[:, 0:1]                  # [B, 1, H, W]
+    mu = out[:, 0:1].clone()          # [B, 1, H, W]
     log_sigma = out[:, 1:2]           # [B, 1, H, W]
     sigma = F.softplus(log_sigma) + self.min_sigma
     return mu, sigma
