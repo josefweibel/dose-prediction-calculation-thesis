@@ -449,7 +449,11 @@ class Trainer:
     # Phase 1: Warm-start model training
     if 'warm_start_model' in self.config:
       self.net_model = build_warm_start_model(self.config, train_dataset.selector).to(self.device)
-      self.model = WarmStartModelTrainerModule(self.net_model).to(self.device)
+      self.model = WarmStartModelTrainerModule(
+        self.net_model,
+        body_mask_index=train_dataset.selector.get_channel_indices('body')[0],
+        loss_type=self.config.get('warm_start_loss_type', 'gaussian_nll'),
+      ).to(self.device)
     # Phase 2: Diffusion with warm-start, or regular diffusion/U-Net training
     else:
       self.net_model = build_model(self.config, train_dataset.selector).to(self.device)

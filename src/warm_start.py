@@ -97,9 +97,11 @@ class WarmStartModelTrainerModule(nn.Module):
   Similar interface to UnetTrainerModule for compatibility with Trainer.
   """
 
-  def __init__(self, model):
+  def __init__(self, model, body_mask_index, loss_type='gaussian_nll'):
     super().__init__()
     self.model = model  # WarmStartModel
+    self.loss_type = loss_type
+    self.body_mask_index = body_mask_index
 
   def forward(self, x_0, condition):
     """
@@ -114,11 +116,22 @@ class WarmStartModelTrainerModule(nn.Module):
     """
     mu, sigma = self.model(condition)
 
-    # Gaussian NLL: 0.5 * ((x_0 - mu) / sigma)^2 + log(sigma)
-    normalized_diff = (x_0 - mu) / sigma
-    nll = 0.5 * normalized_diff ** 2 + torch.log(sigma)
+    if self.loss_type == 'gaussian_nll_v2':
+      sigma = sigma.clamp(min=1e-3)
+      mask = condition[:, self.body_mask_index:self.body_mask_index+1, :, :]
 
-    return nll.mean()
+      normalized_diff = (x_0 - mu) / sigma
+      nll = 0.5 * normalized_diff ** 2 + torch.log(sigma)
+
+      # Only compute loss over non-background voxels
+      nll = (nll * mask).sum() / (mask.sum() + 1e-8)
+    else:
+      # Gaussian NLL: 0.5 * ((x_0 - mu) / sigma)^2 + log(sigma)
+      normalized_diff = (x_0 - mu) / sigma
+      nll = 0.5 * normalized_diff ** 2 + torch.log(sigma)
+      nll = nll.mean()
+
+    return nll
 
 
 class WarmStartDiffusionTrainerModule(nn.Module):

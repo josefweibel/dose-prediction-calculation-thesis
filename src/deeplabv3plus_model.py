@@ -273,8 +273,10 @@ class DeepLabv3Plus(nn.Module):
       output, size=input_shape, mode='bilinear', align_corners=False
     )
 
-    # Ensure non-negative dose values
-    output = F.relu(output)
+    output[:, 0:1, :, :] = F.relu(output[:, 0:1, :, :])
+
+    if output.shape[1] > 1:
+      output[:, 1:2, :, :] = F.softplus(output[:, 1:2, :, :]) + 0.01
 
     return output
 
