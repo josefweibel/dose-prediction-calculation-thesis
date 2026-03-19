@@ -41,6 +41,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import re
 
 
 class SinusoidalPositionEmbedding(nn.Module):
@@ -396,94 +397,104 @@ class CrossAttention(nn.Module):
     return out
 
 
-class StructureEncoder(nn.Module):
-  """
-  Structure Encoder to extract anatomical information from CT + PTV + OARs.
+class MultiHeadSelfAttention(nn.Module):
+  """Multi-Head Self-Attention module for use in ResNet-based encoder/decoder."""
 
-  As described in Section III.B.1 of the paper:
-  - First level: Conv-ResNet block (3 conv blocks + 1 down) for early local features
-  - Levels 2-5: Swin-ResNet blocks (3 SwinTransformer blocks + 1 down) for global features
-  - Total: 5 downsampling stages
-  - All downsampling operations use residual connections
-  """
-
-  def __init__(self, in_channels, base_channels=64):
+  def __init__(self, channels, num_heads=8):
     super().__init__()
+    assert channels % num_heads == 0
+    self.channels = channels
+    self.num_heads = num_heads
+    self.head_dim = channels // num_heads
 
-    # Channel progression: 64 -> 128 -> 256 -> 512 -> 512
-    # From paper architecture diagram (Fig. 2)
-    channels = [base_channels, base_channels * 2, base_channels * 4,
-                base_channels * 8, base_channels * 8]
-
-    # Initial convolution (3x3 with stride 1)
-    self.conv_in = nn.Conv2d(in_channels, base_channels, kernel_size=3, stride=1, padding=1)
-
-    # Level 0: Conv-ResNet block (3 conv blocks + 1 down)
-    self.level0_blocks = nn.ModuleList([
-      ConvBlock(base_channels, channels[0]),
-      ConvBlock(channels[0], channels[0]),
-      ConvBlock(channels[0], channels[0])
-    ])
-    self.level0_down = nn.Conv2d(channels[0], channels[0], kernel_size=3, stride=2, padding=1)
-
-    # Levels 1-4: Swin-ResNet blocks (3 SwinTransformer blocks + 1 down)
-    self.swin_levels = nn.ModuleList()
-    self.down_blocks = nn.ModuleList()
-
-    for i in range(1, 5):
-      in_ch = channels[i - 1]
-      out_ch = channels[i]
-
-      # Match channels first if needed
-      if in_ch != out_ch:
-        channel_match = nn.Conv2d(in_ch, out_ch, kernel_size=1)
-      else:
-        channel_match = nn.Identity()
-
-      # 3 SwinTransformer blocks with alternating shift (all use out_ch)
-      swin_blocks = nn.ModuleList([
-        SwinTransformerBlock(out_ch, window_size=7, num_heads=8,
-                            shift_size=0 if j % 2 == 0 else 3)
-        for j in range(3)
-      ])
-
-      self.swin_levels.append(nn.ModuleList([channel_match, swin_blocks]))
-
-      # Downsampling with residual connection
-      if i < 4:  # No downsampling at last level
-        self.down_blocks.append(nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1))
-      else:
-        self.down_blocks.append(nn.Identity())
+    self.norm = nn.GroupNorm(8, channels)
+    self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1)
+    self.proj = nn.Conv2d(channels, channels, kernel_size=1)
 
   def forward(self, x):
-    """
-    Args:
-        x: Structure image (CT + PTV + OARs) [B, in_channels, H, W]
-    Returns:
-        List of feature maps at different levels [f_0, f_1, f_2, f_3, f_4]
-    """
-    features = []
+    B, C, H, W = x.shape
+    residual = x
 
-    # Initial convolution
+    x = self.norm(x)
+    qkv = self.qkv(x)
+
+    qkv = qkv.reshape(B, 3, self.num_heads, self.head_dim, H * W)
+    qkv = qkv.permute(1, 0, 2, 4, 3)  # 3, B, num_heads, H*W, head_dim
+    q, k, v = qkv[0], qkv[1], qkv[2]
+
+    attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+    attn = F.softmax(attn, dim=-1)
+
+    out = torch.matmul(attn, v)  # B, num_heads, H*W, head_dim
+    out = out.transpose(2, 3).reshape(B, C, H, W)
+    out = self.proj(out)
+
+    return out + residual
+
+
+class StructureEncoder(nn.Module):
+  """
+  Configurable Structure Encoder to extract anatomical information.
+
+  Supports:
+  - use_swin=True: Level 0 uses ConvBlocks, levels 1+ use SwinTransformer (original)
+  - use_swin=False: All levels use ConvBlocks + optional self-attention
+  - Configurable number of levels (via channels list length)
+  - Configurable number of blocks per level
+  """
+
+  def __init__(self, in_channels, channels, num_blocks=3, use_swin=True,
+               attention_levels=(), num_heads=8, window_size=7):
+    super().__init__()
+
+    num_levels = len(channels)
+    attention_set = set(attention_levels)
+
+    self.conv_in = nn.Conv2d(in_channels, channels[0], kernel_size=3, padding=1)
+
+    self.channel_matches = nn.ModuleList()
+    self.level_blocks = nn.ModuleList()
+    self.downs = nn.ModuleList()
+
+    for i in range(num_levels):
+      in_ch = channels[i - 1] if i > 0 else channels[0]
+      out_ch = channels[i]
+
+      # Channel matching
+      self.channel_matches.append(
+        nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+      )
+
+      # Blocks: level 0 always uses conv, higher levels use swin if enabled
+      blocks = nn.ModuleList()
+      if use_swin and i > 0:
+        for j in range(num_blocks):
+          blocks.append(SwinTransformerBlock(
+            out_ch, window_size, num_heads,
+            shift_size=0 if j % 2 == 0 else window_size // 2
+          ))
+      else:
+        for _ in range(num_blocks):
+          blocks.append(ConvBlock(out_ch, out_ch))
+        if i in attention_set:
+          blocks.append(MultiHeadSelfAttention(out_ch, num_heads))
+
+      self.level_blocks.append(blocks)
+
+      # Downsampling (none at last level)
+      self.downs.append(
+        nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1) if i < num_levels - 1
+        else nn.Identity()
+      )
+
+  def forward(self, x):
+    features = []
     x = self.conv_in(x)
 
-    # Level 0: Conv-ResNet block
-    for block in self.level0_blocks:
-      x = block(x)
-    features.append(x)
-    x = self.level0_down(x)
-
-    # Levels 1-4: Swin-ResNet blocks
-    for i, (level, down) in enumerate(zip(self.swin_levels, self.down_blocks)):
-      channel_match, swin_blocks = level
-
-      # Match channels
-      x = channel_match(x)
-
-      # Apply SwinTransformer blocks
-      for swin_block in swin_blocks:
-        x = swin_block(x)
-
+    for ch_match, blocks, down in zip(self.channel_matches, self.level_blocks, self.downs):
+      x = ch_match(x)
+      for block in blocks:
+        x = block(x)
       features.append(x)
       x = down(x)
 
@@ -492,36 +503,37 @@ class StructureEncoder(nn.Module):
 
 class DenoisingNetwork(nn.Module):
   """
-  Denoising Network - converts noise to dose distribution map.
+  Configurable Denoising Network.
 
-  As described in Section III.B.2 of the paper:
-  - Encoder: 5 levels (Conv at first, Swin at levels 2-5)
-  - 2 intermediate SwinTransformer blocks (no up/downsample)
-  - Decoder: 5 levels (Conv + Swin)
-  - Fusion: Element-wise addition for levels 0-3, cross-attention for levels 4-5
-  - Projector after each fusion
-  - Timestep conditioning via sinusoidal embedding
+  Supports:
+  - use_swin: Swin blocks (original) or ResNet + optional self-attention
+  - Configurable fusion: cross-attention levels, optional projectors
+  - Configurable depth (num_levels via channels list) and width (channel values)
+  - Configurable bottleneck attention
+  - When struct_features=None in forward (merged mode), skips fusion entirely
   """
 
-  def __init__(self, structure_encoder, base_channels=64, num_heads=8, cross_attention_levels=None):
+  def __init__(self, in_channels, channels, num_blocks=3, num_heads=8,
+               use_swin=True, attention_levels=(), cross_attention_levels=(4,),
+               use_projector=True, projector_levels=None,
+               bottleneck_attention=True, window_size=7):
     super().__init__()
 
-    self.structure_encoder = structure_encoder
-
-    # Channel progression: 64 -> 128 -> 256 -> 512 -> 512
-    channels = [base_channels, base_channels * 2, base_channels * 4,
-                base_channels * 8, base_channels * 8]
-
-    # Fusion strategy: which levels use cross-attention
-    # Default: [4] - only last level (conservative, based on best ablation results)
-    # Paper mentions: [2, 3, 4] - "last three use cross-attention"
-    # Best ablation (Table IV): [3, 4] - "attn-last2" achieves best results
-    if cross_attention_levels is None:
-      cross_attention_levels = [4]  # Conservative default
+    num_levels = len(channels)
+    base_channels = channels[0]
+    time_embed_dim = base_channels * 4
+    attention_set = set(attention_levels)
     self.cross_attention_levels = set(cross_attention_levels)
 
+    # Determine which levels get projectors
+    if projector_levels is not None:
+      self.projector_levels = set(projector_levels)
+    elif use_projector:
+      self.projector_levels = set(range(num_levels))
+    else:
+      self.projector_levels = set()
+
     # Timestep embedding
-    time_embed_dim = base_channels * 4
     self.time_embed = nn.Sequential(
       SinusoidalPositionEmbedding(base_channels),
       nn.Linear(base_channels, time_embed_dim),
@@ -529,301 +541,355 @@ class DenoisingNetwork(nn.Module):
       nn.Linear(time_embed_dim, time_embed_dim)
     )
 
-    # Initial convolution for noisy dose
-    self.conv_in = nn.Conv2d(1, base_channels, kernel_size=3, padding=1)
+    # Initial convolution
+    self.conv_in = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
 
-    # Encoder: Level 0 uses Conv, Levels 1-4 use Swin
-    self.encoder_stages = nn.ModuleList()
+    # Encoder
+    self.encoder_channel_matches = nn.ModuleList()
+    self.encoder_blocks = nn.ModuleList()
     self.encoder_downs = nn.ModuleList()
 
-    for i in range(5):
+    for i in range(num_levels):
       in_ch = channels[i - 1] if i > 0 else base_channels
       out_ch = channels[i]
 
-      if i == 0:
-        # Level 0: Conv blocks
-        stage = nn.ModuleList([
-          ResNetBlock(in_ch, out_ch, time_embed_dim),
-          ResNetBlock(out_ch, out_ch, time_embed_dim),
-          ResNetBlock(out_ch, out_ch, time_embed_dim)
-        ])
+      self.encoder_channel_matches.append(
+        nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+      )
+
+      blocks = nn.ModuleList()
+      if use_swin and i > 0:
+        for j in range(num_blocks):
+          blocks.append(SwinTransformerBlock(
+            out_ch, window_size, num_heads,
+            shift_size=0 if j % 2 == 0 else window_size // 2
+          ))
       else:
-        # Channel matching if needed (do this first)
-        if in_ch != out_ch:
-          channel_match = nn.Conv2d(in_ch, out_ch, kernel_size=1)
-        else:
-          channel_match = nn.Identity()
+        for _ in range(num_blocks):
+          blocks.append(ResNetBlock(out_ch, out_ch, time_embed_dim))
+        if i in attention_set:
+          blocks.append(MultiHeadSelfAttention(out_ch, num_heads))
 
-        # Levels 1-4: SwinTransformer blocks (all use out_ch)
-        swin_blocks = nn.ModuleList([
-          SwinTransformerBlock(out_ch, window_size=7, num_heads=num_heads,
-                              shift_size=0 if j % 2 == 0 else 3)
-          for j in range(3)
-        ])
+      self.encoder_blocks.append(blocks)
+      self.encoder_downs.append(
+        nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1) if i < num_levels - 1
+        else nn.Identity()
+      )
 
-        stage = nn.ModuleList([channel_match] + list(swin_blocks))
-
-      self.encoder_stages.append(stage)
-
-      # Downsampling
-      if i < 4:
-        self.encoder_downs.append(nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1))
-      else:
-        self.encoder_downs.append(nn.Identity())
-
-    # Fusion strategy: configurable cross-attention levels
-    # Create cross-attention modules only for specified levels
+    # Fusion modules (only used in separate mode)
     self.cross_attentions = nn.ModuleList([
       CrossAttention(channels[i], num_heads) if i in self.cross_attention_levels else None
-      for i in range(5)
+      for i in range(num_levels)
     ])
-
-    # Projectors after each fusion
     self.projectors = nn.ModuleList([
-      Projector(channels[i]) for i in range(5)
+      Projector(channels[i]) if i in self.projector_levels else None
+      for i in range(num_levels)
     ])
 
-    # 2 intermediate SwinTransformer blocks (no up/downsample)
-    self.middle = nn.ModuleList([
-      SwinTransformerBlock(channels[4], window_size=7, num_heads=num_heads, shift_size=0),
-      SwinTransformerBlock(channels[4], window_size=7, num_heads=num_heads, shift_size=3)
-    ])
+    # Middle block
+    mid_ch = channels[-1]
+    self.middle = nn.ModuleList()
+    if use_swin and bottleneck_attention:
+      self.middle.append(SwinTransformerBlock(mid_ch, window_size, num_heads, shift_size=0))
+      self.middle.append(SwinTransformerBlock(mid_ch, window_size, num_heads, shift_size=window_size // 2))
+    elif not use_swin:
+      self.middle.append(ResNetBlock(mid_ch, mid_ch, time_embed_dim))
+      if bottleneck_attention:
+        self.middle.append(MultiHeadSelfAttention(mid_ch, num_heads))
+      self.middle.append(ResNetBlock(mid_ch, mid_ch, time_embed_dim))
+    else:
+      # use_swin=True but bottleneck_attention=False
+      self.middle.append(ResNetBlock(mid_ch, mid_ch, time_embed_dim))
+      self.middle.append(ResNetBlock(mid_ch, mid_ch, time_embed_dim))
 
-    # Decoder: 5 levels
-    self.decoder_stages = nn.ModuleList()
+    # Decoder
+    self.decoder_blocks = nn.ModuleList()
     self.decoder_ups = nn.ModuleList()
 
-    for i in range(5):
-      level = 4 - i  # Reverse order
-      cur_ch = channels[level]  # Current channels (from skip connection)
-      next_ch = channels[level - 1] if level > 0 else base_channels  # Channels for next level
+    for i in range(num_levels):
+      level = num_levels - 1 - i
+      cur_ch = channels[level]
+      next_ch = channels[level - 1] if level > 0 else base_channels
 
-      # Decoder blocks process at current resolution with current channels
-      if level == 0:
-        # Last decoder level (corresponds to encoder level 0): Conv blocks
-        stage = nn.ModuleList([
-          ResNetBlock(cur_ch, cur_ch, time_embed_dim),
-          ResNetBlock(cur_ch, cur_ch, time_embed_dim),
-          ResNetBlock(cur_ch, cur_ch, time_embed_dim)
-        ])
+      blocks = nn.ModuleList()
+      if use_swin and level > 0:
+        for j in range(num_blocks):
+          blocks.append(SwinTransformerBlock(
+            cur_ch, window_size, num_heads,
+            shift_size=0 if j % 2 == 0 else window_size // 2
+          ))
       else:
-        # Other levels: SwinTransformer blocks
-        stage = nn.ModuleList([
-          SwinTransformerBlock(cur_ch, window_size=7, num_heads=num_heads,
-                              shift_size=0 if j % 2 == 0 else 3)
-          for j in range(3)
-        ])
+        for _ in range(num_blocks):
+          blocks.append(ResNetBlock(cur_ch, cur_ch, time_embed_dim))
+        if level in attention_set:
+          blocks.append(MultiHeadSelfAttention(cur_ch, num_heads))
 
-      self.decoder_stages.append(stage)
-
-      # Upsampling to next level (changes channels and resolution)
-      if i < 4:  # Don't upsample after last decoder level
-        self.decoder_ups.append(nn.ConvTranspose2d(cur_ch, next_ch, kernel_size=4, stride=2, padding=1))
-      else:
-        self.decoder_ups.append(nn.Identity())
+      self.decoder_blocks.append(blocks)
+      self.decoder_ups.append(
+        nn.ConvTranspose2d(cur_ch, next_ch, 4, stride=2, padding=1) if i < num_levels - 1
+        else nn.Identity()
+      )
 
     # Output
     self.norm_out = nn.GroupNorm(8, base_channels)
     self.conv_out = nn.Conv2d(base_channels, 1, kernel_size=3, padding=1)
 
-  def forward(self, x_noisy, x_struct, timesteps):
+  def forward(self, x, timesteps, struct_features=None):
     """
     Args:
-        x_noisy: Noisy dose map [B, 1, H, W]
-        x_struct: Structural information [B, C, H, W]
+        x: Input tensor [B, in_channels, H, W] (noisy dose or merged input)
         timesteps: Diffusion timesteps [B]
+        struct_features: Optional list of structure features for fusion (separate mode)
     Returns:
         Predicted noise [B, 1, H, W]
     """
-    # Timestep embedding
     time_emb = self.time_embed(timesteps)
+    h = self.conv_in(x)
 
-    # Extract structural features
-    struct_features = self.structure_encoder(x_struct)
-
-    # Initial convolution
-    h = self.conv_in(x_noisy)
-
-    # Encoder with fusion
+    # Encoder
     encoder_features = []
-    encoder_sizes = []  # Track spatial sizes for proper upsampling
+    encoder_sizes = []
+    num_levels = len(self.encoder_blocks)
 
-    for level in range(5):
-      stage = self.encoder_stages[level]
+    for level in range(num_levels):
+      h = self.encoder_channel_matches[level](h)
 
-      # Apply blocks
-      for block in stage:
+      for block in self.encoder_blocks[level]:
         if isinstance(block, ResNetBlock):
           h = block(h, time_emb)
         else:
           h = block(h)
 
-      # Fuse with structural features
-      struct_feat = struct_features[level]
+      # Fusion with structure features (separate mode only)
+      if struct_features is not None:
+        sf = struct_features[level]
+        if self.cross_attentions[level] is not None:
+          h = h + self.cross_attentions[level](h, sf)
+        else:
+          h = h + sf
 
-      if self.cross_attentions[level] is not None:
-        # Cross-attention fusion
-        h = h + self.cross_attentions[level](h, struct_feat)
-      else:
-        # Element-wise addition fusion
-        h = h + struct_feat
+        if self.projectors[level] is not None:
+          h = self.projectors[level](h)
 
-      # Apply projector
-      h = self.projectors[level](h)
-
-      # Store for skip connections (before downsampling)
       encoder_features.append(h)
-      encoder_sizes.append(h.shape[2:])  # Store (H, W)
+      encoder_sizes.append(h.shape[2:])
 
-      # Downsample for next level
-      if level < 4:  # Don't downsample after last encoder level
+      if level < num_levels - 1:
         h = self.encoder_downs[level](h)
 
-    # 2 intermediate SwinTransformer blocks
+    # Middle
     for block in self.middle:
-      h = block(h)
+      if isinstance(block, ResNetBlock):
+        h = block(h, time_emb)
+      else:
+        h = block(h)
 
-    # Decoder with skip connections
-    for level in range(5):
-      # Skip connection from encoder at same resolution
-      skip = encoder_features[4 - level]
-      target_size = encoder_sizes[4 - level]
+    # Decoder
+    for i in range(num_levels):
+      skip = encoder_features[num_levels - 1 - i]
+      target_size = encoder_sizes[num_levels - 1 - i]
 
-      # Resize h to match skip if needed (handle odd-sized feature maps)
       if h.shape[2:] != target_size:
         h = F.interpolate(h, size=target_size, mode='bilinear', align_corners=False)
 
-      # Add skip connection BEFORE upsampling (UNet-style)
       h = h + skip
 
-      # Apply decoder blocks at current resolution
-      stage = self.decoder_stages[level]
-      for block in stage:
+      for block in self.decoder_blocks[i]:
         if isinstance(block, ResNetBlock):
           h = block(h, time_emb)
         else:
           h = block(h)
 
-      # Upsample to next resolution (except at last level)
-      if level < 4:
-        # Get target size for next level
-        next_target_size = encoder_sizes[4 - level - 1]
-        h = self.decoder_ups[level](h)
-        # Resize to exact target size if needed
-        if h.shape[2:] != next_target_size:
-          h = F.interpolate(h, size=next_target_size, mode='bilinear', align_corners=False)
+      if i < num_levels - 1:
+        next_size = encoder_sizes[num_levels - 2 - i]
+        h = self.decoder_ups[i](h)
+        if h.shape[2:] != next_size:
+          h = F.interpolate(h, size=next_size, mode='bilinear', align_corners=False)
 
-    # Output
     h = self.norm_out(h)
     h = F.silu(h)
     h = self.conv_out(h)
-
     return h
 
 
 class SPDiffDose(nn.Module):
   """
-  SP-DiffDose: Complete model combining Structure Encoder and Denoising Network.
+  SP-DiffDose with configurable architecture for ablation studies.
 
-  Implements the conditional DDPM framework for dose prediction as described in the paper.
+  Encoder modes:
+  - 'separate': Dedicated StructureEncoder + DenoisingNetwork with fusion (original)
+  - 'merged': Concatenate [noisy, condition] and use a single encoder (faster)
 
-  The model:
-  1. Extracts anatomical features using Structure Encoder (Conv-ResNet + Swin-ResNet)
-  2. Predicts noise using Denoising Network with timestep conditioning
-  3. Fuses features using element-wise addition (levels 0-3) and cross-attention (levels 4-5)
-  4. Optimizes fused features using Projector modules
-  5. Uses SwinTransformer to capture multi-scale features
+  Block types:
+  - use_swin=True: SwinTransformer blocks at levels 1+ (original)
+  - use_swin=False: ResNet blocks + optional self-attention (faster)
   """
 
-  def __init__(self, structure_selector, base_channels=64, num_heads=8, cross_attention_levels=None):
+  def __init__(self, structure_selector, base_channels=64, channel_mult=(1, 2, 4, 8, 8),
+               num_blocks=3, num_heads=8, use_swin=True, attention_levels=(),
+               cross_attention_levels=(4,), use_projector=True, projector_levels=None,
+               encoder_mode='separate', bottleneck_attention=True, window_size=7):
     super().__init__()
 
     self.structure_selector = structure_selector
-    in_channels = structure_selector.total_channels
+    self.encoder_mode = encoder_mode
 
-    # Structure Encoder
-    self.structure_encoder = StructureEncoder(in_channels, base_channels)
+    channels = [base_channels * m for m in channel_mult]
+    in_channels_struct = structure_selector.total_channels
 
-    # Denoising Network
+    if encoder_mode == 'separate':
+      self.structure_encoder = StructureEncoder(
+        in_channels_struct, channels, num_blocks, use_swin,
+        attention_levels, num_heads, window_size
+      )
+      denoising_in = 1
+    else:  # merged
+      self.structure_encoder = None
+      denoising_in = 1 + in_channels_struct
+      # No fusion needed in merged mode
+      cross_attention_levels = []
+      use_projector = False
+      projector_levels = None
+
     self.denoising_network = DenoisingNetwork(
-      self.structure_encoder, base_channels, num_heads, cross_attention_levels
+      denoising_in, channels, num_blocks, num_heads,
+      use_swin, attention_levels, cross_attention_levels,
+      use_projector, projector_levels,
+      bottleneck_attention, window_size
     )
 
   def forward(self, x_noisy, condition, timesteps, cache=None):
     """
-    Forward pass compatible with DiffusionModelTrainerModule.
-
     Args:
         x_noisy: Noisy dose map [B, 1, H, W]
-        condition: Structural information (CT + PTV + OARs) [B, C, H, W]
+        condition: Structural information [B, C, H, W]
         timesteps: Diffusion timesteps [B]
         cache: DeepCache (unused, for compatibility)
-
     Returns:
         Predicted noise [B, 1, H, W]
     """
-    # Predict noise
-    noise_pred = self.denoising_network(x_noisy, condition, timesteps)
-
-    return noise_pred
+    if self.encoder_mode == 'separate':
+      struct_features = self.structure_encoder(condition)
+      return self.denoising_network(x_noisy, timesteps, struct_features)
+    else:
+      x_merged = torch.cat([x_noisy, condition], dim=1)
+      return self.denoising_network(x_merged, timesteps)
 
 
 def build_spdiffdose(config, structure_selector, out_channels=1):
   """
   Build SP-DiffDose model from configuration.
 
-  Default values correspond to the best configuration from the paper (Section IV):
-  - Base channels: 64 (inferred from architecture diagram)
-  - Window size: 7 for SwinTransformer blocks
-  - Number of attention heads: 8
-  - 5 encoder/decoder levels
-  - Conv-ResNet for first encoder level, Swin-ResNet for others
-  - Cross-attention levels: configurable (default [4], best ablation [3, 4])
-  - Projector after each fusion
-  - 2 intermediate SwinTransformer blocks
-
-  Cross-attention configuration:
-  - Default: [4] - only last level (conservative)
-  - Paper text: [2, 3, 4] - "last three use cross-attention"
-  - Best ablation (Table IV): [3, 4] - "attn-last2" achieves:
-    Dose Score=1.901, DVH Score=1.533, HI=0.278
-
-  Training settings from paper Section IV.B:
-  - T = 1000 diffusion steps
-  - Beta schedule: β_1 = 0.0001, β_T = 0.02 (linear)
-  - Batch size: 8
-  - Optimizer: Adam with initial learning rate 1e-4
-  - Learning rate decay: linear from 1e-4 to 0 (epoch 100-200)
-  - Total epochs: 200
-  - Image size: 256x256
-
-  Args:
-      config: SP-DiffDose configuration dict with optional keys:
-        - base_channels: Base channel count (default: 64)
-        - num_heads: Number of attention heads (default: 8)
-        - cross_attention_levels: List of levels to use cross-attention (default: [4])
-          Examples:
-            - [4]: Only last level (conservative)
-            - [3, 4]: Last 2 levels (best ablation result - "attn-last2")
-            - [2, 3, 4]: Last 3 levels (paper text - "last three")
-      structure_selector: StructureSelector instance
-      out_channels: Number of output channels (default: 1, only 1 supported for diffusion)
-
-  Returns:
-      SPDiffDose model
+  Config keys:
+    - base_channels: Base channel count (default: 64)
+    - channel_mult: Channel multipliers per level (default: [1, 2, 4, 8, 8])
+      Length determines number of levels (e.g. [1, 2, 4, 8] = 4 levels)
+    - num_blocks: Blocks per encoder/decoder level (default: 3)
+    - num_heads: Attention heads (default: 8)
+    - use_swin: Use SwinTransformer blocks (default: true)
+    - attention_levels: Levels with self-attention, ResNet mode only (default: [])
+    - cross_attention_levels: Levels using cross-attention fusion (default: [4])
+    - use_projector: Use projector after fusion (default: true)
+    - projector_levels: Specific levels for projectors (default: all)
+    - encoder_mode: 'separate' or 'merged' (default: 'separate')
+    - bottleneck_attention: Attention in middle block (default: true)
+    - window_size: Swin window size (default: 7)
   """
   if out_channels != 1:
     raise ValueError("SPDiffDose only supports out_channels=1 for noise prediction")
 
-  # Get cross-attention levels from config
-  # If not specified, use [4] as conservative default
-  # Paper's best ablation uses [3, 4] ("attn-last2")
-  cross_attention_levels = config.get('cross_attention_levels', [4])
-
   model = SPDiffDose(
     structure_selector=structure_selector,
     base_channels=config.get('base_channels', 64),
+    channel_mult=tuple(config.get('channel_mult', [1, 2, 4, 8, 8])),
+    num_blocks=config.get('num_blocks', 3),
     num_heads=config.get('num_heads', 8),
-    cross_attention_levels=cross_attention_levels
+    use_swin=config.get('use_swin', True),
+    attention_levels=tuple(config.get('attention_levels', [])),
+    cross_attention_levels=config.get('cross_attention_levels', [4]),
+    use_projector=config.get('use_projector', True),
+    projector_levels=config.get('projector_levels', None),
+    encoder_mode=config.get('encoder_mode', 'separate'),
+    bottleneck_attention=config.get('bottleneck_attention', True),
+    window_size=config.get('window_size', 7),
   )
   return model
+
+
+def migrate_spdiffdose_state_dict(state_dict):
+  """
+  Migrate state dict from old SPDiffDose key naming to new.
+
+  Handles:
+  - Removing duplicated denoising_network.structure_encoder.* keys
+  - Renaming structure_encoder internal keys (level0_blocks, swin_levels, etc.)
+  - Renaming denoising_network internal keys (encoder_stages, decoder_stages, etc.)
+
+  Returns a new state dict with updated keys. If already in new format, returns as-is.
+  """
+  # Detect if migration is needed
+  if not any(k.startswith('denoising_network.structure_encoder.') for k in state_dict):
+    return state_dict
+
+  new_state = {}
+  se = 'structure_encoder.'
+  dn = 'denoising_network.'
+
+  for key, value in state_dict.items():
+    # Skip duplicated structure_encoder under denoising_network
+    if key.startswith(f'{dn}structure_encoder.'):
+      continue
+
+    new_key = key
+
+    if key.startswith(se):
+      rest = key[len(se):]
+
+      if rest.startswith('level0_blocks.'):
+        # level0_blocks.X.suffix -> level_blocks.0.X.suffix
+        new_key = f'{se}level_blocks.0.{rest[len("level0_blocks."):]}'
+
+      elif rest.startswith('level0_down.'):
+        # level0_down.suffix -> downs.0.suffix
+        new_key = f'{se}downs.0.{rest[len("level0_down."):]}'
+
+      elif rest.startswith('swin_levels.'):
+        m = re.match(r'swin_levels\.(\d+)\.(\d+)\.(.*)', rest)
+        if m:
+          level, sub_idx, suffix = int(m.group(1)), int(m.group(2)), m.group(3)
+          if sub_idx == 0:
+            # channel_match -> channel_matches.{level+1}
+            new_key = f'{se}channel_matches.{level + 1}.{suffix}'
+          else:
+            # swin_levels.X.1.Y.suffix -> level_blocks.{X+1}.Y.suffix
+            new_key = f'{se}level_blocks.{level + 1}.{suffix}'
+
+      elif rest.startswith('down_blocks.'):
+        m = re.match(r'down_blocks\.(\d+)\.(.*)', rest)
+        if m:
+          idx, suffix = int(m.group(1)), m.group(2)
+          new_key = f'{se}downs.{idx + 1}.{suffix}'
+
+    elif key.startswith(dn):
+      rest = key[len(dn):]
+
+      if rest.startswith('encoder_stages.'):
+        m = re.match(r'encoder_stages\.(\d+)\.(\d+)\.(.*)', rest)
+        if m:
+          level, sub_idx, suffix = int(m.group(1)), int(m.group(2)), m.group(3)
+          if level == 0:
+            # Level 0: all ResNetBlocks -> encoder_blocks.0.X.suffix
+            new_key = f'{dn}encoder_blocks.0.{sub_idx}.{suffix}'
+          elif sub_idx == 0:
+            # channel_match -> encoder_channel_matches.X
+            new_key = f'{dn}encoder_channel_matches.{level}.{suffix}'
+          else:
+            # swin blocks -> encoder_blocks.X.{sub_idx-1}
+            new_key = f'{dn}encoder_blocks.{level}.{sub_idx - 1}.{suffix}'
+
+      elif rest.startswith('decoder_stages.'):
+        new_key = key.replace('decoder_stages', 'decoder_blocks')
+
+    new_state[new_key] = value
+
+  return new_state

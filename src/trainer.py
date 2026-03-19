@@ -19,6 +19,7 @@ from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, save_checkpoint, cleanup_checkpoints, CHECKPOINTS_PATH
 from c3d_model import C3DLoss
 from models import build_model
+from spdiffdose_model import migrate_spdiffdose_state_dict
 from warm_start import WarmStartCachedDataset, WarmStartDiffusionTrainerModule, build_warm_start_model, WarmStartModelTrainerModule
 
 
@@ -587,8 +588,13 @@ class Trainer:
       if self.is_main_process:
         print('Loading checkpoint and continue with epoch', checkpoint['epoch'] + 1)
 
-      self.net_model.load_state_dict(checkpoint['net_model_state_dict'])
-      self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+      net_state = checkpoint['net_model_state_dict']
+      ema_state = checkpoint['ema_model_state_dict']
+      if 'spdiffdose' in self.config:
+        net_state = migrate_spdiffdose_state_dict(net_state)
+        ema_state = migrate_spdiffdose_state_dict(ema_state)
+      self.net_model.load_state_dict(net_state)
+      self.ema_model.load_state_dict(ema_state)
       self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
       self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
 

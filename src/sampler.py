@@ -7,6 +7,7 @@ from config import read_model_config
 from data import create_gdphmm_dataset, StructureSelector
 from evaluator import Evaluator, compute_volume_metrics
 from mamba_model import remap_state_dict
+from spdiffdose_model import migrate_spdiffdose_state_dict
 from utils.mp import detect_device, PrefetchLoader
 from utils.checkpointing import load_last_checkpoint, load_checkpoint
 from results import SAMPLES_PATH
@@ -86,6 +87,8 @@ class Sampler:
       model_state_dict = checkpoint['ema_model_state_dict']
       if "t_proj_enc1.proj.weight" in model_state_dict:
         model_state_dict = remap_state_dict(model_state_dict)
+      if 'spdiffdose' in self.model_config:
+        model_state_dict = migrate_spdiffdose_state_dict(model_state_dict)
       self.ema_model.load_state_dict(model_state_dict)
 
     # Load warm-start model for WSD Phase 2 models
