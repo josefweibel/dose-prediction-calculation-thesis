@@ -575,11 +575,6 @@ class Trainer:
         output_device=0 if self.device.type == 'cuda' else None,
         find_unused_parameters=False,
       )
-      # Fix DDP stride mismatch warning for 1x1 conv weights whose cuDNN
-      # backward produces non-contiguous gradients.
-      for p in self.model.parameters():
-        if p.ndim == 4 and p.shape[2] == 1 and p.shape[3] == 1:
-          p.register_hook(lambda grad: grad.contiguous())
 
     self.__setup_optimizer()
     self.use_mixed_precision = self.device.type == 'cuda' and self.config['mixed_precision']

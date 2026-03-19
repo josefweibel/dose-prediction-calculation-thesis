@@ -101,7 +101,7 @@ class Projector(nn.Module):
     x = self.mlp_up(x)
 
     # Reshape back to [B, C, H, W]
-    x = x.permute(0, 3, 1, 2)
+    x = x.permute(0, 3, 1, 2).contiguous()
 
     return x
 
@@ -208,7 +208,7 @@ class SwinTransformerBlock(nn.Module):
     x = x + self.mlp(self.norm2(x))
 
     # Reshape back to [B, C, H, W]
-    x = x.permute(0, 3, 1, 2)
+    x = x.permute(0, 3, 1, 2).contiguous()
 
     return x
 
