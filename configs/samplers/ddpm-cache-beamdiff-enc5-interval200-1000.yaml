@@ -1,0 +1,31 @@
+sampler: ddpm
+T: 1000
+schedule: linear
+
+data_cache_size: inf
+num_workers: 4
+prefetch_factor: 4
+prefetch_on_gpu: false
+
+seed: 1
+batch_size_per_gpu: 16
+precision: null
+
+cache:
+  warmup_steps: 0
+  layers:
+    - head_struct
+    - enc5_struct
+    - down5_struct
+    - head_beam
+    - enc5_beam
+    - down5_beam
+    - enc5
+  intervals:
+    head_struct: inf
+    enc5_struct: 200
+    down5_struct: 200
+    head_beam: inf
+    enc5_beam: 200
+    down5_beam: 200
+    enc5: 200
