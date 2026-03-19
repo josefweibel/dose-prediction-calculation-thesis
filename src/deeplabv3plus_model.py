@@ -273,10 +273,14 @@ class DeepLabv3Plus(nn.Module):
       output, size=input_shape, mode='bilinear', align_corners=False
     )
 
-    output[:, 0:1, :, :] = F.relu(output[:, 0:1, :, :])
+    parts = [F.relu(output[:, 0:1, :, :])]
 
     if output.shape[1] > 1:
-      output[:, 1:2, :, :] = F.softplus(output[:, 1:2, :, :]) + 0.01
+      parts.append(F.softplus(output[:, 1:2, :, :]) + 0.01)
+      if output.shape[1] > 2:
+        parts.append(output[:, 2:, :, :])
+
+    output = torch.cat(parts, dim=1)
 
     return output
 
