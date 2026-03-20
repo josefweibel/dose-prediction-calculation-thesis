@@ -111,8 +111,9 @@ class DecoderModule(nn.Module):
   Decoder module with skip connections
   Aggregates encoder features with decoder features using concatenation
   """
-  def __init__(self, low_level_channels, num_classes=1):
+  def __init__(self, low_level_channels, num_classes=1, separate_heads=False, var_head_init_bias=-2.0):
     super().__init__()
+    self.separate_heads = separate_heads and num_classes >= 2
 
     # Reduce channels from low-level features
     self.conv1 = nn.Sequential(
@@ -133,8 +134,16 @@ class DecoderModule(nn.Module):
       nn.Dropout(0.1)
     )
 
-    # Final output layer
-    self.conv3 = nn.Conv2d(256, num_classes, 1)
+    if self.separate_heads:
+      self.mean_head = nn.Conv2d(256, 1, 1)
+      self.var_head = nn.Conv2d(256, 1, 1)
+      nn.init.constant_(self.var_head.bias, var_head_init_bias)
+      if num_classes > 2:
+        self.extra_head = nn.Conv2d(256, num_classes - 2, 1)
+      else:
+        self.extra_head = None
+    else:
+      self.conv3 = nn.Conv2d(256, num_classes, 1)
 
   def forward(self, encoder_features, low_level_features):
     # Reduce low-level feature channels
@@ -151,9 +160,14 @@ class DecoderModule(nn.Module):
 
     # Decode
     x = self.conv2(x)
-    x = self.conv3(x)
 
-    return x
+    if self.separate_heads:
+      parts = [self.mean_head(x), self.var_head(x)]
+      if self.extra_head is not None:
+        parts.append(self.extra_head(x))
+      return torch.cat(parts, dim=1)
+    else:
+      return self.conv3(x)
 
 
 class ResNet50Encoder(nn.Module):
@@ -235,7 +249,8 @@ class DeepLabv3Plus(nn.Module):
     num_classes: Number of output channels (1 for dose prediction)
     pretrained_encoder: Whether to use pretrained ResNet-50 weights
   """
-  def __init__(self, in_channels=3, num_classes=1, pretrained_encoder=False):
+  def __init__(self, in_channels=3, num_classes=1, pretrained_encoder=False,
+               separate_heads=False, var_head_init_bias=-2.0):
     super().__init__()
 
     # Encoder
@@ -245,7 +260,10 @@ class DeepLabv3Plus(nn.Module):
     self.aspp = ASPPModule(in_channels=2048, out_channels=256)
 
     # Decoder
-    self.decoder = DecoderModule(low_level_channels=256, num_classes=num_classes)
+    self.decoder = DecoderModule(
+      low_level_channels=256, num_classes=num_classes,
+      separate_heads=separate_heads, var_head_init_bias=var_head_init_bias
+    )
 
   def forward(self, x):
     """
@@ -425,11 +443,15 @@ def build_deeplabv3plus(config, structure_selector, out_channels=1):
 
   n_input_channels = structure_selector.total_channels
   pretrained = deeplabv3plus_config.get('pretrained_encoder', False)
+  separate_heads = deeplabv3plus_config.get('separate_heads', False)
+  var_head_init_bias = deeplabv3plus_config.get('var_head_init_bias', -2.0)
 
   model = DeepLabv3Plus(
     in_channels=n_input_channels,
     num_classes=out_channels,
-    pretrained_encoder=pretrained
+    pretrained_encoder=pretrained,
+    separate_heads=separate_heads,
+    var_head_init_bias=var_head_init_bias,
   )
 
   return model
