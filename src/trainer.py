@@ -453,7 +453,8 @@ class Trainer:
       self.model = WarmStartModelTrainerModule(
         self.net_model,
         body_mask_index=train_dataset.selector.get_channel_indices('body')[0],
-        loss_type=self.config.get('warm_start_loss_type', 'gaussian_nll'),
+        loss_type=self.config['warm_start_model'].get('loss_type', 'gaussian_nll'),
+        loss_warmup_epochs=self.config['warm_start_model'].get('loss_warmup_epochs', 0),
       ).to(self.device)
     # Phase 2: Diffusion with warm-start, or regular diffusion/U-Net training
     else:
@@ -664,6 +665,8 @@ class Trainer:
         with torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_mixed_precision else contextlib.nullcontext():
           if self.warm_start_enabled:
             loss = self.model(target, condition, mu, sigma)
+          elif isinstance(self.model, WarmStartModelTrainerModule):
+            loss = self.model(target, condition, epoch=self.epoch)
           else:
             loss = self.model(target, condition)
 

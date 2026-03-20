@@ -97,24 +97,30 @@ class WarmStartModelTrainerModule(nn.Module):
   Similar interface to UnetTrainerModule for compatibility with Trainer.
   """
 
-  def __init__(self, model, body_mask_index, loss_type='gaussian_nll'):
+  def __init__(self, model, body_mask_index, loss_type='gaussian_nll', loss_warmup_epochs=0):
     super().__init__()
     self.model = model  # WarmStartModel
     self.loss_type = loss_type
     self.body_mask_index = body_mask_index
+    self.loss_warmup_epochs = loss_warmup_epochs
 
-  def forward(self, x_0, condition):
+  def forward(self, x_0, condition, epoch=0):
     """
-    Compute Gaussian NLL loss.
+    Compute loss. Uses L2 during warmup epochs, then switches to the configured loss.
 
     Args:
       x_0: Target dose [B, 1, H, W]
       condition: Conditioning tensor [B, C, H, W]
+      epoch: Current epoch number (used for loss warmup)
 
     Returns:
       Scalar loss value
     """
     mu, sigma = self.model(condition)
+
+    # During warmup, use plain L2 loss on mu only
+    if epoch < self.loss_warmup_epochs:
+      return F.mse_loss(mu, x_0)
 
     if self.loss_type == 'gaussian_nll_v2':
       sigma = sigma.clamp(min=1e-3)
