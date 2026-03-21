@@ -122,7 +122,23 @@ class WarmStartModelTrainerModule(nn.Module):
     if epoch < self.loss_warmup_epochs:
       return F.mse_loss(mu, x_0)
 
-    if self.loss_type == 'gaussian_nll_v2':
+    if self.loss_type == 'gaussian_nll_v3':
+      sigma = sigma.clamp(min=1e-3)
+      mask = condition[:, self.body_mask_index:self.body_mask_index+1, :, :]
+
+      normalized_diff = (x_0 - mu) / sigma
+      nll = 0.5 * normalized_diff ** 2 + torch.log(sigma)
+
+      # Only compute NLL over non-background voxels
+      nll_loss = (nll * mask).sum() / (mask.sum() + 1e-8)
+
+      # Auxiliary loss: guide sigma towards empirical residual magnitude
+      with torch.no_grad():
+        pseudo_sigma = (x_0 - mu).abs() + 0.01
+      aux_loss = F.mse_loss(sigma * mask, pseudo_sigma * mask)
+
+      return nll_loss + 0.1 * aux_loss
+    elif self.loss_type == 'gaussian_nll_v2':
       sigma = sigma.clamp(min=1e-3)
       mask = condition[:, self.body_mask_index:self.body_mask_index+1, :, :]
 
