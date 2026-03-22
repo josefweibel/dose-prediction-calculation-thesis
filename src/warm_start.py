@@ -104,6 +104,8 @@ class WarmStartModelTrainerModule(nn.Module):
     self.body_mask_index = body_mask_index
     self.loss_warmup_epochs = loss_warmup_epochs
 
+    print(f"Initialized WarmStartModelTrainerModule with loss_type={loss_type} and loss_warmup_epochs={loss_warmup_epochs}")
+
   def forward(self, x_0, condition, epoch=0):
     """
     Compute loss. Uses L2 during warmup epochs, then switches to the configured loss.
@@ -116,6 +118,24 @@ class WarmStartModelTrainerModule(nn.Module):
     Returns:
       Scalar loss value
     """
+    # v4: use raw log_sigma directly (skip softplus), better gradients
+    if self.loss_type == 'gaussian_nll_v4':
+      out = self.model(condition)
+      mu = out[:, 0:1]
+      log_sigma = out[:, 1:2]
+
+      # stabilize
+      log_sigma = torch.clamp(log_sigma, -5, 5)
+
+      mask = condition[:, self.body_mask_index:self.body_mask_index+1]
+
+      # NLL
+      inv_var = torch.exp(-2 * log_sigma)
+      nll = 0.5 * ((x_0 - mu)**2 * inv_var + 2 * log_sigma)
+
+      loss = (nll * mask).sum() / (mask.sum() + 1e-8)
+      return loss
+
     mu, sigma = self.model(condition)
 
     # During warmup, use plain L2 loss on mu only

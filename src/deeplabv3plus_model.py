@@ -111,25 +111,31 @@ class DecoderModule(nn.Module):
   Decoder module with skip connections
   Aggregates encoder features with decoder features using concatenation
   """
-  def __init__(self, low_level_channels, num_classes=1, separate_heads=False, var_head_init_bias=-2.0):
+  def __init__(self, low_level_channels, num_classes=1, separate_heads=False, var_head_init_bias=-2.0,
+               group_norm=False, group_norm_groups=8):
     super().__init__()
     self.separate_heads = separate_heads and num_classes >= 2
+
+    def norm_layer(channels):
+      if group_norm:
+        return nn.GroupNorm(min(group_norm_groups, channels), channels)
+      return nn.BatchNorm2d(channels)
 
     # Reduce channels from low-level features
     self.conv1 = nn.Sequential(
       nn.Conv2d(low_level_channels, 48, 1, bias=False),
-      nn.BatchNorm2d(48),
+      norm_layer(48),
       nn.ReLU(inplace=True)
     )
 
     # Decoder layers after concatenation
     self.conv2 = nn.Sequential(
       nn.Conv2d(256 + 48, 256, 3, padding=1, bias=False),
-      nn.BatchNorm2d(256),
+      norm_layer(256),
       nn.ReLU(inplace=True),
       nn.Dropout(0.5),
       nn.Conv2d(256, 256, 3, padding=1, bias=False),
-      nn.BatchNorm2d(256),
+      norm_layer(256),
       nn.ReLU(inplace=True),
       nn.Dropout(0.1)
     )
@@ -250,7 +256,8 @@ class DeepLabv3Plus(nn.Module):
     pretrained_encoder: Whether to use pretrained ResNet-50 weights
   """
   def __init__(self, in_channels=3, num_classes=1, pretrained_encoder=False,
-               separate_heads=False, var_head_init_bias=-2.0):
+               separate_heads=False, var_head_init_bias=-2.0,
+               decoder_group_norm=False, decoder_group_norm_groups=8):
     super().__init__()
 
     # Encoder
@@ -262,7 +269,8 @@ class DeepLabv3Plus(nn.Module):
     # Decoder
     self.decoder = DecoderModule(
       low_level_channels=256, num_classes=num_classes,
-      separate_heads=separate_heads, var_head_init_bias=var_head_init_bias
+      separate_heads=separate_heads, var_head_init_bias=var_head_init_bias,
+      group_norm=decoder_group_norm, group_norm_groups=decoder_group_norm_groups
     )
 
   def forward(self, x):
@@ -303,130 +311,6 @@ class DeepLabv3Plus(nn.Module):
     return output
 
 
-class PerceptualLoss(nn.Module):
-  """
-  Perceptual loss for preserving dose gradient information
-
-  Based on the paper reference [18]: "Perceptual losses for real-time style transfer
-  and super-resolution" (Johnson et al., ECCV 2016)
-
-  This implementation uses a lightweight feature extractor to compute perceptual loss
-  in feature space, which helps preserve the dose gradient features, especially in
-  dose fall-off regions.
-
-  Note: The paper doesn't specify the exact perceptual loss architecture, so we use
-  a simple VGG-style feature extractor. The features are computed and frozen during
-  training to provide consistent gradient signals.
-  """
-  def __init__(self):
-    super().__init__()
-
-    # Simple feature extractor (VGG-style)
-    # Using a lightweight architecture suitable for single-channel dose maps
-    self.features = nn.Sequential(
-      # Block 1
-      nn.Conv2d(1, 64, 3, padding=1),
-      nn.ReLU(inplace=True),
-      nn.Conv2d(64, 64, 3, padding=1),
-      nn.ReLU(inplace=True),
-      nn.MaxPool2d(2, 2),
-
-      # Block 2
-      nn.Conv2d(64, 128, 3, padding=1),
-      nn.ReLU(inplace=True),
-      nn.Conv2d(128, 128, 3, padding=1),
-      nn.ReLU(inplace=True),
-      nn.MaxPool2d(2, 2),
-
-      # Block 3
-      nn.Conv2d(128, 256, 3, padding=1),
-      nn.ReLU(inplace=True),
-      nn.Conv2d(256, 256, 3, padding=1),
-      nn.ReLU(inplace=True),
-    )
-
-    # Initialize weights with standard initialization
-    self._initialize_weights()
-
-    # Freeze feature extractor - it should not be trained
-    # This provides consistent perceptual features throughout training
-    for param in self.features.parameters():
-      param.requires_grad = False
-
-  def _initialize_weights(self):
-    """Initialize weights using standard initialization"""
-    for m in self.features.modules():
-      if isinstance(m, nn.Conv2d):
-        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-        if m.bias is not None:
-          nn.init.constant_(m.bias, 0)
-
-  def forward(self, pred, target):
-    """
-    Compute perceptual loss
-
-    Args:
-      pred: Predicted dose (B, 1, H, W)
-      target: Target dose (B, 1, H, W)
-
-    Returns:
-      Perceptual loss value
-    """
-    # Extract features
-    pred_features = self.features(pred)
-    target_features = self.features(target)
-
-    # Compute L2 distance in feature space
-    loss = F.mse_loss(pred_features, target_features)
-
-    return loss
-
-
-class DeepLabv3PlusLoss(nn.Module):
-  """
-  Combined loss function for DeepLabv3+ dose prediction
-
-  As stated in the paper: "the perceptual loss is introduced as a part of the network
-  loss function" to preserve dose gradient information.
-
-  L_total = L_MSE + λ * L_perceptual
-
-  where:
-  - L_MSE: Mean Squared Error on dose values (primary loss as stated in paper)
-  - L_perceptual: Perceptual loss to preserve dose gradients
-  - λ: weight for perceptual loss (paper doesn't specify exact value, using 0.1 as reasonable default)
-  """
-  def __init__(self, perceptual_weight=0.1, use_perceptual=True):
-    super().__init__()
-    self.perceptual_weight = perceptual_weight
-    self.use_perceptual = use_perceptual
-
-    if use_perceptual:
-      self.perceptual_loss = PerceptualLoss()
-
-  def forward(self, pred, target):
-    """
-    Compute combined loss
-
-    Args:
-      pred: Predicted dose (B, 1, H, W)
-      target: Target dose (B, 1, H, W)
-
-    Returns:
-      Total loss value (and optionally loss dict)
-    """
-    # MSE loss (as specified in paper: "loss function used in the optimization was mean square error")
-    mse_loss = F.mse_loss(pred, target)
-
-    if self.use_perceptual and self.perceptual_weight > 0:
-      # Perceptual loss
-      perceptual = self.perceptual_loss(pred, target)
-      total_loss = mse_loss + self.perceptual_weight * perceptual
-      return total_loss, {'mse': mse_loss.item(), 'perceptual': perceptual.item()}
-    else:
-      return mse_loss, {'mse': mse_loss.item()}
-
-
 def build_deeplabv3plus(config, structure_selector, out_channels=1):
   """
   Factory function to build DeepLabv3+ model
@@ -445,6 +329,8 @@ def build_deeplabv3plus(config, structure_selector, out_channels=1):
   pretrained = deeplabv3plus_config.get('pretrained_encoder', False)
   separate_heads = deeplabv3plus_config.get('separate_heads', False)
   var_head_init_bias = deeplabv3plus_config.get('var_head_init_bias', -2.0)
+  decoder_group_norm = deeplabv3plus_config.get('decoder_group_norm', False)
+  decoder_group_norm_groups = deeplabv3plus_config.get('decoder_group_norm_groups', 8)
 
   model = DeepLabv3Plus(
     in_channels=n_input_channels,
@@ -452,6 +338,8 @@ def build_deeplabv3plus(config, structure_selector, out_channels=1):
     pretrained_encoder=pretrained,
     separate_heads=separate_heads,
     var_head_init_bias=var_head_init_bias,
+    decoder_group_norm=decoder_group_norm,
+    decoder_group_norm_groups=decoder_group_norm_groups,
   )
 
   return model
