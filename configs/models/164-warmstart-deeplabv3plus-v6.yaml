@@ -21,6 +21,7 @@ warm_start_model:
   min_sigma: 0.01
   loss_type: gaussian_nll_v4
   loss_warmup_epochs: 0
+  sigma_activation: null
 
 deeplabv3plus:
   separate_heads: true

@@ -38,10 +38,11 @@ class WarmStartModel(nn.Module):
     min_sigma: Minimum sigma value for numerical stability (default: 0.01)
   """
 
-  def __init__(self, base_model, min_sigma=0.01):
+  def __init__(self, base_model, min_sigma=0.01, sigma_act='softplus'):
     super().__init__()
     self.base_model = base_model
     self.min_sigma = min_sigma
+    self.sigma_act = sigma_act
 
   def forward(self, condition):
     """
@@ -57,7 +58,15 @@ class WarmStartModel(nn.Module):
     out = self.base_model(condition)  # [B, 2, H, W]
     mu = out[:, 0:1].clone()          # [B, 1, H, W]
     log_sigma = out[:, 1:2]           # [B, 1, H, W]
-    sigma = F.softplus(log_sigma) + self.min_sigma
+    if self.sigma_act == 'softplus':
+      sigma = F.softplus(log_sigma) + self.min_sigma
+    elif self.sigma_act == 'exp':
+      sigma = torch.exp(log_sigma) + self.min_sigma
+    elif self.sigma_act is None:
+      sigma = log_sigma
+    else:
+      raise ValueError(f"Unknown sigma activation: {self.sigma_act}")
+
     return mu, sigma
 
 
@@ -80,11 +89,12 @@ def build_warm_start_model(config, structure_selector):
 
   ws_cfg = config['warm_start_model']
   min_sigma = ws_cfg.get('min_sigma', 0.01)
+  sigma_act = ws_cfg.get('sigma_activation', 'softplus')
 
   # Build base model with out_channels=2 for (μ, log_σ) prediction
   base = build_model(config, structure_selector, out_channels=2)
 
-  return WarmStartModel(base, min_sigma=min_sigma)
+  return WarmStartModel(base, min_sigma=min_sigma, sigma_act=sigma_act)
 
 
 class WarmStartModelTrainerModule(nn.Module):
@@ -118,11 +128,8 @@ class WarmStartModelTrainerModule(nn.Module):
     Returns:
       Scalar loss value
     """
-    # v4: use raw log_sigma directly (skip softplus), better gradients
     if self.loss_type == 'gaussian_nll_v4':
-      out = self.model(condition)
-      mu = out[:, 0:1]
-      log_sigma = out[:, 1:2]
+      mu, log_sigma = self.model(condition)
 
       # stabilize
       log_sigma = torch.clamp(log_sigma, -5, 5)
