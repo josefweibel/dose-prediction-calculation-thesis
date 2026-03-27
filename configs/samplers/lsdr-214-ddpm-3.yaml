@@ -1,0 +1,16 @@
+sampler: ddpm
+T: 3 
+schedule: linear
+
+start_t: 3
+lsdr:
+  fast_model: 214-deeplabv3plus-l2
+
+data_cache_size: inf
+num_workers: 4
+prefetch_factor: 4
+prefetch_on_gpu: false
+
+seed: 1
+batch_size_per_gpu: 16
+precision: null
