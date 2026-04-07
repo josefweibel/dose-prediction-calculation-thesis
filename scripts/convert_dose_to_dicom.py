@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 Convert predicted dose .npy files to DICOM RTDose format.
 
@@ -182,9 +184,10 @@ def write_rtdose_dicom(
     """
     ds = copy.deepcopy(template_ds)
 
-    max_dose = float(dose_dhw.max())
+    dose_clean = np.nan_to_num(dose_dhw, nan=0.0, posinf=0.0, neginf=0.0)
+    max_dose = float(dose_clean.max())
     scale = max_dose / (2**32 - 1) if max_dose > 0 else 1.0
-    pixels = (dose_dhw / scale).astype(np.uint32)
+    pixels = np.clip(dose_clean / scale, 0, 2**32 - 1).astype(np.uint32)
 
     ds.BitsAllocated = 32
     ds.BitsStored = 32
@@ -361,15 +364,15 @@ def main() -> None:
         help='Label for this model — used as the output subdirectory name',
     )
     parser.add_argument(
-        '--dicom-root', type=Path, required=True, default=Path('/storage/research/artorg_mia/Head_and_Neck'),
+        '--dicom-root', type=Path, default=Path('/storage/research/artorg_mia/Head_and_Neck'),
         help='Root of the TCIA DICOM data (contains TCIA1_…, TCIA2_…, … subdirectories)',
     )
     parser.add_argument(
-        '--output-dir', type=Path, required=True, default=Path('dicom/'),
+        '--output-dir', type=Path, default=Path('dicom/'),
         help='Output root directory',
     )
     parser.add_argument(
-        '--gdphmm-dir', type=Path, required=True, default=Path('data/gdphmm-hn/test'),
+        '--gdphmm-dir', type=Path, default=Path('data/gdphmm-hn-vmat/test'),
         help='GDPHMM split directory containing the original .npz volume files '
              '(e.g. data/gdphmm-hn/test/)',
     )
