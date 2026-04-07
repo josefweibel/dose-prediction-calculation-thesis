@@ -5,12 +5,39 @@ import seaborn as sns
 from typing import List, Dict, Optional
 from itertools import cycle
 from scipy.stats import rankdata
-from matplotlib.colors import to_rgba, BoundaryNorm
-from matplotlib.patches import Patch
+from matplotlib.colors import to_rgba, to_rgb, BoundaryNorm
+from matplotlib.patches import Patch, Polygon
 import matplotlib.gridspec as gridspec
+import matplotlib.transforms as transforms
 from pathlib import Path
 
-from data import GDPHMM_OAR, GDPHMM_DOSE_MAX, GDPHMM_OAR_V3
+import json
+
+from data import GDPHMM_OAR, GDPHMM_DOSE_MAX, GDPHMM_OAR_V3, GDPHMM_DATA_BASE_PATH
+from evaluator import GDPHMM_UNIQUE_OAR
+
+def rename_organs(series):
+  series = series.str.replace('-PTV', '')
+  series = series.str.replace('_05', '')
+  series = series.str.replace('_03', '')
+  series = series.str.replace('_', ' ')
+  series = series.str.replace('SpinalCord', 'Spinal Cord')
+  series = series.str.replace('BrainStem', 'Brain Stem')
+  series = series.str.replace('ParotidCon', 'Parotid Contralateral')
+  series = series.str.replace('ParotidIps', 'Parotid Ipsilateral')
+  series = series.str.replace('OCavity', 'Oral Cavity')
+  series = series.str.replace('PharConst', 'Pharynx Constrictor')
+  series = series.str.replace('Cochlea L', 'Cochlea Left')
+  series = series.str.replace('Cochlea R', 'Cochlea Right')
+  series = series.str.replace('OpticNerve L', 'Optic Nerve Left')
+  series = series.str.replace('OpticNerve R', 'Optic Nerve Right')
+  series = series.str.replace('Submand', 'Submandibular')
+  series = series.str.replace('SubmandibularR', 'Submandibular Right')
+  series = series.str.replace('SubmandibularL', 'Submandibular Left')
+  series = series.str.replace('Lens L', 'Lens Left')
+  series = series.str.replace('Lens R', 'Lens Right')
+  series = series.str.replace('Chiasm', 'Chiasma opticum')
+  return series
 from data_legacy import GDPHMMSlicesDataset, LRUCacheBytes
 from constraints import (
     ConstraintLibrary, ConstraintEvaluator,
@@ -32,7 +59,7 @@ METRIC_LABELS = {
   'dose_score': 'Dose Score (MAE)',
   'homogeneity_index': 'Homogeneity Index',
   'mse_body': 'Mean Squared Error (MSE) Body',
-  'rmse_body': 'Root Mean Squared Error (RMSE) Body',
+  'rmse_body': 'Root Mean Squared Error',
   'psnr_body': 'Peak Signal-to-Noise Ratio (PSNR) Body',
   'dose_score_body': 'Dose Score (MAE) Body',
   'var_laplacian_diff': 'Sharpness Metric (Variance of Laplacian Difference)',
@@ -62,7 +89,7 @@ METRIC_ABBRS = {
   'dose_score': 'Dose Score (MAE)',
   'homogeneity_index': 'HI',
   'mse_body': 'MSE Body',
-  'rmse_body': 'RMSE Body',
+  'rmse_body': 'RMSE',
   'psnr_body': 'PSNR Body',
   'dose_score_body': 'Dose Score (MAE) Body',
   'var_laplacian_diff': 'Sharpness',
@@ -71,10 +98,10 @@ METRIC_ABBRS = {
   'disagreement/disagreement_all': 'Disagreement',
   'agreement/agreement_all_percentage': 'Agreement',
   'disagreement/disagreement_all_percentage': 'Disagreement',
-  'gamma_5_5/pass_rate': 'Gamma 5%/5mm',
-  'gamma_3_3/pass_rate': 'Gamma 3%/3mm',
-  'gamma_2_2/pass_rate': 'Gamma 2%/2mm',
-  'gamma_1_1/pass_rate': 'Gamma 1%/1mm',
+  'gamma_5_5/pass_rate': 'Gamma\n5%/5mm',
+  'gamma_3_3/pass_rate': 'Gamma\n3%/3mm',
+  'gamma_2_2/pass_rate': 'Gamma\n2%/2mm',
+  'gamma_1_1/pass_rate': 'Gamma\n1%/1mm',
   'dvh_auc/OAR/diff': 'OAR DVH\nABC',
   'mean_dose/high/abs_diff': 'PTV Dose\nDistance',
   'homogeneity_index/high/abs_diff': 'HI\nDistance',
@@ -124,7 +151,7 @@ METRICS_PRED = [
 ]
 
 METRICS_PLAN = [
-  'vol_rmse', 'vol_gamma_3_3/pass_rate', 'vol_disagreement/disagreement_all_percentage', 'vol_dvh_auc/OAR/diff',
+  'vol_disagreement/disagreement_all_percentage', 'vol_dvh_auc/OAR/diff', 'vol_rmse_body', 'vol_gamma_3_3/pass_rate',
 ]
 
 METRICS_PLAN_EXTENDED = METRICS_PLAN + [
@@ -337,6 +364,33 @@ def draw_ptv_overlay(ax, ptv_doses, color='red', alpha=0.3):
   overlay[combined_mask, 3] = alpha
   ax.imshow(overlay)
 
+def draw_beam_overlay(ax, beam_plate, color='yellow', alpha=0.3):
+  """
+  Draw filled overlay for the beam plate on the given axes.
+
+  Args:
+      ax: Matplotlib axes
+      beam_plate: Array of shape (1, H, W) or (H, W) with beam plate values
+      color: Color for the overlay
+      alpha: Maximum transparency of the overlay
+  """
+  if beam_plate.ndim == 3:
+    beam_plate = beam_plate[0]
+  beam_mask = beam_plate > 0
+  if not beam_mask.any():
+    return
+  overlay = np.zeros((*beam_plate.shape, 4))
+  rgb = to_rgb(color)
+  overlay[beam_mask, 0] = rgb[0]
+  overlay[beam_mask, 1] = rgb[1]
+  overlay[beam_mask, 2] = rgb[2]
+  # Scale alpha by beam intensity for a nicer look
+  max_val = beam_plate.max()
+  if max_val > 0:
+    overlay[beam_mask, 3] = alpha * beam_plate[beam_mask] / max_val
+  ax.imshow(overlay)
+
+
 def build_dataset(dataset_split='test'):
   cache = LRUCacheBytes(max_bytes=5 * 1024 ** 3)  # 5 GB cache
 
@@ -348,8 +402,10 @@ def build_dataset(dataset_split='test'):
     cache=cache,
     structure_groups=[
       'ct',
+      'body',
       'oar_v3',
       'ptv_doses',
+      'beam_plate',
     ],
     limit=None,
     skip=0,
@@ -496,28 +552,68 @@ class BaseResults:
       constraint_type=constraint_type
     )
 
-  def plot_quality_over_slice_index(self, metric, ax=None):
+  def plot_quality_over_slice_index_single(self, metric, ax=None, relative_to_center=False, agg='mean'):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 5))
 
     # Plot one line per result in results_list
     for result, label in zip(self.results_list, self.result_labels):
-      grouped = result.slice_metrics.groupby('slice_index')[metric]
-      means = grouped.mean()
-      stds = grouped.std()
+      if relative_to_center:
+        df = result.slice_metrics[['file_name', 'slice_index', metric]].copy()
+        mid = df.groupby('file_name')['slice_index'].transform(lambda s: round((s.min() + s.max()) / 2))
+        df['rel_index'] = df['slice_index'] - mid
+        grouped = df.groupby('rel_index')[metric]
+      else:
+        grouped = result.slice_metrics.groupby('slice_index')[metric]
 
-      ax.errorbar(means.index, means.values, yerr=stds.values, fmt='o-', capsize=3, label=label, alpha=0.7)
+      if agg == 'mean':
+        center = grouped.mean()
+        err_lo = grouped.std()
+        err_hi = err_lo
+      elif agg == 'median':
+        center = grouped.median()
+        err_lo = center - grouped.quantile(0.25)
+        err_hi = grouped.quantile(0.75) - center
+
+      ax.errorbar(center.index, center.values, yerr=[err_lo.values, err_hi.values], fmt='o-', capsize=3, label=label, alpha=0.7)
 
     dir_symbol = '↑' if is_higher_better(metric) else '↓'
-    ax.set_title(f'{get_metric_abbr(metric)} vs Slice Index (Mean ± SD) \n{dir_symbol} is better')
-    ax.set_xlabel('Slice Index')
-    ax.set_ylabel(get_metric_label(metric))
+    index_label = 'relative slice index (0 = center)' if relative_to_center else 'slice index'
+    agg_label = 'Mean ± SD' if agg == 'mean' else 'Median ± IQR'
+    ax.set_title(f'{get_metric_abbr(metric, with_unit=False)} vs {index_label} \n{dir_symbol} is better')
+    ax.set_xlabel(index_label)
+    ax.set_ylabel(agg_label + ' ' + get_metric_abbr(metric))
 
     # Only show legend if there are multiple results
     if len(self.results_list) > 1:
       ax.legend()
 
     return ax
+
+  def plot_quality_over_slice_index(self, metrics=METRICS_DEFAULT, relative_to_center=False, agg='mean'):
+    if isinstance(metrics, str):
+      return self.plot_quality_over_slice_index_single(metrics, relative_to_center=relative_to_center, agg=agg)
+
+    fig, axes = setup_fig_axes(metrics, sharey=False)
+
+    for i, metric in enumerate(metrics):
+      metric = metric.replace('vol_', '')  # Remove 'vol_' prefix for plotting
+      self.plot_quality_over_slice_index_single(metric, ax=axes[i], relative_to_center=relative_to_center, agg=agg)
+
+    index_label = 'relative slice index (0 = center)' if relative_to_center else 'slice index'
+    fig.suptitle(f'Quality vs {index_label}', fontsize=16)
+    fig.tight_layout()
+
+    if len(self.results_list) > 1:
+      handles, labels = axes[0].get_legend_handles_labels()
+      fig.legend(handles, labels, loc='upper right', title='', ncol=8)
+
+      for ax in axes:
+        legend = ax.get_legend()
+        if legend:
+          legend.remove()
+
+    return fig, axes
 
   def plot_dvh(self, structure_index, ax=None, max_dose=None):
     if ax is None:
@@ -764,7 +860,7 @@ class SampleResults(BaseResults):
     return np.load(self.base_path / f'{self.sample}.npy')[0]
 
 
-  def plot_volume_dvh(self, ax=None):
+  def plot_volume_dvh(self, ax=None, highlight=None, fade_alpha=0.3):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
@@ -772,34 +868,56 @@ class SampleResults(BaseResults):
     pred_dose = self.load_pred_volume()
 
     structure = structure[np.newaxis, ...]  # Add batch dimension
-    ptv_masks = self.dataset.selector.get_ptv_doses(structure) > 0
+    ptv_doses_channels = self.dataset.selector.get_ptv_doses(structure)
+    ptv_masks = ptv_doses_channels > 0
     oar_masks = self.dataset.selector.get_component(structure, 'oar_v3') > 0
 
-    print('ptv_masks', ptv_masks.shape)
-    print('oar_masks', oar_masks.shape)
-    masks = np.concatenate([ptv_masks[:, 0:1], oar_masks], axis=1)[0]
-    print('masks', masks.shape)
+    # Build PTV level names from PTV_DICT.json
+    with open(GDPHMM_DATA_BASE_PATH / 'gdphmm-hn' / 'incoming' / 'PTV_DICT.json') as f:
+      ptv_info = json.load(f)[self.sample.split('+')[0]]
+
+    # Channels sorted by dose descending: High, Mid, Low
+    ptv_level_order = ['PTV_High', 'PTV_Mid', 'PTV_Low']
+    ptv_names = []
+    for i, level in enumerate(ptv_level_order):
+      if ptv_masks[0, i].sum() > 0 and level in ptv_info:
+        ptv_names.append(f'{level.replace("PTV_", "PTV ")} ({ptv_info[level]["PDose"]:.0f} Gy)')
+
+    ptv_masks_present = ptv_masks[0, :len(ptv_names)]
+    all_oar_names = rename_organs(pd.Series(GDPHMM_OAR_V3)).tolist()
+
+    # Filter to unique OARs present in the volume
+    oar_present = [(name, raw_name, mask) for name, raw_name, mask in zip(all_oar_names, GDPHMM_OAR_V3, oar_masks[0]) if raw_name in GDPHMM_UNIQUE_OAR and mask.sum() > 0]
+    oar_present.sort(key=lambda x: x[0])
+    oar_names_present = [name for name, _, _ in oar_present]
+    oar_masks_present = np.stack([mask for _, _, mask in oar_present]) if oar_present else np.empty((0, *ptv_masks_present.shape[1:]))
+
+    all_masks = np.concatenate([ptv_masks_present, oar_masks_present], axis=0)
+    all_names = ptv_names + oar_names_present
 
     bins = np.linspace(0, np.max(original_dose), 200)
-    colors = cycle(plt.cm.tab10.colors)
+    ptv_colors = ['#D62728', '#E377C2', '#FF7F0E']
+    oar_cmap = plt.cm.tab20
+    oar_colors = [oar_cmap(i) for i in range(len(oar_names_present))]
+    all_colors = ptv_colors[:len(ptv_names)] + oar_colors
     handles, labels = [], []
-    for name, mask in zip(['PTV'] + GDPHMM_OAR_V3, masks):
-      if mask.sum() == 0:
-        continue
-
-      color = next(colors)
+    for name, mask, color in zip(all_names, all_masks, all_colors):
       x, y_orig = compute_dvh(original_dose, mask, bins)
       _, y_pred = compute_dvh(pred_dose, mask, bins)
-      ax.plot(x, y_orig, color=color, linestyle='-')
-      # ax.plot(x, y_pred, color=color, linestyle='--')
-      handles.append(plt.Line2D([0], [0], color=color, lw=2))
+      alpha = fade_alpha if highlight and name not in highlight else 1.0
+      lw = 1.0 if highlight and name not in highlight else 1.5
+      ax.plot(x, y_orig, color=color, linestyle='-', alpha=alpha, lw=lw)
+      ax.plot(x, y_pred, color=color, linestyle='--', alpha=alpha, lw=lw)
+      handles.append(plt.Line2D([0], [0], color=color, lw=2, alpha=alpha))
       labels.append(name)
 
-    ax.set_xlabel('Dose (Gy)')
+    ax.set_xlabel('Dose [Gy]')
     ax.set_ylabel('Volume Fraction ≥ Dose')
     ax.set_title('DVH Comparison')
+    ax.set_xlim(0, np.max(original_dose) + 1)
+    ax.set_ylim(0, 1.02)
     ax.grid(True, linestyle=':')
-    ax.legend(handles, labels, fontsize=8, title='Structures', loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=8)
+    ax.legend(handles, labels, fontsize=8, title='', loc='center left', bbox_to_anchor=(1.0, 0.5))
 
     return ax
 
@@ -1068,7 +1186,7 @@ class ModelComparison(BaseResults):
       'or access individual results via results_list[i].for_sample(sample)'
     )
 
-  def plot_metric_distribution(self, metric, ax=None, sort=False, outliers=True, skip_colors=0):
+  def plot_metric_distribution(self, metric, ax=None, sort=False, outliers=True, skip_colors=0, colors=None, show_is_better=True):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
@@ -1085,11 +1203,16 @@ class ModelComparison(BaseResults):
 
     df = pd.DataFrame({'model': labels, 'value': data, 'group': groups})
 
-    palette = None
-    if skip_colors > 0:
-      prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
-      unique_groups = df['group'].unique()
+    prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    unique_groups = df['group'].unique()
+    if colors is not None and isinstance(colors, dict):
+      palette = {g: colors.get(g, prop_cycle[(i + skip_colors) % len(prop_cycle)]) for i, g in enumerate(unique_groups)}
+    elif colors is not None:
+      palette = {g: colors[i % len(colors)] for i, g in enumerate(unique_groups)}
+    elif skip_colors > 0:
       palette = {g: prop_cycle[(i + skip_colors) % len(prop_cycle)] for i, g in enumerate(unique_groups)}
+    else:
+      palette = None
 
     # Sort by median, then IQR, then range if requested
     if sort:
@@ -1129,15 +1252,19 @@ class ModelComparison(BaseResults):
     ax.set_title(get_metric_label(metric))
     ax.set_xlabel(get_metric_abbr(metric))
     ax.set_ylabel('')
-    ax.text(0.01, -0.035, f'{dir_symbol} is better  ', transform=ax.transAxes,
-            ha='right', va='top', fontsize='medium', color='gray')
+
+    if show_is_better:
+      blend = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+      offset = transforms.ScaledTranslation(-60/72, -7/72, ax.figure.dpi_scale_trans)
+      ax.text(ax.get_xlim()[0], 0, f'{dir_symbol} is better', transform=blend + offset,
+              ha='left', va='top', fontsize='medium', color='gray')
 
     if self.has_groups:
       ax.legend(title='')
 
     return ax
 
-  def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True, skip_colors=0):
+  def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True, skip_colors=0, colors=None):
     if outliers == True:
       outliers = metrics
     elif outliers == False:
@@ -1146,7 +1273,7 @@ class ModelComparison(BaseResults):
     fig, axes = setup_fig_axes(metrics, sharey=False)
 
     for i, metric in enumerate(metrics):
-      self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=metric in outliers, skip_colors=skip_colors)
+      self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=metric in outliers, skip_colors=skip_colors, colors=colors)
 
     fig.suptitle('Metric Distributions Across Models', fontsize=16)
     fig.tight_layout()
@@ -1157,6 +1284,86 @@ class ModelComparison(BaseResults):
 
       for ax in axes:
         ax.get_legend().remove()
+
+    return fig, axes
+
+  def plot_metric_scatter(self, metric, label_x, label_y, better_label=None, jitter=False, ax=None):
+    if ax is None:
+      fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+
+    vm_x = self.volume_metrics[self.volume_metrics['label'] == label_x].set_index('file_name')
+    vm_y = self.volume_metrics[self.volume_metrics['label'] == label_y].set_index('file_name')
+
+    x = vm_x[metric]
+    y = vm_y.reindex(x.index)[metric]
+    mask = ~(x.isna() | y.isna())
+    x, y = x[mask], y[mask]
+
+    if jitter:
+      rng = np.random.default_rng(42)
+      spread = (x.max() - x.min()) * 0.05
+      x = x + rng.normal(0, spread, size=len(x))
+      y = y + rng.normal(0, spread, size=len(y))
+
+    all_vals = pd.concat([x, y])
+    lo, hi = all_vals.min(), all_vals.max()
+    margin = (hi - lo) * 0.05
+    lo, hi = lo - margin, hi + margin
+
+    # Determine which triangle (above/below diagonal) is "y better"
+    higher_better = is_higher_better(metric)
+    # Above diagonal: y > x. For higher_better metrics, y > x means y is better.
+    # For lower_better metrics, y < x (below diagonal) means y is better.
+    y_better_above = higher_better
+
+    # If better_label is label_x, flip: green where x outperforms y
+    if better_label == label_x:
+      y_better_above = not y_better_above
+
+    above_verts = [(lo, lo), (lo, hi), (hi, hi)]
+    below_verts = [(lo, lo), (hi, hi), (hi, lo)]
+
+    green_verts = above_verts if y_better_above else below_verts
+    red_verts = below_verts if y_better_above else above_verts
+
+    ax.add_patch(Polygon(green_verts, closed=True, facecolor='#2ca02c', alpha=0.08))
+    ax.add_patch(Polygon(red_verts, closed=True, facecolor='#d62728', alpha=0.08))
+
+    ax.plot([lo, hi], [lo, hi], 'k', linewidth=0.2, alpha=0.5)
+    ax.scatter(x, y, s=20, alpha=0.6, c='0.3')
+
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    ax.set_aspect('equal')
+
+    ax.set_yticks(ax.get_xticks())
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+
+    unit = get_metric_unit(metric)
+    unit_suffix = f' [{unit}]' if unit else ''
+    ax.set_xlabel(f'{label_x}{unit_suffix}')
+    ax.set_ylabel(f'{label_y}{unit_suffix}')
+    ax.set_title(get_metric_abbr(metric, with_lb=False, with_unit=False))
+
+    return ax
+
+  def plot_metric_scatters(self, metrics, label_x, label_y, better_label=None, jitter=True):
+    if jitter == True:
+      jitter = metrics
+    elif jitter == False:
+      jitter = []
+
+    fig, axes = setup_fig_axes(metrics)
+
+    for i, metric in enumerate(metrics):
+      self.plot_metric_scatter(metric, label_x, label_y, better_label=better_label, jitter=metric in jitter, ax=axes[i])
+
+    for j in range(len(metrics), len(axes)):
+      axes[j].set_visible(False)
+
+    fig.suptitle(f'{label_x} vs {label_y} Comparison')
+    fig.tight_layout()
 
     return fig, axes
 
@@ -1183,6 +1390,9 @@ class ModelComparison(BaseResults):
     if unit == 'seconds':
       short_unit = 's'
       pass  # already in seconds
+    elif unit == 'milliseconds':
+      short_unit = 'ms'
+      df['inference_time'] = df['inference_time'] * 1000.0
     elif unit == 'minutes':
       short_unit = 'min'
       df['inference_time'] = df['inference_time'] / 60.0
@@ -1204,15 +1414,15 @@ class ModelComparison(BaseResults):
     if ax is None:
       fig, axes = plt.subplots(1, 4, figsize=(15, 4))
 
-    axes[0].fill_between([55, 75], [55, 75], 75, color='green', alpha=0.1)
-    axes[0].fill_between([55, 75], [55, 75], 55, color='red', alpha=0.1)
+    axes[0].plot([55, 75], [55, 75], color='0.8', linestyle='-', linewidth=0.8)
     sns.scatterplot(self.volume_metrics, x=f'vol_mean_dose/high/target', y=f'vol_mean_dose/high/pred', style='label', hue='label', ax=axes[0], legend='full')
     #axes[0].set_title(r'Mean Dose $\tilde{x} = ' + str(self.volume_metrics['vol_mean_dose/high/abs_diff'].median().round(2)) + '$')
-    axes[0].set_title('Mean Dose')
+    axes[0].set_title('PTV Mean Dose')
     axes[0].set_xlabel('Target Mean Dose [Gy]')
     axes[0].set_ylabel('Predicted Mean Dose [Gy]')
-    axes[0].set_xlim(55, 75)
-    axes[0].set_ylim(55, 75)
+    # axes[0].set_xlim(55, 75)
+    # axes[0].set_ylim(55, 75)
+    axes[0].set_aspect('equal')
     axes[0].xaxis.get_major_locator().set_params(integer=True)
     axes[0].yaxis.get_major_locator().set_params(integer=True)
 
@@ -1222,8 +1432,8 @@ class ModelComparison(BaseResults):
     axes[1].set_title(f'Homogeneity Index')
     axes[1].set_xlabel('Target Homogeneity Index')
     axes[1].set_ylabel('Predicted Homogeneity Index')
-    axes[1].set_xlim(0, 0.40)
-    axes[1].set_ylim(0, 0.40)
+    # axes[1].set_xlim(0, 0.40)
+    # axes[1].set_ylim(0, 0.40)
 
     axes[2].fill_between([0, 1], [0, 1], 1, color='green', alpha=0.1)
     axes[2].fill_between([0, 1], [0, 1], 0, color='red', alpha=0.1)
@@ -1231,17 +1441,17 @@ class ModelComparison(BaseResults):
     axes[2].set_title(f'Paddick Conformity Index')
     axes[2].set_xlabel('Target Conformity Index')
     axes[2].set_ylabel('Predicted Conformity Index')
-    axes[2].set_xlim(0, 1.0)
-    axes[2].set_ylim(0, 1.0)
+    # axes[2].set_xlim(0, 1.0)
+    # axes[2].set_ylim(0, 1.0)
 
-    axes[3].fill_between([0, 93], [0, 93], 93, color='red', alpha=0.1)
-    axes[3].fill_between([0, 93], [0, 93], 0, color='green', alpha=0.1)
+    axes[3].fill_between([0, 100], [0, 100], 100, color='red', alpha=0.1)
+    axes[3].fill_between([0, 100], [0, 100], 0, color='green', alpha=0.1)
     sns.scatterplot(self.volume_metrics, x=f'vol_gradient_index/high/target', y=f'vol_gradient_index/high/pred', style='label', hue='label', ax=axes[3])
     axes[3].set_title(f'Gradient Index')
     axes[3].set_xlabel('Target Gradient Index')
     axes[3].set_ylabel('Predicted Gradient Index')
-    axes[3].set_xlim(0, 93)
-    axes[3].set_ylim(0, 93)
+    # axes[3].set_xlim(0, 93)
+    # axes[3].set_ylim(0, 93)
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', title='', ncol=8, bbox_to_anchor=(0.5, -0.1))
@@ -1255,6 +1465,8 @@ class ModelComparison(BaseResults):
     if fig is not None:
       fig.suptitle('PTV Evaluation')
       fig.tight_layout()
+
+    return fig, axes
 
   def plot_quality_over_time_by_volume(self, metric, ax=None):
     if ax is None:
@@ -1320,6 +1532,7 @@ class ModelComparison(BaseResults):
       xscale='log',
       baseline=None,
       skip_colors=0,
+      colors=None,
       show_uncertainty=True,
   ):
     fig, axes = setup_fig_axes(metrics)
@@ -1332,6 +1545,7 @@ class ModelComparison(BaseResults):
         baseline=baseline,
         ax=ax,
         skip_colors=skip_colors,
+        colors=colors,
         show_uncertainty=show_uncertainty,
       )
       ax.get_legend().remove()
@@ -1358,7 +1572,7 @@ class ModelComparison(BaseResults):
         y = df[metric].median()
         y_lo = df[metric].quantile(0.25)
         y_hi = df[metric].quantile(0.75)
-      label = result_label.replace(f' T=S={T}', '').replace(f' S={T}', '')
+      label = result_label.replace('\n', ' ').replace(f' T=S={T}', '').replace(f' S={T}', '')
       data[label] = data.get(label, []) + [(T, y, y_lo, y_hi)]
 
     for label in data:
@@ -1389,8 +1603,12 @@ class ModelComparison(BaseResults):
     """
 
     n_metrics = len(metrics)
-    n_cols = min(3, n_metrics)
-    n_metric_rows = (n_metrics + n_cols - 1) // n_cols
+    if n_metrics % 4 == 0:
+      n_cols = 4
+      n_metric_rows = n_metrics // 4
+    else:
+      n_cols = min(3, n_metrics)
+      n_metric_rows = (n_metrics + n_cols - 1) // n_cols
 
     fig = plt.figure(figsize=(4.5 * n_cols, 4 * n_metric_rows))
     outer_gs = gridspec.GridSpec(n_metric_rows, n_cols, figure=fig, hspace=0.3, wspace=0.17, top=0.92)
@@ -1456,7 +1674,11 @@ class ModelComparison(BaseResults):
       ax_top.set_title(get_metric_label(metric))
       ticks = sorted({p[0] for points in data.values() for p in points})
       ax_top.tick_params(labelbottom=False)
-      ax_top.set_ylabel(f'{agg.capitalize()}/{"std" if agg == "mean" else "IQR"}')
+
+      if show_uncertainty:
+        ax_top.set_ylabel(f'{agg.capitalize()}/{"std" if agg == "mean" else "IQR"}')
+      else:
+        ax_top.set_ylabel(agg.capitalize())
 
       dir_symbol = '↑' if is_higher_better(metric) else '↓'
       ax_top.text(0.95, 0.92, f'{dir_symbol} is better', transform=ax_top.transAxes,
@@ -1550,38 +1772,40 @@ class ModelComparison(BaseResults):
       baseline=None,
       ax=None,
       skip_colors=0,
+      colors=None,
       show_uncertainty=True,
   ):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
-    if skip_colors > 0:
-      prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    prop_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    if colors is None and skip_colors > 0:
       ax.set_prop_cycle(color=prop_cycle[skip_colors:])
 
-    data = {}
-    for result, result_label in zip(self.results_list, self.result_labels):
-      df = result.volume_metrics
-      T = int(result.sampling_name.split('-')[-1])
-      x = T
-      if agg == 'mean':
-        y = df[metric].mean()
-        y_lo = y - df[metric].std()
-        y_hi = y + df[metric].std()
-      elif agg == 'median':
-        y = df[metric].median()
-        y_lo = df[metric].quantile(0.25)
-        y_hi = df[metric].quantile(0.75)
-      label = result_label.replace(f' T=S={T}', '').replace(f' S={T}', '')
-      data[label] = data.get(label, []) + [(x, y, y_lo, y_hi)]
+    data = self._collect_quality_over_T_data(metric, agg=agg)
+    labels = list(data.keys())
+
+    # resolve colors per label
+    label_colors = {}
+    if colors is not None:
+      for i, label in enumerate(labels):
+        if isinstance(colors, dict):
+          label_colors[label] = colors.get(label, prop_cycle[(i + skip_colors) % len(prop_cycle)])
+        else:
+          label_colors[label] = colors[i % len(colors)]
 
     for label, points in data.items():
       points.sort(key=lambda p: p[0])
+      plot_kwargs = {}
+      if label in label_colors:
+        plot_kwargs['color'] = label_colors[label]
       ax.plot(
         [p[0] for p in points],
         [p[1] for p in points],
         marker='o',
         label=label,
+        **plot_kwargs,
       )
       if show_uncertainty:
         ax.fill_between(
@@ -1589,6 +1813,7 @@ class ModelComparison(BaseResults):
           [p[2] for p in points],
           [p[3] for p in points],
           alpha=0.2,
+          **plot_kwargs,
         )
 
     if baseline is not None:
@@ -1597,7 +1822,7 @@ class ModelComparison(BaseResults):
 
     dir_symbol = '↑' if is_higher_better(metric) else '↓'
     ax.set_title(get_metric_label(metric))
-    ax.text(0.1, -0.17, f'{dir_symbol} is better  ', transform=ax.transAxes,
+    ax.text(0.1, -0.17, f'{dir_symbol} is better', transform=ax.transAxes,
             ha='right', va='bottom', fontsize='medium', color='gray')
     ax.set_xlabel('Sampling $S$')
     ax.set_xscale(xscale)
@@ -1605,7 +1830,12 @@ class ModelComparison(BaseResults):
     ax.set_xticks(ticks)
     ax.xaxis.set_major_locator(plt.FixedLocator(ticks))
     ax.xaxis.set_major_formatter(plt.ScalarFormatter())
-    ax.set_ylabel(f'{agg.capitalize()}/{ "std" if agg == "mean" else "IQR" } ' + get_metric_abbr(metric))
+
+    if show_uncertainty:
+      ax.set_ylabel(f'{agg.capitalize()}/{ "std" if agg == "mean" else "IQR" } ' + get_metric_abbr(metric))
+    else:
+      ax.set_ylabel(f'{agg.capitalize()} ' + get_metric_abbr(metric))
+
     ax.legend()
 
     return ax
@@ -1757,11 +1987,16 @@ class ModelComparison(BaseResults):
       dose_cmap='jet',
       dose_alpha=0.5,
       show_oar=True,
+      show_beams=False,
       crop_to_body=False,
       crop_padding=2,
       max_error=None,
       dose_range=None,
       n_error_levels=11,
+      fig=None,
+      axes=None,
+      add_colorbar=True,
+      show_row_labels=True,
   ):
     """
     Visualize slice comparison with CT underneath transparent dose distributions.
@@ -1783,7 +2018,12 @@ class ModelComparison(BaseResults):
         Tuple of (figure, axes)
     """
     col_width = 3 if crop_to_body else 4
-    fig, axes = plt.subplots(2, len(self.results_list) + 1, figsize=(col_width * (len(self.results_list) + 1), 6.4), constrained_layout=True)
+    if axes is not None:
+      pass  # use caller-provided axes; fig must also be provided for colorbars
+    elif fig is None:
+      fig, axes = plt.subplots(2, len(self.results_list) + 1, figsize=(col_width * (len(self.results_list) + 1), 6.4), constrained_layout=True)
+    else:
+      axes = fig.subplots(2, len(self.results_list) + 1)
 
     first_result = self.results_list[0]
     sample_results = first_result.for_sample(sample)
@@ -1811,6 +2051,11 @@ class ModelComparison(BaseResults):
     oar_masks = None
     if show_oar:
       oar_masks = first_result.dataset.selector.get_component(structure, 'oar_v3')
+
+    # Get beam plate if needed
+    beam_plate = None
+    if show_beams:
+      beam_plate = first_result.dataset.selector.get_component(structure, 'beam_plate')
 
     if dose_range is not None:
       dose_min, dose_max = dose_range
@@ -1841,17 +2086,21 @@ class ModelComparison(BaseResults):
     if show_oar and oar_masks is not None:
       draw_oar_contours(axes[0, 0], oar_masks)
     axes[0, 0].set_title('Ground Truth')
-    axes[0, 0].text(-0.05, 0.5, 'Dose', transform=axes[0, 0].transAxes, fontsize=16, rotation=90, va='center', ha='right')
+    if show_row_labels:
+      axes[0, 0].text(-0.05, 0.5, 'Dose', transform=axes[0, 0].transAxes, fontsize=12, rotation=90, va='center', ha='right')
     axes[0, 0].axis('off')
 
     # Row 1, Col 0: CT with PTV only (reference)
     axes[1, 0].imshow(ct_slice, cmap='gray')
+    if show_beams and beam_plate is not None:
+      draw_beam_overlay(axes[1, 0], beam_plate)
     draw_ptv_overlay(axes[1, 0], ptv_doses)
     draw_ptv_contours(axes[1, 0], ptv_doses)
     if show_oar and oar_masks is not None:
       draw_oar_contours(axes[1, 0], oar_masks)
     axes[1, 0].set_title('')
-    axes[1, 0].text(-0.05, 0.5, 'Structures', transform=axes[1, 0].transAxes, fontsize=16, rotation=90, va='center', ha='right')
+    if show_row_labels:
+      axes[1, 0].text(-0.05, 0.5, 'Structures', transform=axes[1, 0].transAxes, fontsize=12, rotation=90, va='center', ha='right')
     axes[1, 0].axis('off')
 
     # Discretize error colorbar
@@ -1890,16 +2139,18 @@ class ModelComparison(BaseResults):
       axes[1, i + 1].axis('off')
 
     # Row labels on the left side of the generated columns
-    axes[0, 1].text(-0.03, 0.5, 'Generated', transform=axes[0, 1].transAxes, fontsize=16, rotation=90, va='center', ha='right')
-    axes[1, 1].text(-0.03, 0.5, 'Error', transform=axes[1, 1].transAxes, fontsize=16, rotation=90, va='center', ha='right')
+    if show_row_labels:
+      axes[0, 1].text(-0.03, 0.5, 'Generated', transform=axes[0, 1].transAxes, fontsize=12, rotation=90, va='center', ha='right')
+      axes[1, 1].text(-0.03, 0.5, 'Error', transform=axes[1, 1].transAxes, fontsize=12, rotation=90, va='center', ha='right')
 
     # Shared colorbars: one for dose (row 0), one for error (row 1)
-    fig.colorbar(im_dose, ax=axes[0, :].tolist(), fraction=0.02, pad=0.005, shrink=0.8, label='Dose (Gy)')
-    fig.colorbar(im_err, ax=axes[1, :].tolist(), fraction=0.02, pad=0.005, shrink=0.8, label='Error (Gy)')
+    if add_colorbar:
+      fig.colorbar(im_dose, ax=axes[0, :].tolist(), fraction=0.02, pad=0.005, shrink=0.8, label='Dose [Gy]')
+      fig.colorbar(im_err, ax=axes[1, :].tolist(), fraction=0.02, pad=0.005, shrink=0.8, label='Error [Gy]')
 
     # Crop to body bounding box if requested
     if crop_to_body:
-      body_mask = ct_slice > ct_slice.min()
+      body_mask = first_result.dataset.selector.get_body(structure)[0] > 0.5
       rows = np.any(body_mask, axis=1)
       cols = np.any(body_mask, axis=0)
       rmin, rmax = np.where(rows)[0][[0, -1]]
@@ -1914,7 +2165,7 @@ class ModelComparison(BaseResults):
           ax.set_xlim(cmin, cmax)
           ax.set_ylim(rmax, rmin)
 
-    return fig, axes
+    return fig, axes, im_dose, im_err
 
   def visualise_uncertainty_with_ct(
       self,
@@ -1923,6 +2174,7 @@ class ModelComparison(BaseResults):
       dose_cmap='jet',
       dose_alpha=0.5,
       show_oar=True,
+      show_beams=False,
       crop_to_body=False,
       crop_padding=2,
       dose_range=None,
@@ -1940,6 +2192,7 @@ class ModelComparison(BaseResults):
         dose_cmap: Colormap for dose overlay (default: 'jet')
         dose_alpha: Transparency of dose overlay (default: 0.5)
         show_oar: Whether to show OAR contours (default: True)
+        show_beams: Whether to show beam plate overlay on structure column (default: False)
         crop_to_body: Whether to crop the view to the body region (default: False)
         crop_padding: Padding in pixels around the body bounding box (default: 2)
         dose_range: Range for dose colorbar (default: None)
@@ -1994,6 +2247,10 @@ class ModelComparison(BaseResults):
       oar_masks = None
       if show_oar:
         oar_masks = first_result.dataset.selector.get_component(structure, 'oar_v3')
+      beam_plate = None
+      if show_beams:
+        beam_plate = first_result.dataset.selector.get_component(structure, 'beam_plate')
+      body = first_result.dataset.selector.get_body(structure)[0] if crop_to_body else None
 
       preds = []
       for result in self.results_list:
@@ -2019,6 +2276,8 @@ class ModelComparison(BaseResults):
         'ct_slice': ct_slice,
         'ptv_doses': ptv_doses,
         'oar_masks': oar_masks,
+        'beam_plate': beam_plate,
+        'body': body,
         'original_dose': original_dose,
         'best_pred': preds[best_idx],
         'best_label': self.result_labels[best_idx],
@@ -2063,6 +2322,8 @@ class ModelComparison(BaseResults):
 
       # Col 0: Structures
       ax_row[0].imshow(ct_slice, cmap='gray')
+      if show_beams and d['beam_plate'] is not None:
+        draw_beam_overlay(ax_row[0], d['beam_plate'])
       draw_ptv_overlay(ax_row[0], ptv_doses)
       _draw_contours(ax_row[0])
       ax_row[0].axis('off')
@@ -2107,7 +2368,7 @@ class ModelComparison(BaseResults):
 
       # Crop to body bounding box if requested
       if crop_to_body:
-        body_mask = ct_slice > ct_slice.min()
+        body_mask = d['body'] > 0.5
         rows = np.any(body_mask, axis=1)
         cols = np.any(body_mask, axis=0)
         rmin, rmax = np.where(rows)[0][[0, -1]]
@@ -2313,7 +2574,7 @@ class ModelComparison(BaseResults):
       for i, metric in enumerate(metrics):
         col = median_df.columns[i]
         ascending = not is_higher_better(metric)
-        ranks[col] = median_df[col].rank(ascending=ascending)
+        ranks[col] = median_df[col].rank(ascending=ascending, method='min')
       order = ranks.mean(axis=1).sort_values().index
       median_df = median_df.loc[order]
       annot_df = annot_df.loc[order]
@@ -2378,6 +2639,8 @@ class ModelComparison(BaseResults):
     # Draw annotations with adaptive text color
     def _median_text(val, unit):
       unit_str = f' {unit}' if unit else ''
+      if val != 0 and abs(val) < 0.1 :
+        return f'$\\tilde{{x}}$ = {val:.3f}{unit_str}'
       return f'$\\tilde{{x}}$ = {val:.2f}{unit_str}'
 
     for row_idx in range(len(combined_norm)):
