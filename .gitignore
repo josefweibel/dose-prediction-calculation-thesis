@@ -233,3 +233,4 @@ wandb/
 samples/
 .claude/
 imgs/
+dicom/
