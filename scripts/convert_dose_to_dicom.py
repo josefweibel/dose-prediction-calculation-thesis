@@ -19,9 +19,9 @@ Output structure:
 
 Usage:
   python scripts/convert_dose_to_dicom.py \
-    --model model_l:samples/165-ws-rfm-combi-fp32/flow-cache-beamdiff-enc2-interval5-20-200-inf-2-bf16-amp/test_199 \
-    --model model_t:original \
-    --model model_v:samples/101-beamdiff/ddpm-1000/test_199 \
+    --model variant_l:samples/165-ws-rfm-combi-fp32/flow-cache-beamdiff-enc2-interval5-20-200-inf-2-bf16-amp/test_199 \
+    --model variant_t:original \
+    --model variant_v:samples/101-beamdiff/ddpm-1000/test_199 \
     --patient HNSCC-01-0090   # optional: process only this patient
 """
 
@@ -41,30 +41,32 @@ from tqdm import tqdm
 
 def find_patient_dicom_dir(dicom_root: Path, patient_id: str) -> Path | None:
     """
-    Walk the TCIA tree and return the shallowest directory whose name
-    contains patient_id.
+    Look up the patient directory directly under dicom_root.
+    Falls back to a shallow scan if the exact name doesn't exist.
     """
-    candidates = [
-        p for p in dicom_root.rglob('*')
-        if p.is_dir() and patient_id in p.name
-    ]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda p: len(p.parts))
+    direct = dicom_root / patient_id
+    if direct.is_dir():
+        return direct
+    # Fallback: check immediate children
+    for p in dicom_root.iterdir():
+        if p.is_dir() and patient_id in p.name:
+            return p
+    return None
 
 
 def find_dicom_files_by_modality(patient_dir: Path) -> dict[str, list[Path]]:
     """
-    Recursively scan patient_dir for .dcm files and group them by Modality tag.
+    Use the modality subdirectory names (CT/, RTDOSE/, RTPLAN/, RTSTRUCT/)
+    to group .dcm files — no DICOM header reads needed.
     """
     result: dict[str, list[Path]] = {}
-    for dcm_path in sorted(patient_dir.rglob('*.dcm')):
-        try:
-            ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True)
-            modality = str(ds.Modality)
-            result.setdefault(modality, []).append(dcm_path)
-        except Exception:
-            pass
+    for subdir in patient_dir.iterdir():
+        if not subdir.is_dir():
+            continue
+        modality = subdir.name  # CT, RTDOSE, RTPLAN, RTSTRUCT
+        dcm_files = sorted(subdir.glob('*.dcm'))
+        if dcm_files:
+            result[modality] = dcm_files
     return result
 
 
@@ -98,6 +100,7 @@ def write_rtdose_dicom(
     image_position: tuple[float, float, float],
     voxel_spacing: tuple[float, float, float],
     output_path: Path,
+    model_name: str = '',
 ) -> None:
     """
     Create an RTDOSE DICOM from template_ds with new dose data and coordinates.
@@ -137,8 +140,14 @@ def write_rtdose_dicom(
     ds.PixelSpacing = [y_sp, x_sp]
     ds.GridFrameOffsetVector = [i * z_sp for i in range(Z)]
 
-    # New SOP Instance UID
+    # Identify the model/variant in viewer-visible tags
+    if model_name:
+        ds.SeriesDescription = model_name
+        ds.DoseComment = model_name
+
+    # New SOP Instance UID + Series UID (each model is its own series)
     ds.SOPInstanceUID = pydicom.uid.generate_uid()
+    ds.SeriesInstanceUID = pydicom.uid.generate_uid()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ds.save_as(str(output_path))
@@ -218,6 +227,7 @@ def process_patient(
     dicom_root: Path,
     output_dir: Path,
     pad_size: tuple[int, int],
+    copy_plan: bool = False,
 ) -> bool:
     """
     Process one patient: write all model RTDoses + shared CT/RTSTRUCT/RTPLAN.
@@ -239,26 +249,24 @@ def process_patient(
         return False
     template_ds = pydicom.dcmread(str(modality_files['RTDOSE'][0]))
 
-    # Find the RTPLAN matching the plan code from the sample filename
-    # Filename: {patient_id}+{plan_code}+{other} → RTPlanLabel starts with plan_code
-    if 'RTPLAN' not in modality_files:
-        print(f'{prefix} no RTPLAN found — skipping')
-        return False
-
-    # Extract plan code from any sample name for this patient
-    any_sample = next(iter(model_doses.values()))
-    parts = any_sample.split('+')
-    plan_code = parts[1] if len(parts) > 1 else None
-
+    # Optionally find the RTPLAN matching the plan code from the sample filename
     relevant_plans: list[Path] = []
-    if plan_code:
-        for plan_path in modality_files['RTPLAN']:
-            ds = pydicom.dcmread(str(plan_path), stop_before_pixels=True)
-            label = str(getattr(ds, 'RTPlanLabel', ''))
-            if label.startswith(plan_code):
-                relevant_plans.append(plan_path)
-    if not relevant_plans:
-        relevant_plans = modality_files['RTPLAN']  # fallback: copy all
+    if copy_plan:
+        if 'RTPLAN' not in modality_files:
+            print(f'{prefix} no RTPLAN found — skipping plan copy')
+        else:
+            any_sample = next(iter(model_doses.values()))
+            parts = any_sample.split('+')
+            plan_code = parts[1] if len(parts) > 1 else None
+
+            if plan_code:
+                for plan_path in modality_files['RTPLAN']:
+                    ds = pydicom.dcmread(str(plan_path), stop_before_pixels=True)
+                    label = str(getattr(ds, 'RTPlanLabel', ''))
+                    if label.startswith(plan_code):
+                        relevant_plans.append(plan_path)
+            if not relevant_plans:
+                relevant_plans = modality_files['RTPLAN']  # fallback: copy all
 
     out_dir = output_dir / patient_id
 
@@ -309,6 +317,7 @@ def process_patient(
         write_rtdose_dicom(
             template_ds, dose_gy, image_position, voxel_spacing,
             out_dir / 'RTDOSE' / f'RD.{model_name}.dcm',
+            model_name=model_name,
         )
         dose_written += 1
 
@@ -316,11 +325,12 @@ def process_patient(
         print(f'{prefix} no doses written — skipping shared files')
         return False
 
-    # Copy shared CT, RTSTRUCT, and the relevant RTPLAN (only once per patient)
+    # Copy shared CT, RTSTRUCT (and optionally RTPLAN)
     for modality, subdir in [('CT', 'CT'), ('RTSTRUCT', 'RTSTRUCT')]:
         if modality in modality_files:
             copy_dicom_files(modality_files[modality], out_dir / subdir)
-    copy_dicom_files(relevant_plans, out_dir / 'RTPLAN')
+    if relevant_plans:
+        copy_dicom_files(relevant_plans, out_dir / 'RTPLAN')
 
     ct_count = len(modality_files.get('CT', []))
     print(f'{prefix} done  {dose_written} dose(s)  CT={ct_count}')
@@ -366,6 +376,10 @@ def main() -> None:
         '--patient', type=str, default=None,
         help='Process only this patient ID',
     )
+    parser.add_argument(
+        '--copy-plan', action='store_true', default=False,
+        help='Copy matching RTPLAN files into output (skipped by default)',
+    )
     args = parser.parse_args()
 
     # Parse --model arguments
@@ -410,7 +424,7 @@ def main() -> None:
         process_patient(
             pid, model_doses, models,
             args.gdphmm_dir, args.dicom_root, args.output_dir,
-            pad_size,
+            pad_size, copy_plan=args.copy_plan,
         )
         for pid, model_doses in tqdm(sorted(patients.items()), desc='Patients', leave=False)
     )
