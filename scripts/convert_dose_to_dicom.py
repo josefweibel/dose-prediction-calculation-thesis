@@ -4,43 +4,25 @@ from __future__ import annotations
 """
 Convert predicted dose .npy files to DICOM RTDose format.
 
-Two modes:
-
-  Predicted dose:
-    Reads combined .npy volume files, reverses the preprocessing padding,
-    resamples the dose to the original RTDOSE coordinate grid, and writes a
-    new RTDOSE DICOM.  CT, RTSTRUCT, and RTPLAN are copied alongside as-is.
-
-  Original dose (--original):
-    Copies the original RTDOSE DICOM (no resampling) together with CT,
-    RTSTRUCT, and RTPLAN.  Both modes produce the same output structure so
-    predicted and original dose share the same coordinate grid.
+Multiple models (including the original dose) are exported into a single
+DICOM directory per patient, with shared CT / RTSTRUCT / RTPLAN and one
+RTDose file per model.
 
 Output structure:
   {output_dir}/
-    {model_name}/
-      {patient_id}/
-        CT/         -- CT slice DICOMs
-        RTSTRUCT/   -- structure-set DICOM
-        RTPLAN/     -- plan DICOM
-        RTDOSE/     -- RD.{patient_id}.dcm  (predicted or original)
+    {patient_id}/
+      CT/         -- CT slice DICOMs (shared)
+      RTSTRUCT/   -- structure-set DICOM (shared)
+      RTPLAN/     -- plan DICOM (shared)
+      RTDOSE/
+        RD.{model_name}.dcm   (one per model)
 
 Usage:
-  # Export a model's predictions
   python convert_dose_to_dicom.py \\
-    --samples-dir samples/MyModel/sampling/test_100 \\
-    --model-name MyModel \\
-    --dicom-root /storage/.../Head_and_Neck \\
-    --gdphmm-dir data/gdphmm-hn/test \\
-    --output-dir dicom_output
-
-  # Export the original dose (same structure)
-  python convert_dose_to_dicom.py \\
-    --original \\
-    --model-name original \\
-    --dicom-root /storage/.../Head_and_Neck \\
-    --gdphmm-dir data/gdphmm-hn/test \\
-    --output-dir dicom_output
+    --model model_l:samples/165-ws-rfm-combi-fp32/flow-cache-beamdiff-enc2-interval5-20-200-inf-2-bf16-amp/test_199 \\
+    --model model_t:original \\
+    --model model_v:samples/101-beamdiff/ddpm-1000/test_199 \\
+    --patient 0522c0001   # optional: process only this patient
 """
 
 import argparse
@@ -50,11 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import pydicom
-import scipy.ndimage
 from tqdm import tqdm
-
-# Dose normalisation range from src/data.py
-GDPHMM_DOSE_MAX = 88.0  # Gy
 
 
 # ---------------------------------------------------------------------------
@@ -72,15 +50,12 @@ def find_patient_dicom_dir(dicom_root: Path, patient_id: str) -> Path | None:
     ]
     if not candidates:
         return None
-    # Prefer the shallowest (closest to root) match
     return min(candidates, key=lambda p: len(p.parts))
 
 
 def find_dicom_files_by_modality(patient_dir: Path) -> dict[str, list[Path]]:
     """
     Recursively scan patient_dir for .dcm files and group them by Modality tag.
-    Returns e.g. {'CT': [...], 'RTDOSE': [...], 'RTSTRUCT': [...], 'RTPLAN': [...]}.
-    Files that cannot be read are silently skipped.
     """
     result: dict[str, list[Path]] = {}
     for dcm_path in sorted(patient_dir.rglob('*.dcm')):
@@ -93,29 +68,47 @@ def find_dicom_files_by_modality(patient_dir: Path) -> dict[str, list[Path]]:
     return result
 
 
+def get_rtplan_isocenter(rtplan_files: list[Path]) -> tuple[float, float, float] | None:
+    """
+    Read the first beam's first control-point IsocenterPosition from RTPLAN.
+    Returns (x_mm, y_mm, z_mm) in patient coordinates, or None.
+    """
+    for f in rtplan_files:
+        ds = pydicom.dcmread(str(f))
+        for beam in ds.BeamSequence:
+            for cp in beam.ControlPointSequence:
+                if hasattr(cp, 'IsocenterPosition'):
+                    return tuple(float(x) for x in cp.IsocenterPosition)
+    return None
+
+
 # ---------------------------------------------------------------------------
-# RTDOSE grid helpers
+# Coordinate computation
 # ---------------------------------------------------------------------------
 
-def get_rtdose_grid(
-    ds: pydicom.Dataset,
-) -> tuple[tuple[int, int, int], tuple[float, float, float]]:
+def compute_image_position(
+    iso_voxel: np.ndarray,
+    iso_patient: tuple[float, float, float],
+    voxel_spacing: tuple[float, float, float],
+) -> tuple[float, float, float]:
     """
-    Return (shape, spacing) from an RTDOSE dataset.
-    shape   = (D, H, W) = (NumberOfFrames, Rows, Columns)
-    spacing = (row_mm, col_mm, z_mm)
+    Compute ImagePositionPatient (x, y, z) in mm for a GDPHMM volume.
+
+    iso_voxel:     (z, y, x) voxel indices from GDPHMM .npz
+    iso_patient:   (x, y, z) mm from RTPLAN
+    voxel_spacing: (row_mm, col_mm, z_mm) for GDPHMM axes (H, W, D)
+
+    GDPHMM axis mapping with ImageOrientationPatient [1,0,0,0,1,0]:
+      W (cols, axis 1) → x,  H (rows, axis 0) → y,  D (slices, axis 2) → z
     """
-    n_frames = int(ds.NumberOfFrames)
-    rows = int(ds.Rows)
-    cols = int(ds.Columns)
-    row_sp = float(ds.PixelSpacing[0])
-    col_sp = float(ds.PixelSpacing[1])
-    offsets = [float(x) for x in ds.GridFrameOffsetVector]
-    if len(offsets) > 1:
-        z_sp = abs(offsets[1] - offsets[0])
-    else:
-        z_sp = float(ds.get('SliceThickness', 1.0))
-    return (n_frames, rows, cols), (row_sp, col_sp, z_sp)
+    px, py, pz = iso_patient
+    z_vox, y_vox, x_vox = float(iso_voxel[0]), float(iso_voxel[1]), float(iso_voxel[2])
+    row_sp, col_sp, z_sp = voxel_spacing
+
+    x_origin = px - x_vox * col_sp
+    y_origin = py - y_vox * row_sp
+    z_origin = pz - z_vox * z_sp
+    return (x_origin, y_origin, z_origin)
 
 
 # ---------------------------------------------------------------------------
@@ -140,65 +133,52 @@ def reverse_padding(
     return dose_hwz_padded[top:top + orig_h, left:left + orig_w, :]
 
 
-def resample_dose(
-    dose_hwz: np.ndarray,
-    src_spacing: tuple[float, float, float],
-    tgt_spacing: tuple[float, float, float],
-    tgt_shape: tuple[int, int, int],
-) -> np.ndarray:
-    """
-    Resample a dose volume from GDPHMM space to the original RTDOSE grid.
-
-    dose_hwz:    (H, W, D) array in Gy, GDPHMM voxel space
-    src_spacing: (row_mm, col_mm, z_mm) for GDPHMM axes H, W, D
-    tgt_spacing: (row_mm, col_mm, z_mm) for target RTDOSE axes
-    tgt_shape:   (D, H, W) target shape (RTDOSE frame ordering)
-    Returns:     (D, H, W) float32 array in Gy
-    """
-    # Reorder from GDPHMM (H, W, D) to RTDOSE (D, H, W)
-    dose_dhw = np.transpose(dose_hwz, (2, 0, 1)).astype(np.float32)
-
-    sx, sy, sz = src_spacing   # row_mm, col_mm, z_mm  (GDPHMM)
-    rx, ry, rz = tgt_spacing   # row_mm, col_mm, z_mm  (RTDOSE)
-    zoom = (sz / rz, sx / rx, sy / ry)
-    dose_resampled = scipy.ndimage.zoom(dose_dhw, zoom, order=1)
-
-    # Crop or zero-pad to exact target shape (handles rounding differences)
-    result = np.zeros(tgt_shape, dtype=np.float32)
-    d = min(dose_resampled.shape[0], tgt_shape[0])
-    h = min(dose_resampled.shape[1], tgt_shape[1])
-    w = min(dose_resampled.shape[2], tgt_shape[2])
-    result[:d, :h, :w] = dose_resampled[:d, :h, :w]
-    return result
-
-
 def write_rtdose_dicom(
     template_ds: pydicom.Dataset,
-    dose_dhw: np.ndarray,
+    dose_hwz: np.ndarray,
+    image_position: tuple[float, float, float],
+    voxel_spacing: tuple[float, float, float],
     output_path: Path,
 ) -> None:
     """
-    Clone template_ds (original RTDOSE header), replace pixel data with
-    dose_dhw (Gy, shape D×H×W), and save to output_path.
-    All patient demographics and coordinate metadata are kept from template_ds.
+    Create an RTDOSE DICOM from template_ds with new dose data and coordinates.
+
+    template_ds:    original RTDOSE dataset (used for patient demographics, UIDs, etc.)
+    dose_hwz:       (H, W, D) dose in Gy at GDPHMM resolution
+    image_position: (x, y, z) mm — ImagePositionPatient
+    voxel_spacing:  (row_mm, col_mm, z_mm)
     """
     ds = copy.deepcopy(template_ds)
+    H, W, D = dose_hwz.shape
+    row_sp, col_sp, z_sp = voxel_spacing
 
-    dose_clean = np.nan_to_num(dose_dhw, nan=0.0, posinf=0.0, neginf=0.0)
-    max_dose = float(dose_clean.max())
+    # Reorder to DICOM frame order (D, H, W)
+    dose_dhw = np.transpose(dose_hwz, (2, 0, 1)).astype(np.float64)
+    dose_dhw = np.clip(dose_dhw, 0, None)  # ensure non-negative
+
+    max_dose = float(dose_dhw.max())
     scale = max_dose / (2**32 - 1) if max_dose > 0 else 1.0
-    pixels = np.clip(dose_clean / scale, 0, 2**32 - 1).astype(np.uint32)
+    pixels = (dose_dhw / scale).astype(np.uint32)
 
+    # Pixel data
     ds.BitsAllocated = 32
     ds.BitsStored = 32
     ds.HighBit = 31
     ds.PixelRepresentation = 0
+    ds.SamplesPerPixel = 1
     ds.DoseGridScaling = scale
-    ds.NumberOfFrames = pixels.shape[0]
-    ds.Rows = pixels.shape[1]
-    ds.Columns = pixels.shape[2]
+    ds.NumberOfFrames = D
+    ds.Rows = H
+    ds.Columns = W
     ds.PixelData = pixels.tobytes()
-    # New SOP Instance UID so this is a distinct DICOM object
+
+    # Spatial metadata
+    ds.ImagePositionPatient = list(image_position)
+    ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+    ds.PixelSpacing = [row_sp, col_sp]
+    ds.GridFrameOffsetVector = [i * z_sp for i in range(D)]
+
+    # New SOP Instance UID
     ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,7 +190,7 @@ def write_rtdose_dicom(
 # ---------------------------------------------------------------------------
 
 def copy_dicom_files(src_files: list[Path], dst_dir: Path) -> None:
-    """Copy a list of DICOM files into dst_dir, preserving filenames."""
+    """Copy DICOM files into dst_dir, preserving filenames."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     for src in src_files:
         shutil.copy2(str(src), str(dst_dir / src.name))
@@ -224,7 +204,6 @@ def load_gdphmm_vol(gdphmm_dir: Path, sample_name: str) -> dict | None:
     """
     Load a GDPHMM .npz volume dict.  Tries exact filename first, then falls
     back to any file in the directory that starts with the patient ID.
-    Returns the dict or None if not found.
     """
     patient_id = sample_name.split('+')[0]
     exact = gdphmm_dir / f'{sample_name}.npz'
@@ -237,111 +216,162 @@ def load_gdphmm_vol(gdphmm_dir: Path, sample_name: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Per-patient processing
+# Collect patient IDs from all model sources
 # ---------------------------------------------------------------------------
 
-def process_patient_predicted(
-    npy_path: Path,
+def collect_patient_samples(
+    models: list[tuple[str, str]],
+    gdphmm_dir: Path,
+    file_glob: str,
+) -> dict[str, dict[str, str]]:
+    """
+    Build a mapping: patient_id → {model_name: sample_name_or_'original'}.
+    models: list of (model_name, samples_path_or_'original')
+    Returns only patients that appear in at least one model source.
+    """
+    patients: dict[str, dict[str, str]] = {}
+
+    for model_name, source in models:
+        if source == 'original':
+            for npz_path in sorted(gdphmm_dir.glob('*.npz')):
+                sample_name = npz_path.stem
+                pid = sample_name.split('+')[0]
+                patients.setdefault(pid, {})[model_name] = sample_name
+        else:
+            samples_dir = Path(source)
+            for npy_path in sorted(samples_dir.glob(file_glob)):
+                sample_name = npy_path.stem
+                pid = sample_name.split('+')[0]
+                patients.setdefault(pid, {})[model_name] = sample_name
+
+    return patients
+
+
+# ---------------------------------------------------------------------------
+# Per-patient processing (all models at once)
+# ---------------------------------------------------------------------------
+
+def process_patient(
+    patient_id: str,
+    model_doses: dict[str, str],
+    models: list[tuple[str, str]],
     gdphmm_dir: Path,
     dicom_root: Path,
     output_dir: Path,
-    model_name: str,
     pad_size: tuple[int, int],
-    gdphmm_spacing: tuple[float, float, float],
+    voxel_spacing: tuple[float, float, float],
 ) -> bool:
-    """Convert one predicted dose .npy to RTDOSE DICOM and copy ancillary files."""
-    sample_name = npy_path.stem
-    patient_id = sample_name.split('+')[0]
+    """
+    Process one patient: write all model RTDoses + shared CT/RTSTRUCT/RTPLAN.
+    model_doses: {model_name: sample_name}
+    models: [(model_name, source_path_or_'original'), ...]
+    """
     prefix = f'  [{patient_id}]'
 
-    # 1. Load + denormalise
-    dose_raw = np.load(str(npy_path))          # (1, H_pad, W_pad, D) or (H_pad, W_pad, D)
-    if dose_raw.ndim == 4:
-        dose_raw = dose_raw[0]                  # drop channel dim → (H_pad, W_pad, D)
-    dose_padded = dose_raw * GDPHMM_DOSE_MAX   # → Gy
-
-    # 2. Reverse padding
-    vol = load_gdphmm_vol(gdphmm_dir, sample_name)
-    if vol is None:
-        print(f'{prefix} original .npz not found — skipping')
-        return False
-    orig_h, orig_w = vol['img'].shape[:2]
-    dose_gy = reverse_padding(dose_padded, orig_h, orig_w, pad_size)  # (H, W, D)
-
-    # 3. Find patient DICOM directory
+    # Find patient DICOM directory
     patient_dir = find_patient_dicom_dir(dicom_root, patient_id)
     if patient_dir is None:
         print(f'{prefix} no DICOM directory found — skipping')
         return False
     modality_files = find_dicom_files_by_modality(patient_dir)
+
+    # Get the original RTDOSE — used as template
     if 'RTDOSE' not in modality_files:
-        print(f'{prefix} no RTDOSE file found in {patient_dir} — skipping')
+        print(f'{prefix} no original RTDOSE found — skipping')
         return False
-
-    # 4. Resample to original RTDOSE grid
     template_ds = pydicom.dcmread(str(modality_files['RTDOSE'][0]))
-    tgt_shape, tgt_spacing = get_rtdose_grid(template_ds)
-    dose_resampled = resample_dose(dose_gy, gdphmm_spacing, tgt_spacing, tgt_shape)
 
-    # 5. Write new RTDOSE DICOM
-    out_dir = output_dir / model_name / patient_id
-    write_rtdose_dicom(
-        template_ds, dose_resampled,
-        out_dir / 'RTDOSE' / f'RD.{patient_id}.dcm',
-    )
-
-    # 6. Copy CT, RTSTRUCT, RTPLAN
-    for modality, subdir in [('CT', 'CT'), ('RTSTRUCT', 'RTSTRUCT'), ('RTPLAN', 'RTPLAN')]:
-        if modality in modality_files:
-            copy_dicom_files(modality_files[modality], out_dir / subdir)
-
-    counts = {m: len(v) for m, v in modality_files.items()}
-    print(
-        f'{prefix} done  '
-        f'dose {dose_gy.shape}→{tgt_shape}  '
-        f'CT={counts.get("CT", 0)}  '
-        f'RS={counts.get("RTSTRUCT", 0)}  '
-        f'RP={counts.get("RTPLAN", 0)}'
-    )
-    return True
-
-
-def process_patient_original(
-    npz_path: Path,
-    dicom_root: Path,
-    output_dir: Path,
-    model_name: str,
-) -> bool:
-    """Copy original RTDOSE + ancillary DICOM files for one patient."""
-    sample_name = npz_path.stem
-    patient_id = sample_name.split('+')[0]
-    prefix = f'  [{patient_id}]'
-
-    patient_dir = find_patient_dicom_dir(dicom_root, patient_id)
-    if patient_dir is None:
-        print(f'{prefix} no DICOM directory found — skipping')
+    # Find the RTPLAN matching the plan code from the sample filename
+    # Filename: {patient_id}+{plan_code}+{other} → RTPlanLabel starts with plan_code
+    if 'RTPLAN' not in modality_files:
+        print(f'{prefix} no RTPLAN found — skipping')
         return False
 
-    modality_files = find_dicom_files_by_modality(patient_dir)
-    out_dir = output_dir / model_name / patient_id
+    # Extract plan code from any sample name for this patient
+    any_sample = next(iter(model_doses.values()))
+    parts = any_sample.split('+')
+    plan_code = parts[1] if len(parts) > 1 else None
 
-    for modality, subdir in [
-        ('RTDOSE', 'RTDOSE'),
-        ('CT', 'CT'),
-        ('RTSTRUCT', 'RTSTRUCT'),
-        ('RTPLAN', 'RTPLAN'),
-    ]:
+    relevant_plans: list[Path] = []
+    if plan_code:
+        for plan_path in modality_files['RTPLAN']:
+            ds = pydicom.dcmread(str(plan_path), stop_before_pixels=True)
+            label = str(getattr(ds, 'RTPlanLabel', ''))
+            if label.startswith(plan_code):
+                relevant_plans.append(plan_path)
+    if not relevant_plans:
+        relevant_plans = modality_files['RTPLAN']  # fallback: copy all
+
+    # Get isocenter from the relevant plan
+    iso_patient = get_rtplan_isocenter(relevant_plans)
+    if iso_patient is None:
+        print(f'{prefix} no IsocenterPosition in RTPLAN — skipping')
+        return False
+
+    out_dir = output_dir / patient_id
+
+    # Build a lookup: model_name → source path
+    source_map = {name: source for name, source in models}
+
+    # Write one RTDose per model
+    dose_written = 0
+    for model_name, sample_name in model_doses.items():
+        source = source_map[model_name]
+
+        # Load GDPHMM vol (needed for isocenter + original shape)
+        vol = load_gdphmm_vol(gdphmm_dir, sample_name)
+        if vol is None:
+            print(f'{prefix} .npz not found for {model_name} — skipping dose')
+            continue
+
+        if source == 'original':
+            # Original dose from .npz
+            dose_gy = (vol['dose'] * vol['dose_scale'] * vol['Body']).astype(np.float32)
+        else:
+            # Predicted dose from .npy — already in Gy
+            samples_dir = Path(source)
+            npy_candidates = sorted(samples_dir.glob(f'{sample_name}.*'))
+            npy_path = None
+            for c in npy_candidates:
+                if c.suffix == '.npy' and not c.stem.endswith('_sigma'):
+                    npy_path = c
+                    break
+            if npy_path is None:
+                npy_path = samples_dir / f'{sample_name}.npy'
+            if not npy_path.exists():
+                print(f'{prefix} {npy_path} not found — skipping {model_name}')
+                continue
+
+            dose_raw = np.load(str(npy_path))
+            if dose_raw.ndim == 4:
+                dose_raw = dose_raw[0]  # drop channel dim → (H_pad, W_pad, D)
+
+            # Reverse padding
+            orig_h, orig_w = vol['img'].shape[:2]
+            dose_gy = reverse_padding(dose_raw, orig_h, orig_w, pad_size)
+
+        # Compute ImagePositionPatient from isocenter alignment
+        iso_voxel = vol['isocenter']
+        image_position = compute_image_position(iso_voxel, iso_patient, voxel_spacing)
+
+        write_rtdose_dicom(
+            template_ds, dose_gy, image_position, voxel_spacing,
+            out_dir / 'RTDOSE' / f'RD.{model_name}.dcm',
+        )
+        dose_written += 1
+
+    if dose_written == 0:
+        print(f'{prefix} no doses written — skipping shared files')
+        return False
+
+    # Copy shared CT, RTSTRUCT, and the relevant RTPLAN (only once per patient)
+    for modality, subdir in [('CT', 'CT'), ('RTSTRUCT', 'RTSTRUCT')]:
         if modality in modality_files:
             copy_dicom_files(modality_files[modality], out_dir / subdir)
+    copy_dicom_files(relevant_plans, out_dir / 'RTPLAN')
 
-    counts = {m: len(v) for m, v in modality_files.items()}
-    print(
-        f'{prefix} done  '
-        f'RD={counts.get("RTDOSE", 0)}  '
-        f'CT={counts.get("CT", 0)}  '
-        f'RS={counts.get("RTSTRUCT", 0)}  '
-        f'RP={counts.get("RTPLAN", 0)}'
-    )
+    ct_count = len(modality_files.get('CT', []))
+    print(f'{prefix} done  {dose_written} dose(s)  CT={ct_count}')
     return True
 
 
@@ -351,21 +381,18 @@ def process_patient_original(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description='Convert predicted dose .npy → DICOM RTDose, or copy original RTDOSE.',
+        description='Convert dose predictions to DICOM RTDose (multiple models per patient).',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument(
-        '--samples-dir', type=Path,
-        help='Directory with combined .npy prediction files (required unless --original)',
-    )
-    parser.add_argument(
-        '--model-name', required=True,
-        help='Label for this model — used as the output subdirectory name',
+        '--model', action='append', required=True, metavar='NAME:PATH',
+        help='Model specification as name:path (use "original" as path for GDPHMM ground truth). '
+             'Can be repeated for multiple models.',
     )
     parser.add_argument(
         '--dicom-root', type=Path, default=Path('/storage/research/artorg_mia/Head_and_Neck'),
-        help='Root of the TCIA DICOM data (contains TCIA1_…, TCIA2_…, … subdirectories)',
+        help='Root of the TCIA DICOM data',
     )
     parser.add_argument(
         '--output-dir', type=Path, default=Path('dicom/'),
@@ -373,8 +400,7 @@ def main() -> None:
     )
     parser.add_argument(
         '--gdphmm-dir', type=Path, default=Path('data/gdphmm-hn-vmat/test'),
-        help='GDPHMM split directory containing the original .npz volume files '
-             '(e.g. data/gdphmm-hn/test/)',
+        help='GDPHMM split directory containing the original .npz volume files',
     )
     parser.add_argument(
         '--pad-size', type=int, nargs=2, default=[176, 160], metavar=('H', 'W'),
@@ -383,48 +409,52 @@ def main() -> None:
     parser.add_argument(
         '--voxel-spacing', type=float, nargs=3, default=[2.5, 2.5, 2.0],
         metavar=('ROW', 'COL', 'Z'),
-        help='GDPHMM voxel spacing in mm along the H, W, D axes (default: 2.5 2.5 2.0)',
-    )
-    parser.add_argument(
-        '--original', action='store_true',
-        help='Copy original RTDOSE DICOM as-is instead of converting .npy predictions',
+        help='GDPHMM voxel spacing in mm (default: 2.5 2.5 2.0)',
     )
     parser.add_argument(
         '--file-glob', default='*.npy',
-        help='Glob pattern for selecting prediction files in --samples-dir '
-             '(default: *.npy).  Use e.g. "*_sigma.npy" to select a specific group.',
+        help='Glob pattern for selecting prediction files (default: *.npy)',
+    )
+    parser.add_argument(
+        '--patient', type=str, default=None,
+        help='Process only this patient ID',
     )
     args = parser.parse_args()
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    # Parse --model arguments
+    models: list[tuple[str, str]] = []
+    for spec in args.model:
+        if ':' not in spec:
+            parser.error(f'Invalid --model format "{spec}" — expected NAME:PATH')
+        name, source = spec.split(':', 1)
+        models.append((name, source))
 
-    if args.original:
-        npz_files = sorted(args.gdphmm_dir.glob('*.npz'))
-        if not npz_files:
-            raise SystemExit(f'No .npz files found in {args.gdphmm_dir}')
-        print(f'Original mode: {len(npz_files)} patients → {args.output_dir / args.model_name}')
-        successes = sum(
-            process_patient_original(p, args.dicom_root, args.output_dir, args.model_name)
-            for p in tqdm(npz_files, desc='Patients', leave=False)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    voxel_spacing = tuple(args.voxel_spacing)
+    pad_size = tuple(args.pad_size)
+
+    # Collect all patients across all model sources
+    patients = collect_patient_samples(models, args.gdphmm_dir, args.file_glob)
+
+    # Filter to single patient if requested
+    if args.patient:
+        if args.patient not in patients:
+            raise SystemExit(f'Patient {args.patient} not found in any model source')
+        patients = {args.patient: patients[args.patient]}
+
+    print(f'{len(patients)} patient(s), {len(models)} model(s)')
+    for name, source in models:
+        print(f'  {name}: {source}')
+
+    successes = sum(
+        process_patient(
+            pid, model_doses, models,
+            args.gdphmm_dir, args.dicom_root, args.output_dir,
+            pad_size, voxel_spacing,
         )
-        print(f'\nDone: {successes}/{len(npz_files)} patients copied successfully.')
-    else:
-        if args.samples_dir is None:
-            parser.error('--samples-dir is required when not using --original')
-        npy_files = sorted(args.samples_dir.glob(args.file_glob))
-        if not npy_files:
-            raise SystemExit(f'No files matching "{args.file_glob}" found in {args.samples_dir}')
-        print(f'Predicted mode: {len(npy_files)} file(s) → {args.output_dir / args.model_name}')
-        gdphmm_spacing = tuple(args.voxel_spacing)
-        pad_size = tuple(args.pad_size)
-        successes = sum(
-            process_patient_predicted(
-                p, args.gdphmm_dir, args.dicom_root, args.output_dir,
-                args.model_name, pad_size, gdphmm_spacing,
-            )
-            for p in tqdm(npy_files, desc='Patients', leave=False)
-        )
-        print(f'\nDone: {successes}/{len(npy_files)} patients converted successfully.')
+        for pid, model_doses in tqdm(sorted(patients.items()), desc='Patients', leave=False)
+    )
+    print(f'\nDone: {successes}/{len(patients)} patients exported.')
 
 
 if __name__ == '__main__':
