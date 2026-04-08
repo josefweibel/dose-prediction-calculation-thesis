@@ -22,7 +22,7 @@ Usage:
     --model model_l:samples/165-ws-rfm-combi-fp32/flow-cache-beamdiff-enc2-interval5-20-200-inf-2-bf16-amp/test_199 \
     --model model_t:original \
     --model model_v:samples/101-beamdiff/ddpm-1000/test_199 \
-    --patient 0522c0001   # optional: process only this patient
+    --patient HNSCC-01-0090   # optional: process only this patient
 """
 
 import argparse
@@ -74,26 +74,27 @@ def find_dicom_files_by_modality(patient_dir: Path) -> dict[str, list[Path]]:
 # ---------------------------------------------------------------------------
 
 def reverse_padding(
-    dose_xyz_padded: np.ndarray,
-    orig_x: int,
+    dose_zyx_padded: np.ndarray,
+    orig_z: int,
     orig_y: int,
     pad_size: tuple[int, int],
 ) -> np.ndarray:
     """
     Reverse the symmetric zero-padding applied by preprocess_gdphmm_slices.py.
-    dose_xyz_padded: (X_pad, Y_pad, Z)
-    Returns:         (orig_x, orig_y, Z)
+    Padding was applied to axes 0 (z) and 1 (y) only; axis 2 (x) is untouched.
+    dose_zyx_padded: (Z_pad, Y_pad, X)
+    Returns:         (orig_z, orig_y, X)
     """
-    px = pad_size[0] - orig_x
+    pz = pad_size[0] - orig_z
     py = pad_size[1] - orig_y
-    top = px // 2
-    left = py // 2
-    return dose_xyz_padded[top:top + orig_x, left:left + orig_y, :]
+    z_off = pz // 2
+    y_off = py // 2
+    return dose_zyx_padded[z_off:z_off + orig_z, y_off:y_off + orig_y, :]
 
 
 def write_rtdose_dicom(
     template_ds: pydicom.Dataset,
-    dose_xyz: np.ndarray,
+    dose_zyx: np.ndarray,
     image_position: tuple[float, float, float],
     voxel_spacing: tuple[float, float, float],
     output_path: Path,
@@ -102,21 +103,21 @@ def write_rtdose_dicom(
     Create an RTDOSE DICOM from template_ds with new dose data and coordinates.
 
     template_ds:    original RTDOSE dataset (used for patient demographics, UIDs, etc.)
-    dose_xyz:       (X, Y, Z) dose in Gy at GDPHMM resolution
-    image_position: (x, y, z) mm — ImagePositionPatient
-    voxel_spacing:  (x_mm, y_mm, z_mm)
+    dose_zyx:       (Z, Y, X) dose in Gy — already in DICOM frame order
+    image_position: (x, y, z) mm — ImagePositionPatient (from vol['origin'])
+    voxel_spacing:  (x_mm, y_mm, z_mm) — from vol['spacing']
     """
     ds = copy.deepcopy(template_ds)
-    X, Y, Z = dose_xyz.shape
+    Z, Y, X = dose_zyx.shape
     x_sp, y_sp, z_sp = voxel_spacing
 
-    # Reorder from (X, Y, Z) to DICOM frame order (Z, Rows=Y, Cols=X)
-    dose_zyx = np.transpose(dose_xyz, (2, 1, 0)).astype(np.float64)
-    dose_zyx = np.clip(dose_zyx, 0, None)  # ensure non-negative
+    # Array is already in DICOM frame order (Z, Rows=Y, Cols=X) — no transpose
+    dose = dose_zyx.astype(np.float64)
+    dose = np.clip(dose, 0, None)  # ensure non-negative
 
-    max_dose = float(dose_zyx.max())
+    max_dose = float(dose.max())
     scale = max_dose / (2**32 - 1) if max_dose > 0 else 1.0
-    pixels = (dose_zyx / scale).astype(np.uint32)
+    pixels = (dose / scale).astype(np.uint32)
 
     # Pixel data
     ds.BitsAllocated = 32
@@ -217,7 +218,6 @@ def process_patient(
     dicom_root: Path,
     output_dir: Path,
     pad_size: tuple[int, int],
-    voxel_spacing: tuple[float, float, float],
 ) -> bool:
     """
     Process one patient: write all model RTDoses + shared CT/RTSTRUCT/RTPLAN.
@@ -296,14 +296,15 @@ def process_patient(
 
             dose_raw = np.load(str(npy_path))
             if dose_raw.ndim == 4:
-                dose_raw = dose_raw[0]  # drop channel dim → (X_pad, Y_pad, Z)
+                dose_raw = dose_raw[0]  # drop channel dim → (Z_pad, Y_pad, X)
 
-            # Reverse padding
-            orig_x, orig_y = vol['img'].shape[:2]
-            dose_gy = reverse_padding(dose_raw, orig_x, orig_y, pad_size)
+            # Reverse padding (axes 0=z and 1=y were padded; axis 2=x untouched)
+            orig_z, orig_y = vol['img'].shape[:2]
+            dose_gy = reverse_padding(dose_raw, orig_z, orig_y, pad_size)
 
-        # Use origin directly from NPZ — already in (x, y, z) patient mm
+        # Use origin and spacing directly from NPZ — both in (x, y, z) order
         image_position = tuple(float(v) for v in vol['origin'])
+        voxel_spacing = tuple(float(v) for v in vol['spacing'])
 
         write_rtdose_dicom(
             template_ds, dose_gy, image_position, voxel_spacing,
@@ -358,11 +359,6 @@ def main() -> None:
         help='H×W padding target used during preprocessing (default: 176 160)',
     )
     parser.add_argument(
-        '--voxel-spacing', type=float, nargs=3, default=[2.5, 2.5, 2.0],
-        metavar=('ROW', 'COL', 'Z'),
-        help='GDPHMM voxel spacing in mm (default: 2.5 2.5 2.0)',
-    )
-    parser.add_argument(
         '--file-glob', default='*.npy',
         help='Glob pattern for selecting prediction files (default: *.npy)',
     )
@@ -381,7 +377,6 @@ def main() -> None:
         models.append((name, source))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    voxel_spacing = tuple(args.voxel_spacing)
     pad_size = tuple(args.pad_size)
 
     # Collect all patients across all model sources
@@ -415,7 +410,7 @@ def main() -> None:
         process_patient(
             pid, model_doses, models,
             args.gdphmm_dir, args.dicom_root, args.output_dir,
-            pad_size, voxel_spacing,
+            pad_size,
         )
         for pid, model_doses in tqdm(sorted(patients.items()), desc='Patients', leave=False)
     )
