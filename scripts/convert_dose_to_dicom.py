@@ -18,10 +18,10 @@ Output structure:
         RD.{model_name}.dcm   (one per model)
 
 Usage:
-  python convert_dose_to_dicom.py \\
-    --model model_l:samples/165-ws-rfm-combi-fp32/flow-cache-beamdiff-enc2-interval5-20-200-inf-2-bf16-amp/test_199 \\
-    --model model_t:original \\
-    --model model_v:samples/101-beamdiff/ddpm-1000/test_199 \\
+  python scripts/convert_dose_to_dicom.py \
+    --model model_l:samples/165-ws-rfm-combi-fp32/flow-cache-beamdiff-enc2-interval5-20-200-inf-2-bf16-amp/test_199 \
+    --model model_t:original \
+    --model model_v:samples/101-beamdiff/ddpm-1000/test_199 \
     --patient 0522c0001   # optional: process only this patient
 """
 
@@ -436,11 +436,25 @@ def main() -> None:
     # Collect all patients across all model sources
     patients = collect_patient_samples(models, args.gdphmm_dir, args.file_glob)
 
-    # Filter to single patient if requested
+    # Filter to single patient if requested; otherwise skip already-converted
     if args.patient:
         if args.patient not in patients:
             raise SystemExit(f'Patient {args.patient} not found in any model source')
         patients = {args.patient: patients[args.patient]}
+    else:
+        model_names = {name for name, _ in models}
+        skipped = 0
+        filtered: dict[str, dict[str, str]] = {}
+        for pid, model_doses in patients.items():
+            rtdose_dir = args.output_dir / pid / 'RTDOSE'
+            existing = {p.stem.removeprefix('RD.') for p in rtdose_dir.glob('RD.*.dcm')} if rtdose_dir.exists() else set()
+            if model_names <= existing:
+                skipped += 1
+            else:
+                filtered[pid] = model_doses
+        if skipped:
+            print(f'Skipping {skipped} already-converted patient(s)')
+        patients = filtered
 
     print(f'{len(patients)} patient(s), {len(models)} model(s)')
     for name, source in models:
