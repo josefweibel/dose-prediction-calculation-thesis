@@ -39,18 +39,23 @@ from tqdm import tqdm
 # DICOM discovery helpers
 # ---------------------------------------------------------------------------
 
+TCIA_SUBDIRS = [
+    'TCIA1_Head-Neck_Cetuximab',
+    'TCIA2_Head-Neck-PET-CT',
+    'TCIA3_HNC-IMRT-70-33',
+    'TCIA4_HNSCC',
+    'TCIA5_HNSCC-3DCT-RT',
+]
+
+
 def find_patient_dicom_dir(dicom_root: Path, patient_id: str) -> Path | None:
     """
-    Look up the patient directory directly under dicom_root.
-    Falls back to a shallow scan if the exact name doesn't exist.
+    Look up the patient directory under the known TCIA subfolders of dicom_root.
     """
-    direct = dicom_root / patient_id
-    if direct.is_dir():
-        return direct
-    # Fallback: check immediate children
-    for p in dicom_root.iterdir():
-        if p.is_dir() and patient_id in p.name:
-            return p
+    for subdir in TCIA_SUBDIRS:
+        candidate = dicom_root / subdir / patient_id
+        if candidate.is_dir():
+            return candidate
     return None
 
 
