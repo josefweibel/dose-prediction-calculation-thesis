@@ -68,74 +68,32 @@ def find_dicom_files_by_modality(patient_dir: Path) -> dict[str, list[Path]]:
     return result
 
 
-def get_rtplan_isocenter(rtplan_files: list[Path]) -> tuple[float, float, float] | None:
-    """
-    Read the first beam's first control-point IsocenterPosition from RTPLAN.
-    Returns (x_mm, y_mm, z_mm) in patient coordinates, or None.
-    """
-    for f in rtplan_files:
-        ds = pydicom.dcmread(str(f))
-        for beam in ds.BeamSequence:
-            for cp in beam.ControlPointSequence:
-                if hasattr(cp, 'IsocenterPosition'):
-                    return tuple(float(x) for x in cp.IsocenterPosition)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Coordinate computation
-# ---------------------------------------------------------------------------
-
-def compute_image_position(
-    iso_voxel: np.ndarray,
-    iso_patient: tuple[float, float, float],
-    voxel_spacing: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    """
-    Compute ImagePositionPatient (x, y, z) in mm for a GDPHMM volume.
-
-    iso_voxel:     (z, y, x) voxel indices from GDPHMM .npz
-    iso_patient:   (x, y, z) mm from RTPLAN
-    voxel_spacing: (row_mm, col_mm, z_mm) for GDPHMM axes (H, W, D)
-
-    GDPHMM axis mapping with ImageOrientationPatient [1,0,0,0,1,0]:
-      W (cols, axis 1) → x,  H (rows, axis 0) → y,  D (slices, axis 2) → z
-    """
-    px, py, pz = iso_patient
-    z_vox, y_vox, x_vox = float(iso_voxel[0]), float(iso_voxel[1]), float(iso_voxel[2])
-    row_sp, col_sp, z_sp = voxel_spacing
-
-    x_origin = px - x_vox * col_sp
-    y_origin = py - y_vox * row_sp
-    z_origin = pz - z_vox * z_sp
-    return (x_origin, y_origin, z_origin)
-
 
 # ---------------------------------------------------------------------------
 # Dose array helpers
 # ---------------------------------------------------------------------------
 
 def reverse_padding(
-    dose_hwz_padded: np.ndarray,
-    orig_h: int,
-    orig_w: int,
+    dose_xyz_padded: np.ndarray,
+    orig_x: int,
+    orig_y: int,
     pad_size: tuple[int, int],
 ) -> np.ndarray:
     """
     Reverse the symmetric zero-padding applied by preprocess_gdphmm_slices.py.
-    dose_hwz_padded: (H_pad, W_pad, D)
-    Returns:         (orig_h, orig_w, D)
+    dose_xyz_padded: (X_pad, Y_pad, Z)
+    Returns:         (orig_x, orig_y, Z)
     """
-    ph = pad_size[0] - orig_h
-    pw = pad_size[1] - orig_w
-    top = ph // 2
-    left = pw // 2
-    return dose_hwz_padded[top:top + orig_h, left:left + orig_w, :]
+    px = pad_size[0] - orig_x
+    py = pad_size[1] - orig_y
+    top = px // 2
+    left = py // 2
+    return dose_xyz_padded[top:top + orig_x, left:left + orig_y, :]
 
 
 def write_rtdose_dicom(
     template_ds: pydicom.Dataset,
-    dose_hwz: np.ndarray,
+    dose_xyz: np.ndarray,
     image_position: tuple[float, float, float],
     voxel_spacing: tuple[float, float, float],
     output_path: Path,
@@ -144,21 +102,21 @@ def write_rtdose_dicom(
     Create an RTDOSE DICOM from template_ds with new dose data and coordinates.
 
     template_ds:    original RTDOSE dataset (used for patient demographics, UIDs, etc.)
-    dose_hwz:       (H, W, D) dose in Gy at GDPHMM resolution
+    dose_xyz:       (X, Y, Z) dose in Gy at GDPHMM resolution
     image_position: (x, y, z) mm — ImagePositionPatient
-    voxel_spacing:  (row_mm, col_mm, z_mm)
+    voxel_spacing:  (x_mm, y_mm, z_mm)
     """
     ds = copy.deepcopy(template_ds)
-    H, W, D = dose_hwz.shape
-    row_sp, col_sp, z_sp = voxel_spacing
+    X, Y, Z = dose_xyz.shape
+    x_sp, y_sp, z_sp = voxel_spacing
 
-    # Reorder to DICOM frame order (D, H, W)
-    dose_dhw = np.transpose(dose_hwz, (2, 0, 1)).astype(np.float64)
-    dose_dhw = np.clip(dose_dhw, 0, None)  # ensure non-negative
+    # Reorder from (X, Y, Z) to DICOM frame order (Z, Rows=Y, Cols=X)
+    dose_zyx = np.transpose(dose_xyz, (2, 1, 0)).astype(np.float64)
+    dose_zyx = np.clip(dose_zyx, 0, None)  # ensure non-negative
 
-    max_dose = float(dose_dhw.max())
+    max_dose = float(dose_zyx.max())
     scale = max_dose / (2**32 - 1) if max_dose > 0 else 1.0
-    pixels = (dose_dhw / scale).astype(np.uint32)
+    pixels = (dose_zyx / scale).astype(np.uint32)
 
     # Pixel data
     ds.BitsAllocated = 32
@@ -167,16 +125,16 @@ def write_rtdose_dicom(
     ds.PixelRepresentation = 0
     ds.SamplesPerPixel = 1
     ds.DoseGridScaling = scale
-    ds.NumberOfFrames = D
-    ds.Rows = H
-    ds.Columns = W
+    ds.NumberOfFrames = Z
+    ds.Rows = Y
+    ds.Columns = X
     ds.PixelData = pixels.tobytes()
 
-    # Spatial metadata
+    # Spatial metadata — PixelSpacing is [row_spacing, col_spacing] = [y_sp, x_sp]
     ds.ImagePositionPatient = list(image_position)
     ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
-    ds.PixelSpacing = [row_sp, col_sp]
-    ds.GridFrameOffsetVector = [i * z_sp for i in range(D)]
+    ds.PixelSpacing = [y_sp, x_sp]
+    ds.GridFrameOffsetVector = [i * z_sp for i in range(Z)]
 
     # New SOP Instance UID
     ds.SOPInstanceUID = pydicom.uid.generate_uid()
@@ -302,12 +260,6 @@ def process_patient(
     if not relevant_plans:
         relevant_plans = modality_files['RTPLAN']  # fallback: copy all
 
-    # Get isocenter from the relevant plan
-    iso_patient = get_rtplan_isocenter(relevant_plans)
-    if iso_patient is None:
-        print(f'{prefix} no IsocenterPosition in RTPLAN — skipping')
-        return False
-
     out_dir = output_dir / patient_id
 
     # Build a lookup: model_name → source path
@@ -318,7 +270,7 @@ def process_patient(
     for model_name, sample_name in model_doses.items():
         source = source_map[model_name]
 
-        # Load GDPHMM vol (needed for isocenter + original shape)
+        # Load GDPHMM vol (needed for origin + original shape)
         vol = load_gdphmm_vol(gdphmm_dir, sample_name)
         if vol is None:
             print(f'{prefix} .npz not found for {model_name} — skipping dose')
@@ -344,15 +296,14 @@ def process_patient(
 
             dose_raw = np.load(str(npy_path))
             if dose_raw.ndim == 4:
-                dose_raw = dose_raw[0]  # drop channel dim → (H_pad, W_pad, D)
+                dose_raw = dose_raw[0]  # drop channel dim → (X_pad, Y_pad, Z)
 
             # Reverse padding
-            orig_h, orig_w = vol['img'].shape[:2]
-            dose_gy = reverse_padding(dose_raw, orig_h, orig_w, pad_size)
+            orig_x, orig_y = vol['img'].shape[:2]
+            dose_gy = reverse_padding(dose_raw, orig_x, orig_y, pad_size)
 
-        # Compute ImagePositionPatient from isocenter alignment
-        iso_voxel = vol['isocenter']
-        image_position = compute_image_position(iso_voxel, iso_patient, voxel_spacing)
+        # Use origin directly from NPZ — already in (x, y, z) patient mm
+        image_position = tuple(float(v) for v in vol['origin'])
 
         write_rtdose_dicom(
             template_ds, dose_gy, image_position, voxel_spacing,
