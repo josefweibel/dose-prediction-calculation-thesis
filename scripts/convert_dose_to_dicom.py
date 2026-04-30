@@ -315,6 +315,9 @@ def process_patient(
             orig_z, orig_y = vol['img'].shape[:2]
             dose_gy = reverse_padding(dose_raw, orig_z, orig_y, pad_size)
 
+            # Mask by body to zero out dose outside the patient
+            dose_gy = dose_gy * vol['Body']
+
         # Use origin and spacing directly from NPZ — both in (x, y, z) order
         image_position = tuple(float(v) for v in vol['origin'])
         voxel_spacing = tuple(float(v) for v in vol['spacing'])

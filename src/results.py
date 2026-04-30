@@ -68,9 +68,8 @@ METRIC_LABELS = {
   'disagreement/disagreement_all': 'OAR Constraint Disagreement',
   'agreement/agreement_all_percentage': 'OAR Constraint Agreement',
   'disagreement/disagreement_all_percentage': 'OAR Constraint Disagreement',
-  'gamma_3_3/pass_rate': 'Gamma Index 3%/3mm Pass Rate',
+  'gamma_3_3/pass_rate': 'Gamma Index Pass Rate',
   'gamma_2_2/pass_rate': 'Gamma Index 2%/2mm Pass Rate',
-  'gamma_3_3/pass_rate': 'Gamma Index 3%/3mm Pass Rate',
   'gamma_5_5/pass_rate': 'Gamma Index 5%/5mm Pass Rate',
   'dvh_auc/OAR/diff': 'OAR DVH Area Between Curves',
   'mean_dose/high/abs_diff': 'PTV Dose Distance',
@@ -99,7 +98,7 @@ METRIC_ABBRS = {
   'agreement/agreement_all_percentage': 'Agreement',
   'disagreement/disagreement_all_percentage': 'Disagreement',
   'gamma_5_5/pass_rate': 'Gamma\n5%/5mm',
-  'gamma_3_3/pass_rate': 'Gamma\n3%/3mm',
+  'gamma_3_3/pass_rate': 'Gamma\nIndex',
   'gamma_2_2/pass_rate': 'Gamma\n2%/2mm',
   'gamma_1_1/pass_rate': 'Gamma\n1%/1mm',
   'dvh_auc/OAR/diff': 'OAR DVH\nABC',
@@ -578,7 +577,7 @@ class BaseResults:
       ax.errorbar(center.index, center.values, yerr=[err_lo.values, err_hi.values], fmt='o-', capsize=3, label=label, alpha=0.7)
 
     dir_symbol = '↑' if is_higher_better(metric) else '↓'
-    index_label = 'relative slice index (0 = center)' if relative_to_center else 'slice index'
+    index_label = 'Relative Slice Index (0 = center)' if relative_to_center else 'Slice Index'
     agg_label = 'Mean ± SD' if agg == 'mean' else 'Median ± IQR'
     ax.set_title(f'{get_metric_abbr(metric, with_unit=False)} vs {index_label} \n{dir_symbol} is better')
     ax.set_xlabel(index_label)
@@ -600,7 +599,7 @@ class BaseResults:
       metric = metric.replace('vol_', '')  # Remove 'vol_' prefix for plotting
       self.plot_quality_over_slice_index_single(metric, ax=axes[i], relative_to_center=relative_to_center, agg=agg)
 
-    index_label = 'relative slice index (0 = center)' if relative_to_center else 'slice index'
+    index_label = 'Relative Slice Index (0 = center)' if relative_to_center else 'Slice Index'
     fig.suptitle(f'Quality vs {index_label}', fontsize=16)
     fig.tight_layout()
 
@@ -1410,57 +1409,68 @@ class ModelComparison(BaseResults):
 
     return ax
 
-  def plot_ptv_evaluation(self, ax=None):
+  def plot_ptv_evaluation(self, ax=None, metrics=None):
+    def plot_mean_dose(ax):
+      ax.plot([55, 75], [55, 75], color='0.8', linestyle='-', linewidth=0.8)
+      sns.scatterplot(self.volume_metrics, x=f'vol_mean_dose/high/target', y=f'vol_mean_dose/high/pred', hue='label', ax=ax, legend='full')
+      ax.set_title('PTV Mean Dose')
+      ax.set_xlabel('Target Mean Dose [Gy]')
+      ax.set_ylabel('Predicted Mean Dose [Gy]')
+      ax.xaxis.get_major_locator().set_params(integer=True)
+      ax.yaxis.get_major_locator().set_params(integer=True)
+
+    def plot_homogeneity_index(ax):
+      ax.fill_between([0, 0.4], [0, 0.4], 0.4, color='red', alpha=0.1)
+      ax.fill_between([0, 0.4], [0, 0.4], 0, color='green', alpha=0.1)
+      sns.scatterplot(self.volume_metrics, x=f'vol_homogeneity_index/high/target', y=f'vol_homogeneity_index/high/pred', hue='label', ax=ax, legend='full')
+      ax.set_title(f'Homogeneity Index')
+      ax.set_xlabel('Target Homogeneity Index')
+      ax.set_ylabel('Predicted Homogeneity Index')
+
+    def plot_paddick_conformity_index(ax):
+      ax.fill_between([0, 1], [0, 1], 1, color='green', alpha=0.1)
+      ax.fill_between([0, 1], [0, 1], 0, color='red', alpha=0.1)
+      sns.scatterplot(self.volume_metrics, x=f'vol_paddick_conformity_index/high/target', y=f'vol_paddick_conformity_index/high/pred', hue='label', ax=ax, legend='full')
+      ax.set_title(f'Paddick Conformity Index')
+      ax.set_xlabel('Target Conformity Index')
+      ax.set_ylabel('Predicted Conformity Index')
+
+    def plot_gradient_index(ax):
+      ax.fill_between([0, 100], [0, 100], 100, color='red', alpha=0.1)
+      ax.fill_between([0, 100], [0, 100], 0, color='green', alpha=0.1)
+      sns.scatterplot(self.volume_metrics, x=f'vol_gradient_index/high/target', y=f'vol_gradient_index/high/pred', hue='label', ax=ax, legend='full')
+      ax.set_title(f'Gradient Index')
+      ax.set_xlabel('Target Gradient Index')
+      ax.set_ylabel('Predicted Gradient Index')
+
+    plotters = {
+      'mean_dose': plot_mean_dose,
+      'homogeneity_index': plot_homogeneity_index,
+      'paddick_conformity_index': plot_paddick_conformity_index,
+      'gradient_index': plot_gradient_index,
+    }
+
+    if metrics is None:
+      metrics = list(plotters.keys())
+
+    fig = None
     if ax is None:
-      fig, axes = plt.subplots(1, 4, figsize=(15, 4))
+      fig, axes = plt.subplots(1, len(metrics), figsize=(15 * len(metrics) / 4, 4))
+      if len(metrics) == 1:
+        axes = [axes]
 
-    axes[0].plot([55, 75], [55, 75], color='0.8', linestyle='-', linewidth=0.8)
-    sns.scatterplot(self.volume_metrics, x=f'vol_mean_dose/high/target', y=f'vol_mean_dose/high/pred', style='label', hue='label', ax=axes[0], legend='full')
-    #axes[0].set_title(r'Mean Dose $\tilde{x} = ' + str(self.volume_metrics['vol_mean_dose/high/abs_diff'].median().round(2)) + '$')
-    axes[0].set_title('PTV Mean Dose')
-    axes[0].set_xlabel('Target Mean Dose [Gy]')
-    axes[0].set_ylabel('Predicted Mean Dose [Gy]')
-    # axes[0].set_xlim(55, 75)
-    # axes[0].set_ylim(55, 75)
-    axes[0].set_aspect('equal')
-    axes[0].xaxis.get_major_locator().set_params(integer=True)
-    axes[0].yaxis.get_major_locator().set_params(integer=True)
-
-    axes[1].fill_between([0, 0.4], [0, 0.4], 0.4, color='red', alpha=0.1)
-    axes[1].fill_between([0, 0.4], [0, 0.4], 0, color='green', alpha=0.1)
-    sns.scatterplot(self.volume_metrics, x=f'vol_homogeneity_index/high/target', y=f'vol_homogeneity_index/high/pred', style='label', hue='label', ax=axes[1])
-    axes[1].set_title(f'Homogeneity Index')
-    axes[1].set_xlabel('Target Homogeneity Index')
-    axes[1].set_ylabel('Predicted Homogeneity Index')
-    # axes[1].set_xlim(0, 0.40)
-    # axes[1].set_ylim(0, 0.40)
-
-    axes[2].fill_between([0, 1], [0, 1], 1, color='green', alpha=0.1)
-    axes[2].fill_between([0, 1], [0, 1], 0, color='red', alpha=0.1)
-    sns.scatterplot(self.volume_metrics, x=f'vol_paddick_conformity_index/high/target', y=f'vol_paddick_conformity_index/high/pred', style='label', hue='label', ax=axes[2])
-    axes[2].set_title(f'Paddick Conformity Index')
-    axes[2].set_xlabel('Target Conformity Index')
-    axes[2].set_ylabel('Predicted Conformity Index')
-    # axes[2].set_xlim(0, 1.0)
-    # axes[2].set_ylim(0, 1.0)
-
-    axes[3].fill_between([0, 100], [0, 100], 100, color='red', alpha=0.1)
-    axes[3].fill_between([0, 100], [0, 100], 0, color='green', alpha=0.1)
-    sns.scatterplot(self.volume_metrics, x=f'vol_gradient_index/high/target', y=f'vol_gradient_index/high/pred', style='label', hue='label', ax=axes[3])
-    axes[3].set_title(f'Gradient Index')
-    axes[3].set_xlabel('Target Gradient Index')
-    axes[3].set_ylabel('Predicted Gradient Index')
-    # axes[3].set_xlim(0, 93)
-    # axes[3].set_ylim(0, 93)
+    for a, metric in zip(axes, metrics):
+      plotters[metric](a)
 
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', title='', ncol=8, bbox_to_anchor=(0.5, -0.1))
+    if fig is not None:
+      fig.legend(handles, labels, loc='lower center', title='', ncol=8, bbox_to_anchor=(0.5, -0.1))
 
-    for ax in axes:
-      ax.grid(True, color='lightgray', linestyle='--', linewidth=0.5)
-      ax.set_aspect('equal')
-      ax.get_legend().remove()
-      ax.set_facecolor('white')
+    for a in axes:
+      a.grid(True, color='lightgray', linestyle='--', linewidth=0.5)
+      a.set_aspect('equal')
+      a.get_legend().remove()
+      a.set_facecolor('white')
 
     if fig is not None:
       fig.suptitle('PTV Evaluation')
@@ -1751,7 +1761,7 @@ class ModelComparison(BaseResults):
       ax_bot.set_xticks(ticks)
       ax_bot.xaxis.set_major_locator(plt.FixedLocator(ticks))
       ax_bot.xaxis.set_major_formatter(plt.ScalarFormatter())
-      ax_bot.set_xlabel('# sampling steps $S$')
+      ax_bot.set_xlabel('# Sampling Steps $S$')
 
       if col > 0:
         ax_top.set_ylabel('')
@@ -1822,7 +1832,7 @@ class ModelComparison(BaseResults):
 
     dir_symbol = '↑' if is_higher_better(metric) else '↓'
     ax.set_title(get_metric_label(metric))
-    ax.text(0.1, -0.17, f'{dir_symbol} is better', transform=ax.transAxes,
+    ax.text(0.1, -0.155, f'{dir_symbol} is better', transform=ax.transAxes,
             ha='right', va='bottom', fontsize='medium', color='gray')
     ax.set_xlabel('Sampling $S$')
     ax.set_xscale(xscale)
@@ -2384,8 +2394,8 @@ class ModelComparison(BaseResults):
     # Column titles (top row only)
     axes[0, 0].set_title('Structures')
     axes[0, 1].set_title('Ground Truth')
-    axes[0, 2].set_title('Best Prediction')
-    axes[0, 3].set_title('Worst Prediction')
+    axes[0, 2].set_title('Best Generation')
+    axes[0, 3].set_title('Worst Generation')
     axes[0, 4].set_title(f'Std Dev (n={n_preds})')
     axes[0, 5].set_title(f'RMSE (n={n_preds})')
 
@@ -2491,7 +2501,7 @@ class ModelComparison(BaseResults):
     ax.set_xticklabels(ranks)
     ax.set_yticks(np.arange(n_models) + (0.5 if not self.has_groups else 0))
     ax.set_yticklabels(sorted_labels)
-    ax.set_xlabel('ranks')
+    ax.set_xlabel('Ranks')
     ax.set_ylabel('')
     ax.grid(False)
     ax.set_title(f'Rank Frequencies')
