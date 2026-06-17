@@ -1,9 +1,10 @@
+import math
 import torch
 from torchmetrics import Metric
 import numpy as np
 from typing import Dict, Optional
 
-from data import GDPHMM_DOSE_MAX
+from data import GDPHMM_DOSE_MAX, GDPHMM_OAR_V3
 from constraints import (
     ConstraintEvaluator, ConstraintLibrary,
     FractionationType, ConstraintGrade,
@@ -13,6 +14,7 @@ from constraints import (
 __all__ = [
   'DoseScore',
   'DVHScore',
+  'OpenKBPDVHScore',
   'DVHAUC',
   'DoseLevelMetricBase',
   'HomogeneityIndex',
@@ -92,6 +94,135 @@ class DVHScore(Metric):
       self.count += 1
 
   def compute(self):
+    return self.total / self.count
+
+
+class OpenKBPDVHScore(Metric):
+  """
+  OpenKBP-style DVH (Dose-Volume Histogram) Score.
+
+  For each patient, computes the mean absolute error between predicted and
+  reference DVH metrics over all available (structure, metric) pairs:
+    - For each PTV level present (high, mid, low):
+        D_1, D_95, D_99 - dose received by 1%, 95%, 99% of the structure's volume.
+        Uses cumulative masks (a lower level includes the contours of higher levels).
+    - For each OAR present:
+        D_0.1cc - dose to the hottest 0.1 cm^3 of the structure.
+        D_mean  - mean dose over the structure.
+
+  The final value is the mean of patient scores across all evaluated samples.
+
+  Args:
+    oar_names: List of OAR names to evaluate. Default: GDPHMM_OAR_V3.
+    voxel_spacing: Physical voxel spacing in mm (x, y, z), used to convert
+                   D_0.1cc into a voxel count. Default: (2.5, 2.5, 2.0).
+  """
+
+  PTV_LEVELS = ['high', 'mid', 'low']
+  # Volume fractions (top-X of volume) for PTV DVH metrics: D_1, D_95, D_99.
+  PTV_VOLUME_FRACTIONS = [0.01, 0.95, 0.99]
+  # OAR target volume (in cm^3) for the near-maximum dose metric.
+  OAR_NEAR_MAX_VOLUME_CC = 0.1
+
+  def __init__(
+    self,
+    oar_names: Optional[list] = None,
+    voxel_spacing: tuple = (2.5, 2.5, 2.0),
+    *args, **kwargs
+  ):
+    super().__init__(*args, **kwargs)
+    self.oar_names = list(oar_names) if oar_names is not None else list(GDPHMM_OAR_V3)
+    self.voxel_volume_cc = float(np.prod(voxel_spacing)) / 1000.0
+    self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
+    self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+  @staticmethod
+  def _dose_at_volume_fraction(doses: torch.Tensor, fraction: float) -> torch.Tensor:
+    """Dose D such that `fraction` of the voxels in `doses` receive at least D."""
+    n = doses.numel()
+    k = max(1, min(n, int(math.ceil(n * fraction))))
+    # k-th largest value = (n - k + 1)-th smallest
+    return torch.kthvalue(doses, n - k + 1).values
+
+  def _dose_at_volume_cc(self, doses: torch.Tensor, volume_cc: float) -> torch.Tensor:
+    """Dose D such that `volume_cc` cm^3 of the structure receives at least D."""
+    n = doses.numel()
+    k = max(1, int(math.ceil(volume_cc / self.voxel_volume_cc)))
+    # If the structure is smaller than the requested volume, fall back to its minimum.
+    k = min(k, n)
+    return torch.kthvalue(doses, n - k + 1).values
+
+  def _ptv_errors(self, pred: torch.Tensor, target: torch.Tensor,
+                  mask: torch.Tensor) -> list:
+    pred_voxels = pred[mask]
+    target_voxels = target[mask]
+    errors = []
+    for fraction in self.PTV_VOLUME_FRACTIONS:
+      p = self._dose_at_volume_fraction(pred_voxels, fraction)
+      t = self._dose_at_volume_fraction(target_voxels, fraction)
+      errors.append(torch.abs(p - t))
+    return errors
+
+  def _oar_errors(self, pred: torch.Tensor, target: torch.Tensor,
+                  mask: torch.Tensor) -> list:
+    pred_voxels = pred[mask]
+    target_voxels = target[mask]
+    d_01cc_p = self._dose_at_volume_cc(pred_voxels, self.OAR_NEAR_MAX_VOLUME_CC)
+    d_01cc_t = self._dose_at_volume_cc(target_voxels, self.OAR_NEAR_MAX_VOLUME_CC)
+    d_mean_p = pred_voxels.mean()
+    d_mean_t = target_voxels.mean()
+    return [torch.abs(d_01cc_p - d_01cc_t), torch.abs(d_mean_p - d_mean_t)]
+
+  def update(self, preds: torch.Tensor, target: torch.Tensor,
+             ptv_doses: torch.Tensor, organ_masks: Dict[str, torch.Tensor]):
+    """
+    Args:
+      preds: Predicted doses in Gy, shape (B, 1, H, W) or (B, 1, H, W, D).
+      target: Reference doses in Gy, shape (B, 1, H, W) or (B, 1, H, W, D).
+      ptv_doses: PTV channels, shape (B, 3, H, W) or (B, 3, H, W, D).
+                 Channel order: 0=high, 1=mid, 2=low. Non-zero indicates the
+                 PTV's physical contour for that prescription level.
+      organ_masks: Dict mapping OAR name to its binary mask, each shape
+                   (B, H, W) or (B, H, W, D).
+    """
+    batch_size = preds.shape[0]
+
+    for i in range(batch_size):
+      pred = preds[i, 0] if preds.dim() > 3 else preds[i]
+      tgt = target[i, 0] if target.dim() > 3 else target[i]
+      sample_ptv = ptv_doses[i]
+
+      patient_errors = []
+
+      # PTVs - cumulative masks (level includes all higher levels' contours).
+      cumulative = torch.zeros_like(sample_ptv[0], dtype=torch.bool)
+      for level_idx in range(sample_ptv.shape[0]):
+        level_mask = sample_ptv[level_idx] > 0
+        cumulative = cumulative | level_mask
+        if level_mask.sum() == 0:
+          # This PTV level doesn't exist for this patient - skip.
+          continue
+        patient_errors.extend(self._ptv_errors(pred, tgt, cumulative))
+
+      # OARs - D_0.1cc and D_mean.
+      for oar_name in self.oar_names:
+        if oar_name not in organ_masks:
+          continue
+        oar_mask = organ_masks[oar_name][i].to(torch.bool)
+        if oar_mask.sum() == 0:
+          continue
+        patient_errors.extend(self._oar_errors(pred, tgt, oar_mask))
+
+      if len(patient_errors) == 0:
+        continue
+
+      patient_score = torch.stack(patient_errors).mean()
+      self.total = self.total + patient_score
+      self.count = self.count + 1
+
+  def compute(self):
+    if self.count == 0:
+      return torch.tensor(float('nan'))
     return self.total / self.count
 
 

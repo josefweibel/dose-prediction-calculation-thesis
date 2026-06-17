@@ -13,6 +13,7 @@ from fnmatch import fnmatch
 
 from metrics import (
 	DVHScore,
+  OpenKBPDVHScore,
   DVHAUC,
   DoseScore,
   DoseLevelMetricBase,
@@ -68,6 +69,13 @@ def compute_metrics(metrics, preds, target, structure, dataset):
         oar_index = dataset.selector.get_oar_index(oar_name)
         organ_masks[oar_name] = structure[:, oar_index]  # (batch_size, H, W) or (batch_size, H, W, D)
       metric.update(preds, target, organ_masks)
+    elif isinstance(metric, OpenKBPDVHScore):
+      ptv_doses = dataset.selector.get_component(structure, 'ptv_doses')
+      organ_masks = {}
+      for oar_name in GDPHMM_OAR_V3:
+        oar_index = dataset.selector.get_oar_index(oar_name)
+        organ_masks[oar_name] = structure[:, oar_index]
+      metric.update(preds, target, ptv_doses, organ_masks)
     elif isinstance(metric, DoseLevelMetricBase):
       ptv_doses = dataset.selector.get_component(structure, 'ptv_doses')
       metric.update(preds, target, ptv_doses)
@@ -124,6 +132,7 @@ def build_slice_metrics(dataset, device, include_region_metrics=True, metric_nam
     'ssim': StructuralSimilarityIndexMeasure(data_range=dose_range, sync_on_compute=False),
     'ms_ssim': MultiScaleStructuralSimilarityIndexMeasure(**ms_ssim_kwargs, sync_on_compute=False),
     'dvh': DVHScore(sync_on_compute=False),
+    'dvh_openkbp': OpenKBPDVHScore(sync_on_compute=False),
     'dvh_auc': DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False),
     'dose_score': DoseScore(sync_on_compute=False),
     'homogeneity_index': HomogeneityIndex(compute_all_levels=True, sync_on_compute=False),
@@ -244,6 +253,7 @@ def build_volume_metrics(dataset, device, include_region_metrics=True):
     'vol_mse': MeanSquaredError(sync_on_compute=False),
     'vol_rmse': MeanSquaredError(squared=False, sync_on_compute=False),
     'vol_dvh': DVHScore(sync_on_compute=False),
+    'vol_dvh_openkbp': OpenKBPDVHScore(sync_on_compute=False),
     'vol_dvh_auc': DVHAUC(num_bins=100, normalize=True, dose_range=dose_min_max, sync_on_compute=False),
     'vol_dose_score': DoseScore(sync_on_compute=False),
     'vol_homogeneity_index': HomogeneityIndex(compute_all_levels=True, sync_on_compute=False),
