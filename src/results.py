@@ -1185,9 +1185,12 @@ class ModelComparison(BaseResults):
       'or access individual results via results_list[i].for_sample(sample)'
     )
 
-  def plot_metric_distribution(self, metric, ax=None, sort=False, outliers=True, skip_colors=0, colors=None, show_is_better=True):
+  def plot_metric_distribution(self, metric, ax=None, sort=False, outliers=True, skip_colors=0, colors=None, show_is_better=True, highlight=None, muted_alpha=0.5):
     if ax is None:
       fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+    if isinstance(highlight, str):
+      highlight = [highlight]
 
     data = []
     labels = []
@@ -1247,6 +1250,20 @@ class ModelComparison(BaseResults):
       ax.plot(np.full(len(below_y), vmin), below_y, marker="<", linestyle="none", color="black")
       ax.set_ylim(ylim)
 
+    if highlight is not None:
+      from matplotlib.patches import PathPatch
+      model_order = order if order is not None else df['model'].unique().tolist()
+      box_patches = sorted(
+        [p for p in ax.patches if isinstance(p, PathPatch)],
+        key=lambda p: (p.get_path().get_extents().y0 + p.get_path().get_extents().y1) / 2,
+      )
+      for i, patch in enumerate(box_patches):
+        if i < len(model_order) and model_order[i] not in highlight:
+          patch.set_alpha(muted_alpha)
+      for tick, label_text in zip(ax.get_yticklabels(), model_order):
+        if label_text not in highlight:
+          tick.set_alpha(muted_alpha)
+
     dir_symbol = '→' if is_higher_better(metric) else '←'
     ax.set_title(get_metric_label(metric))
     ax.set_xlabel(get_metric_abbr(metric))
@@ -1263,7 +1280,7 @@ class ModelComparison(BaseResults):
 
     return ax
 
-  def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True, skip_colors=0, colors=None):
+  def plot_metric_distributions(self, metrics=METRICS_DEFAULT, sort=False, outliers=True, skip_colors=0, colors=None, highlight=None):
     if outliers == True:
       outliers = metrics
     elif outliers == False:
@@ -1272,7 +1289,7 @@ class ModelComparison(BaseResults):
     fig, axes = setup_fig_axes(metrics, sharey=False)
 
     for i, metric in enumerate(metrics):
-      self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=metric in outliers, skip_colors=skip_colors, colors=colors)
+      self.plot_metric_distribution(metric, ax=axes[i], sort=sort, outliers=metric in outliers, skip_colors=skip_colors, colors=colors, highlight=highlight)
 
     fig.suptitle('Metric Distributions Across Models', fontsize=16)
     fig.tight_layout()
