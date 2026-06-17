@@ -28,6 +28,8 @@ conditioning:
     - ptv_doses
     - ptv_sdm
     - oar_v3_sdm
+    - beam_plate
+    - angle_plate
 
 mixed_precision: true
 num_workers: 4

@@ -1,0 +1,66 @@
+sampler: flow
+T: 2
+
+data_cache_size: inf
+num_workers: 4
+prefetch_factor: 4
+prefetch_on_gpu: false
+
+seed: 1
+batch_size_per_gpu: 42
+precision: 'bf16_amp'
+
+cache:
+  warmup_steps: 0
+  layers:
+    - head_struct
+    - enc2_struct
+    - enc3_struct
+    - enc4_struct
+    - enc5_struct
+    - down2_struct
+    - down3_struct
+    - down4_struct
+    - down5_struct
+    - head_beam
+    - enc2_beam
+    - enc3_beam
+    - enc4_beam
+    - enc5_beam
+    - down2_beam
+    - down3_beam
+    - down4_beam
+    - down5_beam
+    - enc2
+    - enc3
+    - enc4
+    - enc5
+    - dec5
+    - dec4
+    - dec3
+  intervals:
+    head_struct: inf
+    enc2_struct: 5
+    enc3_struct: 20
+    enc4_struct: 200
+    enc5_struct: inf
+    down2_struct: 5
+    down3_struct: 20
+    down4_struct: 200
+    down5_struct: inf
+    head_beam: inf
+    enc2_beam: 5
+    enc3_beam: 20
+    enc4_beam: 200
+    enc5_beam: inf
+    down2_beam: 5
+    down3_beam: 20
+    down4_beam: 200
+    down5_beam: inf
+    enc2: 5
+    enc3: 20
+    enc4: 200
+    enc5: inf
+    dec5: inf
+    dec4: 200
+    dec3: 20
