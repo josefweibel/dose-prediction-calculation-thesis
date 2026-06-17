@@ -54,7 +54,7 @@ if __name__ == '__main__':
       rank=rank,
       world_size=world_size,
       device_id=0,
-      timeout=timedelta(minutes=30),
+      timeout=timedelta(minutes=180),
     )
 
     dist.barrier()

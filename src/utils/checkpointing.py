@@ -9,7 +9,7 @@ def load_last_checkpoint(model_name):
   if not checkpoint_files:
     return None
 
-  return torch.load(max(checkpoint_files, key=lambda f: int(f.stem)), map_location=torch.device('mps'))
+  return torch.load(max(checkpoint_files, key=lambda f: int(f.stem)))
 
 def find_checkpoint(model_name, epoch):
   """Find the path to a checkpoint file for a specific epoch."""
@@ -19,7 +19,7 @@ def find_checkpoint(model_name, epoch):
   return checkpoint_path
 
 def load_checkpoint(model_name, epoch):
-  return torch.load(find_checkpoint(model_name, epoch), map_location=torch.device('mps'))
+  return torch.load(find_checkpoint(model_name, epoch))
 
 def save_checkpoint(model_name, checkpoint_data):
   (CHECKPOINTS_PATH / model_name).mkdir(parents=True, exist_ok=True)
