@@ -8,6 +8,21 @@ COPY_TO_TMPDIR=false
 HOME_PATH=/storage/homefs/jw19s096
 DATASET=gdphmm-hn-vmat
 
+# Partition to use when running CPU-only (pass --cpu); adjust if your cluster differs
+CPU_PARTITION=epyc2
+
+# Pull out the optional --cpu flag, leaving the positional/extra args intact
+CPU_ONLY=false
+ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "--cpu" ]; then
+    CPU_ONLY=true
+  else
+    ARGS+=("$arg")
+  fi
+done
+set -- "${ARGS[@]}"
+
 MODEL_NAME=$1
 SAMPLING_NAME=$2
 DATA_SPLIT=$3
@@ -30,9 +45,65 @@ echo "Extra arguments: ${EXTRA_ARGS}"
 mkdir -p "${HOME_PATH}/images"
 if [ ! -f "${HOME_PATH}/images/dose-prediction-thesis.sif" ]; then
   echo "[$(date +"%Y-%m-%dT%H:%M:%S")] pulling image dose-prediction-thesis started"
-  srun --job-name="image" --mem 64G singularity pull --name "${HOME_PATH}/images/dose-prediction-thesis.sif" docker://ghcr.io/josefweibel/dose-prediction-thesis:latest
+  srun --job-name="image" -p epyc2 -q job_gratis --account=gratis --ntasks=1 --nodes=1 singularity pull --name "${HOME_PATH}/images/dose-prediction-thesis.sif" docker://ghcr.io/josefweibel/dose-prediction-thesis:latest
   echo "[$(date +"%Y-%m-%dT%H:%M:%S")] image dose-prediction-thesis pulled"
 fi
+
+if [ "$CPU_ONLY" = "true" ]; then
+
+sbatch <<EOF
+#!/bin/bash
+#SBATCH -q job_gratis
+#SBATCH --account=gratis
+#SBATCH -p ${CPU_PARTITION}
+#SBATCH --time 8:00:00
+#SBATCH --mem-per-cpu=3G
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --out=${HOME_PATH}/logs/${MODEL_NAME}-metrics-%j.log
+#SBATCH --job-name=${MODEL_NAME}-metrics-cpu
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=joseph.weibel@students.unibe.ch
+
+echo "SLURM_JOB_ID=\$SLURM_JOB_ID"
+echo "TMPDIR=\$TMPDIR"
+echo "HOSTNAME=\$HOSTNAME"
+echo
+
+SCRATCH_BASE_DIR="\${TMPDIR:-/scratch/local/\${SLURM_JOB_ID}}"
+
+if [ "${COPY_TO_TMPDIR}" = "true" ]; then
+  echo "copy from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} to \${SCRATCH_BASE_DIR}/data/${DATASET}"
+
+  function clean_up {
+    rm -rf "\${SCRATCH_BASE_DIR:?}"/*
+    echo "Cleaned up \${SCRATCH_BASE_DIR} on \$(hostname)"
+  }
+  trap clean_up EXIT
+
+  rm -rf "\${SCRATCH_BASE_DIR:?}"/*
+  mkdir -p "\${SCRATCH_BASE_DIR}/data"
+  cp -Lr ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET} "\${SCRATCH_BASE_DIR}/data/"
+  DATASET_BIND="\${SCRATCH_BASE_DIR}/data/${DATASET}:/work/data/${DATASET}"
+else
+  echo "using dataset directly from ${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET}"
+  DATASET_BIND="${HOME_PATH}/dev/dose-prediction-thesis/data/${DATASET}:/work/data/${DATASET}"
+fi
+
+# singularity exec (CPU-only: no --nv, single non-distributed process)
+singularity exec \
+  --bind "${HOME_PATH}/dev/dose-prediction-thesis:/work" \
+  --bind "\${DATASET_BIND}" \
+  --bind "/storage/scratch/users/jw19s096:/storage/scratch/users/jw19s096" \
+  --pwd /work \
+  ${HOME_PATH}/images/dose-prediction-thesis.sif \
+  bash -c "PYTHONPATH=/work/src python scripts/recalculate_metrics.py --model ${MODEL_NAME} --sampling ${SAMPLING_NAME} --data-split ${DATA_SPLIT} --epoch ${EPOCH} ${EXTRA_ARGS}"
+
+echo "job ${MODEL_NAME} ${SAMPLING_NAME} completed"
+
+EOF
+
+else
 
 sbatch <<EOF
 #!/bin/bash
@@ -126,3 +197,5 @@ echo "job ${MODEL_NAME} ${SAMPLING_NAME} completed"
 
 
 EOF
+
+fi
